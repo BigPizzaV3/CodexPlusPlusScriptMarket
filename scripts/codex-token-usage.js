@@ -86,6 +86,16 @@
     }
     if (typeof value !== "object") return null;
 
+    const totalTokenUsage = value.totalTokenUsage || value.total_token_usage;
+    if (totalTokenUsage) {
+      const totalUsage = normalizeUsage({
+        ...totalTokenUsage,
+        modelContextWindow: value.modelContextWindow ?? value.model_context_window,
+        contextWindow: value.contextWindow ?? value.context_window,
+      });
+      if (totalUsage) return totalUsage;
+    }
+
     const tokenStatus = value.last || value.lastUsage || value.lastTokenUsage || value.last_token_usage;
     if (tokenStatus && (value.modelContextWindow || value.model_context_window || value.contextWindow || value.context_window)) {
       const statusUsage = normalizeUsage({
@@ -201,7 +211,7 @@
       const contextPercent = usage.contextLimit ? ` (${((contextUsed / usage.contextLimit) * 100).toFixed(1)}%)` : "";
       parts.push(`上下文 ${formatNumber(contextUsed)}/${formatNumber(usage.contextLimit)}${contextPercent}`);
     }
-    if (metric?.callCount > 1) parts.push(`调用 ${formatNumber(metric.callCount)} 次`);
+    if (metric?.callCount >= 1) parts.push(`调用 ${formatNumber(metric.callCount)} 次`);
     parts.push(`耗时 ${Number.isFinite(metric?.elapsedMs) && metric.elapsedMs > 0 ? formatSeconds(metric.elapsedMs) : "-"}`);
     return parts.join(" · ");
   }

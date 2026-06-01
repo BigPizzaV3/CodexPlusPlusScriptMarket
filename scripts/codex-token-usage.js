@@ -16,6 +16,8 @@
     lastMetric: null,
     lastMetricKey: "",
     recent: [],
+    byConversation: Object.create(null),
+    activeConversationId: "",
     currentTurn: null,
     turnSeq: 0,
     turnStartedAt: 0,
@@ -186,6 +188,7 @@
   }
 
   function formatBadgeText(metric) {
+    if (metric?.status === "running") return "运行中 · 正在统计本次回复 token...";
     const usage = metric?.usage || {};
     const parts = [`总计 ${formatNumber(usage.totalTokens)}`];
     if (usageHasBreakdown(usage)) {
@@ -238,6 +241,79 @@
     return String(input || "");
   }
 
+  function normalizeConversationId(value) {
+    const text = String(value || "").trim();
+    if (!text || text === "__proto__" || text === "prototype" || text === "constructor") return "";
+    return /^[A-Za-z0-9_.:-]{3,180}$/.test(text) ? text : "";
+  }
+
+  function conversationIdFromLocation() {
+    const locationText = `${window.location?.pathname || ""}${window.location?.search || ""}${window.location?.hash || ""}`;
+    const match = locationText.match(/(?:session|conversation|thread)(?:\/|=|:|-)([A-Za-z0-9_.:-]+)/i)
+      || locationText.match(/\/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:[/?#]|$)/)
+      || locationText.match(/\/([A-Za-z0-9_-]{12,})(?:[/?#]|$)/);
+    return normalizeConversationId(match?.[1]);
+  }
+
+  function conversationIdFromActiveRow() {
+    try {
+      const row = document.querySelector?.(
+        "[data-app-action-sidebar-thread-active='true'],[aria-current='page'],[aria-current='true']",
+      );
+      const id = row?.getAttribute?.("data-app-action-sidebar-thread-id")
+        || row?.getAttribute?.("data-session-id")
+        || row?.getAttribute?.("data-testid");
+      return normalizeConversationId(id);
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function currentConversationId() {
+    const live = conversationIdFromActiveRow() || conversationIdFromLocation();
+    return live || state.activeConversationId;
+  }
+
+  function scopedMetric(metric) {
+    const conversationId = normalizeConversationId(metric?.conversationId) || currentConversationId();
+    return conversationId ? { ...metric, conversationId } : metric;
+  }
+
+  function conversationMatchesActive(metric) {
+    const active = currentConversationId();
+    const metricConversationId = normalizeConversationId(metric?.conversationId);
+    return active ? metricConversationId === active : true;
+  }
+
+  function metricForActiveConversation() {
+    const active = currentConversationId();
+    if (state.currentTurn && !state.currentTurn.calls.length && state.currentTurn.status === "running") {
+      if (!active || !state.currentTurn.conversationId || active === state.currentTurn.conversationId) {
+        return {
+          status: "running",
+          conversationId: state.currentTurn.conversationId || active,
+          startedAt: state.currentTurn.startedAt,
+          elapsedMs: elapsedSinceTurnStarted(),
+          source: "turn-running",
+        };
+      }
+    }
+    if (active && state.byConversation[active]) return state.byConversation[active];
+    return conversationMatchesActive(state.lastMetric) ? state.lastMetric : null;
+  }
+
+  function setActiveConversationId(conversationId) {
+    const next = normalizeConversationId(conversationId);
+    const previous = state.activeConversationId;
+    if (previous === next) return;
+    state.activeConversationId = next;
+    if (state.currentTurn && state.currentTurn.conversationId && state.currentTurn.conversationId !== next) {
+      state.currentTurn = null;
+      state.turnStartedAt = 0;
+    }
+    scheduleRender();
+  }
+
   function metricKey(metric) {
     const usage = metric?.usage || {};
     return [
@@ -278,8 +354,9 @@
       calls: [],
       callKeys: new Set(),
       contextUsage: null,
-      conversationId: "",
+      conversationId: currentConversationId(),
       elapsedMs: 0,
+      status: "running",
     };
   }
 
@@ -302,6 +379,12 @@
 
   function markTurnStarted(started = nowMs()) {
     beginTurn(started);
+    scheduleRender();
+  }
+
+  function markNetworkTurnStarted(started = nowMs()) {
+    const turn = ensureTurnStarted(started);
+    if (!turn.calls.length) scheduleRender();
   }
 
   function elapsedSinceTurnStarted() {
@@ -347,7 +430,7 @@
   }
 
   function findMergeCandidate(metric) {
-    const matches = [...state.recent, ...readStoredDetails()].filter((item) => sameUsage(metric, item));
+    const matches = [...state.recent, ...readStoredDetails()].filter((item) => conversationMatchesActive(item) && sameUsage(metric, item));
     return matches.find((item) => usageHasBreakdown(item.usage)) || matches[0] || null;
   }
 
@@ -407,6 +490,7 @@
   }
 
   function publishMetric(metric, storeDetails = true) {
+    metric = scopedMetric(metric);
     const nextKey = metricKey(metric);
     if (nextKey && nextKey === state.lastMetricKey) {
       scheduleRender();
@@ -418,6 +502,7 @@
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       createdAt: new Date().toISOString(),
     };
+    if (state.lastMetric.conversationId) state.byConversation[state.lastMetric.conversationId] = state.lastMetric;
     state.recent.unshift(state.lastMetric);
     state.recent = state.recent.slice(0, RECENT_LIMIT);
     window.__codexTokenUsage = {
@@ -438,6 +523,7 @@
   }
 
   function rememberContextMetric(metric) {
+    metric = scopedMetric(metric);
     if (state.currentTurn?.calls.length) {
       state.currentTurn.contextUsage = metric.usage;
       state.currentTurn.conversationId = metric.conversationId || state.currentTurn.conversationId;
@@ -454,7 +540,12 @@
   }
 
   function rememberUsageMetric(metric) {
+    metric = scopedMetric(metric);
     const turn = ensureTurnStarted();
+    if (metric.conversationId && turn.conversationId && metric.conversationId !== turn.conversationId) {
+      beginTurn();
+      return rememberUsageMetric(metric);
+    }
     const key = usageCallKey(metric);
     const existing = turn.calls.find((call) => call.__usageCallKey === key);
     if (existing) {
@@ -469,6 +560,7 @@
       turn.callKeys.add(key);
     }
     turn.conversationId = metric.conversationId || turn.conversationId;
+    turn.status = "complete";
     turn.elapsedMs = Math.max(turn.elapsedMs || 0, metric.elapsedMs || elapsedSinceTurnStarted());
     turn.lastUpdatedAt = nowMs();
     publishMetric(aggregateTurnMetric(turn));
@@ -508,7 +600,7 @@
     function wrappedFetch(input, init) {
       const url = requestUrl(input);
       const started = nowMs();
-      if (isCodexApiUrl(url)) ensureTurnStarted(started);
+      if (isCodexApiUrl(url)) markNetworkTurnStarted(started);
       return originalFetch(input, init).then((response) => {
         if (isCodexApiUrl(url) && response?.clone) {
           response
@@ -535,7 +627,7 @@
     };
     Xhr.prototype.send = function send(...args) {
       const started = nowMs();
-      if (isCodexApiUrl(this.__codexTokenUsageUrl)) ensureTurnStarted(started);
+      if (isCodexApiUrl(this.__codexTokenUsageUrl)) markNetworkTurnStarted(started);
       this.addEventListener?.("loadend", () => {
         const url = this.__codexTokenUsageUrl;
         if (!isCodexApiUrl(url)) return;
@@ -682,25 +774,6 @@
     }
   }
 
-  function installTurnActivityObserver() {
-    if (window.__codexTokenUsageActivityObserver) return;
-    const markFromEvent = (event) => {
-      const target = event.target;
-      const text = `${target?.tagName || ""} ${target?.ariaLabel || ""} ${target?.textContent || ""}`;
-      if (
-        event.type === "submit" ||
-        (event.type === "keydown" && event.key === "Enter" && !event.shiftKey) ||
-        /send|submit|发送|提交/i.test(text)
-      ) {
-        markTurnStarted();
-      }
-    };
-    ["click", "submit", "keydown"].forEach((type) => {
-      document.addEventListener?.(type, markFromEvent, true);
-    });
-    window.__codexTokenUsageActivityObserver = true;
-  }
-
   function ensureStyle() {
     let style = document.getElementById?.(STYLE_ID);
     if (!style) {
@@ -714,13 +787,18 @@
         align-items: center;
         gap: 6px;
         margin: 8px 0 0;
-        padding: 4px 8px;
-        border: 1px solid rgba(99, 102, 241, .26);
+        padding: 5px 9px;
+        border: 1px solid rgba(20, 184, 166, .3);
         border-radius: 7px;
-        background: rgba(99, 102, 241, .08);
+        background: rgba(20, 184, 166, .08);
         color: inherit;
         font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        opacity: .86;
+        opacity: .9;
+        letter-spacing: 0;
+      }
+      .${BADGE_CLASS}[data-status="running"] {
+        border-color: rgba(245, 158, 11, .36);
+        background: rgba(245, 158, 11, .1);
       }
       .${BADGE_CLASS}[data-placement="message-actions"] {
         display: flex;
@@ -837,7 +915,19 @@
     return 0;
   }
 
-  function renderMetric(metric = state.lastMetric) {
+  function removeBadges() {
+    document.querySelectorAll?.(`.${BADGE_CLASS}`).forEach((node) => node.remove());
+  }
+
+  function renderMetric(metric = metricForActiveConversation()) {
+    if (!metric) {
+      removeBadges();
+      return;
+    }
+    if (!conversationMatchesActive(metric)) {
+      removeBadges();
+      return;
+    }
     if (!metric) return;
     ensureStyle();
     const target = latestAssistantNode();
@@ -854,6 +944,8 @@
       target.appendChild(badge);
     }
     badge.dataset.metricId = displayMetric.id || "";
+    badge.dataset.status = displayMetric.status || "complete";
+    badge.dataset.conversationId = displayMetric.conversationId || "";
     badge.dataset.placement = target === document.querySelector("main") ? "fallback" : "message-actions";
     badge.textContent = formatBadgeText(displayMetric);
     document.querySelectorAll(`.${BADGE_CLASS}`).forEach((node) => {
@@ -869,7 +961,9 @@
   function installDomObserver() {
     if (!window.MutationObserver || window.__codexTokenUsageDomObserver) return;
     window.__codexTokenUsageDomObserver = new MutationObserver(() => {
-      if (state.lastMetric) scheduleRender();
+      const nextConversationId = conversationIdFromActiveRow() || conversationIdFromLocation();
+      if (nextConversationId && nextConversationId !== state.activeConversationId) setActiveConversationId(nextConversationId);
+      if (metricForActiveConversation()) scheduleRender();
     });
     const start = () => {
       const root = document.querySelector("main") || document.body || document.documentElement;
@@ -882,12 +976,34 @@
     }
   }
 
+  function installRouteObserver() {
+    if (window.__codexTokenUsageRouteObserver) return;
+    window.__codexTokenUsageRouteObserver = true;
+    const sync = () => setActiveConversationId(conversationIdFromActiveRow() || conversationIdFromLocation());
+    const originals = window.__codexTokenUsageRouteOriginals || {};
+    window.__codexTokenUsageRouteOriginals = originals;
+    const routeHistory = window.history;
+    ["pushState", "replaceState"].forEach((method) => {
+      const original = originals[method] || routeHistory?.[method];
+      originals[method] = original;
+      if (typeof original !== "function") return;
+      routeHistory[method] = function codexTokenUsagePatchedHistory(...args) {
+        const result = original.apply(routeHistory, args);
+        setTimeout(sync, 0);
+        return result;
+      };
+    });
+    window.addEventListener?.("popstate", sync, true);
+    window.addEventListener?.("hashchange", sync, true);
+    sync();
+  }
+
   installFetchObserver();
   installXhrObserver();
   installPostMessageObserver();
   installWebSocketObserver();
   installContextMeterObserver();
-  installTurnActivityObserver();
+  installRouteObserver();
   installDomObserver();
 
   if (window.__CODEX_TOKEN_USAGE_SCRIPT_TEST__) {
@@ -899,6 +1015,10 @@
       normalizeContextReading,
       parseElapsedMs,
       rememberMetric,
+      markTurnStarted: markNetworkTurnStarted,
+      setActiveConversationId,
+      dispatchDocumentEvent: (type, event) => document.listeners?.[type]?.({ type, ...event }),
+      getDisplayMetric: metricForActiveConversation,
       getTokenUsage: () => window.__codexTokenUsage,
     };
   }

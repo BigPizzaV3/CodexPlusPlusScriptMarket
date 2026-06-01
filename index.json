@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-05-26T00:00:00Z",
+  "updated_at": "2026-06-01T02:31:09Z",
   "scripts": [
     {
       "id": "codex-context-ring-restore",
@@ -55,7 +55,7 @@
       "id": "codex-token-usage",
       "name": "Codex Token Usage",
       "description": "在 Codex 每次回复完成后显示本次 token 输入、输出、缓存命中、上下文用量和耗时。",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": "Albert_Luo",
       "tags": [
         "codex",
@@ -66,7 +66,7 @@
       ],
       "homepage": "https://github.com/kokotao/codex-token-usage-script",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-token-usage.js",
-      "sha256": "cee3188c1a90083f27c01d3e1d48af42b074b0e38f05507c970f18145f376ad5"
+      "sha256": "291aae5efa44b30e161f88ab4139adda4fd7430aba59e0e313257dd67c7e857d"
     },
     {
       "id": "codex-list-pagebuster",

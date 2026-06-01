@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-05-26T00:00:00Z",
+  "updated_at": "2026-06-01T00:00:00Z",
   "scripts": [
     {
       "id": "codex-context-ring-restore",
@@ -72,7 +72,7 @@
       "id": "codex-list-pagebuster",
       "name": "Codex List Pagebuster",
       "description": "补强 Codex Desktop 左侧原生会话列表，显示更多本地历史会话，并为无法进入原生列表的旧会话提供兜底入口。",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": "puppnn",
       "tags": [
         "codex",
@@ -83,7 +83,7 @@
       ],
       "homepage": "https://github.com/puppnn/codex-plusplus-list-pagebuster",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-list-pagebuster.js",
-      "sha256": "7fb991273eda02538a22186d6c5891c4b67aff0d59491f3fde7cb396e2117e77"
+      "sha256": "1183085255596f45741a42f4f3d8b059aa6f2d9ca428aadcf3a42fedfd0043b6"
     }
   ]
 }

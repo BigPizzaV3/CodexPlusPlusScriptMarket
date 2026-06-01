@@ -72,7 +72,7 @@
       "id": "codex-list-pagebuster",
       "name": "Codex List Pagebuster",
       "description": "补强 Codex Desktop 左侧原生会话列表，显示更多本地历史会话，并为无法进入原生列表的旧会话提供兜底入口。",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "author": "puppnn",
       "tags": [
         "codex",
@@ -83,7 +83,7 @@
       ],
       "homepage": "https://github.com/puppnn/codex-plusplus-list-pagebuster",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-list-pagebuster.js",
-      "sha256": "1183085255596f45741a42f4f3d8b059aa6f2d9ca428aadcf3a42fedfd0043b6"
+      "sha256": "676aaf0e9d3e105aea78c66c8422b1e5fcb24b7b4d93dc474f9f842c90aca87a"
     }
   ]
 }

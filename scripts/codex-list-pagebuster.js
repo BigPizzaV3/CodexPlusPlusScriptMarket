@@ -47,6 +47,7 @@
     internalActionModulePromise: null,
     internalActionUnavailableUntil: 0,
     internalActionStatus: "unknown",
+    compatibilityMode: "detecting",
     lastInternalActionError: "",
     snapshotRefreshInFlight: false,
     lastSnapshotRefreshAt: 0,
@@ -67,6 +68,16 @@
     if (state.logOnceKeys.has(key)) return;
     state.logOnceKeys.add(key);
     log(...args);
+  }
+
+  function setCompatibilityMode(mode, reason = "") {
+    if (state.compatibilityMode === mode) return;
+    state.compatibilityMode = mode;
+    log("compatibility mode", mode, reason);
+  }
+
+  function canAttemptInternalAction() {
+    return Date.now() >= state.internalActionUnavailableUntil;
   }
 
   function setManagedTimeout(fn, ms) {
@@ -131,7 +142,14 @@
         } catch (error) {
           log("fetch patch error", String(error));
         }
-        return originalFetch(input, init);
+        const responsePromise = originalFetch(input, init);
+        try {
+          const url = typeof input === "string" ? input : input?.url;
+          if (typeof url === "string" && KEYWORDS.test(url)) {
+            responsePromise.then((response) => captureThreadsFromFetchResponse(response)).catch(() => {});
+          }
+        } catch {}
+        return responsePromise;
       };
       state.fetchPatched = true;
     }
@@ -139,6 +157,7 @@
     if (!state.xhrPatched) {
       XMLHttpRequest.prototype.open = function patchedOpen(method, url, ...rest) {
         const next = KEYWORDS.test(String(url)) ? rewriteUrl(String(url)) : url;
+        this.__clpbTrackedUrl = String(next || url || "");
         if (next !== url) log("xhr url", url, "->", next);
         return state.originalXhrOpen.call(this, method, next, ...rest);
       };
@@ -152,6 +171,15 @@
         } catch (error) {
           log("xhr patch error", String(error));
         }
+        try {
+          this.addEventListener("load", () => {
+            try {
+              const url = String(this.__clpbTrackedUrl || "");
+              if (!KEYWORDS.test(url)) return;
+              captureThreadsFromText(this.responseText);
+            } catch {}
+          });
+        } catch {}
         return state.originalXhrSend.call(this, body);
       };
       state.xhrPatched = true;
@@ -295,6 +323,55 @@
     } catch (error) {
       log("snapshot write failed", String(error));
     }
+  }
+
+  function captureThreadsFromText(text) {
+    if (typeof text !== "string" || !text || text.length > 10_000_000) return 0;
+    try {
+      return captureThreadsFromPayload(JSON.parse(text));
+    } catch {
+      return 0;
+    }
+  }
+
+  async function captureThreadsFromFetchResponse(response) {
+    try {
+      if (!response?.ok) return 0;
+      const contentType = String(response.headers?.get?.("content-type") || "");
+      if (contentType && !/json|text/i.test(contentType)) return 0;
+      const text = await response.clone().text();
+      return captureThreadsFromText(text);
+    } catch {
+      return 0;
+    }
+  }
+
+  function collectThreadLikeObjects(value, out = [], depth = 0) {
+    if (!value || depth > 5 || out.length >= TARGET) return out;
+    if (Array.isArray(value)) {
+      const normalized = value.map(normalizeListedThread).filter(Boolean);
+      if (normalized.length > 0) {
+        out.push(...normalized);
+        return out;
+      }
+      for (const item of value) collectThreadLikeObjects(item, out, depth + 1);
+      return out;
+    }
+    if (typeof value !== "object") return out;
+    for (const key of ["data", "threads", "items", "results", "conversations", "nodes"]) {
+      if (value[key] != null) collectThreadLikeObjects(value[key], out, depth + 1);
+    }
+    return out;
+  }
+
+  function captureThreadsFromPayload(payload) {
+    const threads = collectThreadLikeObjects(payload);
+    if (threads.length === 0) return 0;
+    const count = mergeSnapshotThreads(threads);
+    state.supplementIds = "";
+    scheduleExpand("captured-threads");
+    log("captured threads", { captured: threads.length, snapshot: count });
+    return threads.length;
   }
 
   function pruneSnapshotThreads(idsToRemove) {
@@ -604,7 +681,7 @@
   }
 
   async function loadInternalActionModule() {
-    if (Date.now() < state.internalActionUnavailableUntil) {
+    if (!canAttemptInternalAction()) {
       throw new Error(state.lastInternalActionError || "Codex internal request helper is temporarily unavailable");
     }
     if (!state.internalActionModulePromise) {
@@ -620,6 +697,7 @@
               state.internalActionStatus = "available";
               state.lastInternalActionError = "";
               state.internalActionUnavailableUntil = 0;
+              setCompatibilityMode("native", "internal action available");
               return helper.fn;
             }
           } catch (error) {
@@ -632,6 +710,7 @@
         state.internalActionStatus = "unavailable";
         state.lastInternalActionError = String(error?.message || error);
         state.internalActionUnavailableUntil = Date.now() + INTERNAL_ACTION_RETRY_MS;
+        setCompatibilityMode("fallback", state.lastInternalActionError);
         logOnce("internal-action-unavailable", "internal action unavailable; using DOM-only fallback", state.lastInternalActionError);
         throw error;
       });
@@ -714,7 +793,7 @@
   }
 
   async function sendCliRequest(method, params, options = {}) {
-    if (Date.now() < state.internalActionUnavailableUntil) {
+    if (!canAttemptInternalAction()) {
       throw new Error(state.lastInternalActionError || "Codex internal request helper is temporarily unavailable");
     }
     return callInternalAction("send-cli-request-for-host", {
@@ -752,7 +831,7 @@
     const now = Date.now();
     if (state.snapshotRefreshInFlight) return;
     if (!force && now - state.lastSnapshotRefreshAt < 30000) return;
-    if (Date.now() < state.internalActionUnavailableUntil) return;
+    if (!canAttemptInternalAction()) return;
     state.snapshotRefreshInFlight = true;
     state.lastSnapshotRefreshAt = now;
     try {
@@ -863,7 +942,7 @@
   async function promoteMissingToNative(missing) {
     const ids = Array.from(new Set(missing.map(threadRawId).filter(Boolean)));
     if (ids.length === 0 || state.promoteInFlight) return;
-    if (Date.now() < state.internalActionUnavailableUntil) return;
+    if (!canAttemptInternalAction()) return;
     const key = ids.join("|");
     if (key === state.promotedKey && Date.now() < state.nextPromoteAt) return;
     state.promoteInFlight = true;
@@ -903,6 +982,17 @@
       });
       promoteMissingToNative(missingNative);
     }
+  }
+
+  function detectCompatibilityMode() {
+    loadInternalActionModule()
+      .then(() => {
+        refreshSnapshotFromCli(true);
+        renderSupplementalHistory();
+      })
+      .catch(() => {
+        renderSupplementalHistory();
+      });
   }
 
   function installNativeHistoryKeeper() {
@@ -1196,7 +1286,7 @@
         return true;
       });
       const omittedMissing = Math.max(0, missingAll.length - MAX_EXTRA_HISTORY_ROWS);
-      const missing = Date.now() >= state.internalActionUnavailableUntil ? [] : missingAll.slice(0, MAX_EXTRA_HISTORY_ROWS);
+      const missing = missingAll.slice(0, MAX_EXTRA_HISTORY_ROWS);
       const nextIds = missing.map((thread) => threadDomId(thread)).join("|");
       const existing = document.querySelector(SUPPLEMENT_SELECTOR);
 
@@ -1356,6 +1446,7 @@
       snapshotThreads: readSnapshotThreads().length,
       missingNativeThreads: collectMissingNativeThreads().length,
       extraHistoryRows: document.querySelectorAll("[data-clpb-history-section] [data-clpb-managed-row]").length,
+      compatibilityMode: state.compatibilityMode,
       internalActions: state.internalActionStatus,
       internalActionRetryInMs: Math.max(0, state.internalActionUnavailableUntil - Date.now()),
       lastInternalActionError: state.lastInternalActionError,
@@ -1371,6 +1462,7 @@
   installObserver();
   installNativeHistoryKeeper();
   log("loaded", window[SCRIPT_KEY].status());
+  detectCompatibilityMode();
   refreshSnapshotFromCli();
   scheduleExpand("load");
   renderSupplementalHistory();

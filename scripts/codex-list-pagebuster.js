@@ -12,6 +12,9 @@
   const LIMIT_KEYS = ["limit", "pageSize", "page_size", "first", "take", "perPage", "per_page", "count", "max", "size", "n"];
   const MAX_EXTRA_HISTORY_ROWS = 100;
   const INTERNAL_ACTION_RETRY_MS = 120000;
+  const NATIVE_KEEPER_INTERVAL_MS = 8000;
+  const RENDER_DEBOUNCE_MS = 250;
+  const SCROLL_IDLE_MS = 350;
   const ARCHIVED_IDS_KEY = "__codexListPagebusterArchivedIds";
   const HIDDEN_IDS_KEY = "__codexListPagebusterHiddenIds";
   const COLLAPSED_PROJECTS_KEY = "__codexListPagebusterCollapsedProjects";
@@ -31,6 +34,9 @@
     clicked: new WeakSet(),
     scheduled: false,
     renderingSupplement: false,
+    renderTimer: 0,
+    lastScrollAt: 0,
+    scrollListener: null,
     autoExpandEnabled: true,
     programmaticExpand: false,
     projectClickListener: null,
@@ -80,12 +86,17 @@
     return Date.now() >= state.internalActionUnavailableUntil;
   }
 
+  function isFallbackMode() {
+    return state.compatibilityMode === "fallback";
+  }
+
   function setManagedTimeout(fn, ms) {
     const timer = window.setTimeout(() => {
       state.timers.delete(timer);
       fn();
     }, ms);
     state.timers.add(timer);
+    return timer;
   }
 
   function rewriteUrl(raw) {
@@ -184,6 +195,18 @@
       };
       state.xhrPatched = true;
     }
+  }
+
+  function scheduleSupplementRender(reason = "scheduled", delay = RENDER_DEBOUNCE_MS) {
+    if (state.renderTimer) {
+      window.clearTimeout(state.renderTimer);
+      state.timers.delete(state.renderTimer);
+    }
+    const wait = Date.now() - state.lastScrollAt < SCROLL_IDLE_MS ? Math.max(delay, SCROLL_IDLE_MS) : delay;
+    state.renderTimer = setManagedTimeout(() => {
+      state.renderTimer = 0;
+      renderSupplementalHistory(reason);
+    }, wait);
   }
 
   function isExpandButton(button) {
@@ -988,10 +1011,10 @@
     loadInternalActionModule()
       .then(() => {
         refreshSnapshotFromCli(true);
-        renderSupplementalHistory();
+        scheduleSupplementRender("compat-native", 0);
       })
       .catch(() => {
-        renderSupplementalHistory();
+        scheduleSupplementRender("compat-fallback", 0);
       });
   }
 
@@ -999,9 +1022,9 @@
     const tick = () => {
       if (state.keeperStopped) return;
       ensureNativeHistory("keeper");
-      setManagedTimeout(tick, 1000);
+      setManagedTimeout(tick, NATIVE_KEEPER_INTERVAL_MS);
     };
-    setManagedTimeout(tick, 1000);
+    setManagedTimeout(tick, NATIVE_KEEPER_INTERVAL_MS);
   }
 
   function findNativeThreadRow(localId) {
@@ -1257,8 +1280,12 @@
     return Array.from(document.querySelectorAll(`${PROJECT_LIST_SELECTOR} button`)).filter(isExpandButton).length;
   }
 
-  function renderSupplementalHistory() {
+  function renderSupplementalHistory(reason = "render") {
     if (state.renderingSupplement) return;
+    if (Date.now() - state.lastScrollAt < SCROLL_IDLE_MS) {
+      scheduleSupplementRender(reason, SCROLL_IDLE_MS);
+      return;
+    }
     const scroll = document.querySelector("[data-app-action-sidebar-scroll]");
     if (!scroll) return;
 
@@ -1274,7 +1301,7 @@
       });
       promoteMissingToNative(missingNative);
 
-      const projectSupplementIds = renderProjectSupplementalHistory(missingNative, nativeIds);
+      const projectSupplementIds = isFallbackMode() ? renderProjectSupplementalHistory(missingNative, nativeIds) : new Set();
       const sidebarBasenames = collectSidebarProjectBasenames();
       const missingAll = missingNative.filter((thread) => {
         if (projectSupplementIds.has(threadDomId(thread))) return false;
@@ -1286,7 +1313,7 @@
         return true;
       });
       const omittedMissing = Math.max(0, missingAll.length - MAX_EXTRA_HISTORY_ROWS);
-      const missing = missingAll.slice(0, MAX_EXTRA_HISTORY_ROWS);
+      const missing = isFallbackMode() ? missingAll.slice(0, MAX_EXTRA_HISTORY_ROWS) : [];
       const nextIds = missing.map((thread) => threadDomId(thread)).join("|");
       const existing = document.querySelector(SUPPLEMENT_SELECTOR);
 
@@ -1318,6 +1345,7 @@
       section.append(heading, list);
       scroll.appendChild(section);
       log("supplement rendered", {
+        reason,
         missing: missing.length,
         omitted: omittedMissing,
         snapshot: threads.length,
@@ -1353,14 +1381,14 @@
         remainingExpandButtons: countExpandButtons()
       });
     }
-    renderSupplementalHistory();
+    scheduleSupplementRender("expand-native", 0);
     return clicked;
   }
 
   function autoExpandNativeProjectLists(reason) {
     const withinAutoWindow = Date.now() <= state.autoExpandDeadlineMs;
     if (!state.autoExpandEnabled || !withinAutoWindow) {
-      renderSupplementalHistory();
+      scheduleSupplementRender(`auto-expand:${reason}`, 0);
       return 0;
     }
     return expandNativeProjectLists(reason);
@@ -1378,7 +1406,7 @@
           return;
         }
       }
-      renderSupplementalHistory();
+      scheduleSupplementRender(`schedule:${reason}`, 0);
     });
   }
 
@@ -1395,7 +1423,7 @@
           for (const ms of [0, 150]) {
             setManagedTimeout(() => {
               updateUserCollapsedProject(projectList, root);
-              renderSupplementalHistory();
+              scheduleSupplementRender("project-click", 0);
             }, ms);
           }
         }
@@ -1407,9 +1435,21 @@
       true
     );
 
+    const installScrollListener = () => {
+      const scroll = document.querySelector("[data-app-action-sidebar-scroll]");
+      if (!scroll || state.scrollListener) return;
+      state.scrollListener = () => {
+        state.lastScrollAt = Date.now();
+      };
+      scroll.addEventListener("scroll", state.scrollListener, { passive: true });
+    };
+    installScrollListener();
+    setManagedTimeout(installScrollListener, 1000);
+
     state.observer = new MutationObserver(() => {
       if (state.renderingSupplement) return;
-      renderSupplementalHistory();
+      installScrollListener();
+      scheduleSupplementRender("mutation");
     });
     state.observer.observe(document.documentElement, {
       childList: true,
@@ -1422,6 +1462,10 @@
     if (state.observer) state.observer.disconnect();
     if (state.projectClickListener) {
       document.removeEventListener("click", state.projectClickListener, true);
+    }
+    const scroll = document.querySelector("[data-app-action-sidebar-scroll]");
+    if (scroll && state.scrollListener) {
+      scroll.removeEventListener("scroll", state.scrollListener);
     }
     for (const timer of state.timers) window.clearTimeout(timer);
     state.timers.clear();
@@ -1444,7 +1488,6 @@
       projectSupplementRows: document.querySelectorAll(`${PROJECT_SUPPLEMENT_ITEM_SELECTOR}:not([hidden])`).length,
       collapsedProjects: collectCollapsedProjectRoots().size,
       snapshotThreads: readSnapshotThreads().length,
-      missingNativeThreads: collectMissingNativeThreads().length,
       extraHistoryRows: document.querySelectorAll("[data-clpb-history-section] [data-clpb-managed-row]").length,
       compatibilityMode: state.compatibilityMode,
       internalActions: state.internalActionStatus,
@@ -1465,7 +1508,7 @@
   detectCompatibilityMode();
   refreshSnapshotFromCli();
   scheduleExpand("load");
-  renderSupplementalHistory();
+  scheduleSupplementRender("load", 0);
   [250, 750, 1500, 3000].forEach((ms) => {
     setManagedTimeout(() => autoExpandNativeProjectLists(`timer:${ms}`), ms);
   });

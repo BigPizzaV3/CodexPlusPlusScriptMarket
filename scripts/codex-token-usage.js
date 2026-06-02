@@ -2,15 +2,18 @@
   "use strict";
 
   const SCRIPT_ID = "codex-token-usage";
+  const SCRIPT_VERSION = "0.1.5";
   const BADGE_CLASS = "codex-token-usage-badge";
   const STYLE_ID = "codex-token-usage-style";
   const RECENT_LIMIT = 20;
+  const DEBUG_LIMIT = 50;
   const CONTEXT_POLL_INTERVAL_MS = 1000;
   const TURN_IDLE_TIMEOUT_MS = 120000;
   const STORAGE_KEY = "__codexTokenUsageRecentDetails";
 
-  if (window.__codexTokenUsageScriptInstalled) return;
+  if (window.__codexTokenUsageScriptInstalled && window.__codexTokenUsageVersion === SCRIPT_VERSION) return;
   window.__codexTokenUsageScriptInstalled = true;
+  window.__codexTokenUsageVersion = SCRIPT_VERSION;
 
   const state = {
     lastMetric: null,
@@ -22,6 +25,17 @@
     turnSeq: 0,
     turnStartedAt: 0,
     contextPollTimer: 0,
+    pendingTurnStartAt: 0,
+    debug: [],
+  };
+
+  window.__codexTokenUsageDebug = state.debug;
+  window.__codexTokenUsage = {
+    version: SCRIPT_VERSION,
+    last: null,
+    currentTurn: null,
+    recent: [],
+    debug: state.debug,
   };
 
   function normalizeNumber(value) {
@@ -50,7 +64,10 @@
     );
     const cacheReadTokens = normalizeNumber(raw.cache_read_input_tokens ?? raw.cacheReadInputTokens);
     const cacheCreationTokens = normalizeNumber(raw.cache_creation_input_tokens ?? raw.cacheCreationInputTokens);
-    const contextLimit = normalizeNumber(raw.modelContextWindow ?? raw.model_context_window ?? raw.contextWindow ?? raw.context_window ?? raw.limit);
+    const contextUsed = normalizeNumber(raw.contextUsed ?? raw.context_used ?? raw.usedTokens ?? raw.used_tokens ?? raw.used);
+    const contextLimit = normalizeNumber(
+      raw.contextLimit ?? raw.context_limit ?? raw.modelContextWindow ?? raw.model_context_window ?? raw.contextWindow ?? raw.context_window ?? raw.limit,
+    );
     if (
       !inputTokens &&
       !outputTokens &&
@@ -70,7 +87,7 @@
       cacheReadTokens,
       cacheCreationTokens,
       hasBreakdown: !!(inputTokens || outputTokens || cachedTokens || cacheReadTokens || cacheCreationTokens),
-      contextUsed: totalTokens,
+      contextUsed: contextUsed || totalTokens,
       contextLimit,
     };
   }
@@ -124,6 +141,65 @@
     return null;
   }
 
+  function collectUsagesInObject(value, depth = 0, usages = [], seen = new WeakSet()) {
+    if (!value || depth > 8) return usages;
+    if (Array.isArray(value)) {
+      value.forEach((item) => collectUsagesInObject(item, depth + 1, usages, seen));
+      return usages;
+    }
+    if (typeof value !== "object") return usages;
+    if (seen.has(value)) return usages;
+    seen.add(value);
+
+    const tokenStatus = value.last || value.lastUsage || value.lastTokenUsage || value.last_token_usage;
+    if (tokenStatus && (value.modelContextWindow || value.model_context_window || value.contextWindow || value.context_window)) {
+      const statusUsage = normalizeUsage({
+        ...tokenStatus,
+        modelContextWindow: value.modelContextWindow ?? value.model_context_window,
+        contextWindow: value.contextWindow ?? value.context_window,
+      });
+      if (statusUsage) {
+        usages.push(statusUsage);
+        return usages;
+      }
+    }
+
+    const directKeys = ["usage", "last", "lastUsage", "lastTokenUsage", "last_token_usage"];
+    const consumedKeys = new Set();
+    for (const key of directKeys) {
+      const direct = normalizeUsage(value[key]);
+      if (direct) {
+        usages.push(direct);
+        consumedKeys.add(key);
+      }
+    }
+
+    const self = normalizeUsage(value);
+    if (self) {
+      usages.push(self);
+      return usages;
+    }
+
+    for (const key of [
+      "response",
+      "data",
+      "body",
+      "message",
+      "result",
+      "event",
+      "params",
+      "tokenUsage",
+      "token_usage",
+      "contextUsage",
+      "context_usage",
+      "info",
+    ]) {
+      if (consumedKeys.has(key)) continue;
+      collectUsagesInObject(value[key], depth + 1, usages, seen);
+    }
+    return usages;
+  }
+
   function extractJsonFragmentsFromSse(text) {
     return String(text || "")
       .split(/\r?\n/)
@@ -133,26 +209,30 @@
       .filter((line) => line && line !== "[DONE]");
   }
 
-  function extractUsage(payload) {
+  function extractUsages(payload) {
     if (typeof payload === "string") {
       try {
         const parsed = JSON.parse(payload);
-        const usage = findUsageInObject(parsed);
-        if (usage) return usage;
+        const usages = collectUsagesInObject(parsed);
+        if (usages.length) return usages;
       } catch (_) {
         // Treat non-JSON text as a possible SSE stream below.
       }
+      const usages = [];
       for (const fragment of extractJsonFragmentsFromSse(payload)) {
         try {
-          const usage = findUsageInObject(JSON.parse(fragment));
-          if (usage) return usage;
+          collectUsagesInObject(JSON.parse(fragment), 0, usages);
         } catch (_) {
           // Ignore malformed stream fragments.
         }
       }
-      return null;
+      return usages;
     }
-    return findUsageInObject(payload);
+    return collectUsagesInObject(payload);
+  }
+
+  function extractUsage(payload) {
+    return extractUsages(payload)[0] || null;
   }
 
   function formatNumber(value) {
@@ -287,6 +367,7 @@
 
   function metricForActiveConversation() {
     const active = currentConversationId();
+    if (active && state.byConversation[active]) return state.byConversation[active];
     if (state.currentTurn && !state.currentTurn.calls.length && state.currentTurn.status === "running") {
       if (!active || !state.currentTurn.conversationId || active === state.currentTurn.conversationId) {
         return {
@@ -298,7 +379,6 @@
         };
       }
     }
-    if (active && state.byConversation[active]) return state.byConversation[active];
     return conversationMatchesActive(state.lastMetric) ? state.lastMetric : null;
   }
 
@@ -363,13 +443,15 @@
   function beginTurn(started = nowMs()) {
     state.currentTurn = createTurn(started);
     state.turnStartedAt = started;
+    state.pendingTurnStartAt = 0;
     return state.currentTurn;
   }
 
   function ensureTurnStarted(started = nowMs()) {
     if (
       !state.currentTurn ||
-      (state.currentTurn.calls.length && started - state.currentTurn.lastUpdatedAt > TURN_IDLE_TIMEOUT_MS)
+      state.pendingTurnStartAt ||
+      (!state.currentTurn.calls.length && started - state.currentTurn.lastUpdatedAt > TURN_IDLE_TIMEOUT_MS)
     ) {
       return beginTurn(started);
     }
@@ -380,6 +462,10 @@
   function markTurnStarted(started = nowMs()) {
     beginTurn(started);
     scheduleRender();
+  }
+
+  function markUserTurnPending(started = nowMs()) {
+    state.pendingTurnStartAt = started;
   }
 
   function markNetworkTurnStarted(started = nowMs()) {
@@ -437,7 +523,9 @@
   function readStoredDetails() {
     try {
       const parsed = JSON.parse(window.sessionStorage?.getItem(STORAGE_KEY) || "[]");
-      return Array.isArray(parsed) ? parsed.filter((item) => item?.usage) : [];
+      return Array.isArray(parsed)
+        ? parsed.filter((item) => item?.usage && (item.callCount >= 1 || item.source === "turn-aggregate"))
+        : [];
     } catch (_) {
       return [];
     }
@@ -445,12 +533,37 @@
 
   function writeStoredDetails(metric) {
     if (!usageHasBreakdown(metric?.usage)) return;
+    if (!(metric.callCount >= 1 || metric.source === "turn-aggregate")) return;
     try {
       const recent = [metric, ...readStoredDetails().filter((item) => !sameUsage(metric, item))].slice(0, RECENT_LIMIT);
       window.sessionStorage?.setItem(STORAGE_KEY, JSON.stringify(recent));
     } catch (_) {
       // Storage can be unavailable in restricted renderer contexts.
     }
+  }
+
+  function usageDebugSummary(usage) {
+    return {
+      inputTokens: usage.inputTokens || 0,
+      outputTokens: usage.outputTokens || 0,
+      totalTokens: usage.totalTokens || 0,
+      cachedTokens: usage.cachedTokens || usage.cacheReadTokens || 0,
+      contextLimit: usage.contextLimit || 0,
+      hasBreakdown: usageHasBreakdown(usage),
+    };
+  }
+
+  function pushDebug(entry) {
+    state.debug.unshift({
+      at: new Date().toISOString(),
+      activeConversationId: currentConversationId(),
+      currentCallCount: state.currentTurn?.calls.length || 0,
+      pendingTurn: !!state.pendingTurnStartAt,
+      ...entry,
+    });
+    state.debug = state.debug.slice(0, DEBUG_LIMIT);
+    window.__codexTokenUsageDebug = state.debug.slice();
+    if (window.__codexTokenUsage) window.__codexTokenUsage.debug = state.debug.slice();
   }
 
   function aggregateTurnMetric(turn) {
@@ -506,6 +619,7 @@
     state.recent.unshift(state.lastMetric);
     state.recent = state.recent.slice(0, RECENT_LIMIT);
     window.__codexTokenUsage = {
+      version: SCRIPT_VERSION,
       last: state.lastMetric,
       currentTurn: state.currentTurn
         ? {
@@ -517,6 +631,7 @@
           }
         : null,
       recent: state.recent.slice(),
+      debug: state.debug.slice(),
     };
     if (storeDetails) writeStoredDetails(state.lastMetric);
     scheduleRender();
@@ -564,7 +679,6 @@
     turn.elapsedMs = Math.max(turn.elapsedMs || 0, metric.elapsedMs || elapsedSinceTurnStarted());
     turn.lastUpdatedAt = nowMs();
     publishMetric(aggregateTurnMetric(turn));
-    writeStoredDetails(metric);
   }
 
   function rememberMetric(metric) {
@@ -576,18 +690,35 @@
     }
   }
 
+  function rememberUsages(usages, baseMetric) {
+    let captured = false;
+    usages.forEach((usage) => {
+      rememberMetric({ ...baseMetric, usage });
+      captured = true;
+    });
+    return captured;
+  }
+
+  function processPayload(payload, source, conversationId, elapsedMs, url) {
+    const usages = extractUsages(payload);
+    pushDebug({
+      type: "payload",
+      source,
+      conversationId: conversationId || "",
+      url: url || "",
+      elapsedMs: elapsedMs || 0,
+      usageCount: usages.length,
+      usages: usages.map(usageDebugSummary),
+    });
+    return rememberUsages(usages, { elapsedMs, source, conversationId, url });
+  }
+
   function parseResponseText(text, elapsedMs, url) {
-    const usage = extractUsage(text);
-    if (usage) rememberMetric({ usage, elapsedMs, url, source: "network" });
+    processPayload(text, "network", "", elapsedMs, url);
   }
 
   function inspectPayload(payload, source, conversationId) {
-    const usage = extractUsage(payload);
-    if (usage) {
-      rememberMetric({ usage, elapsedMs: elapsedSinceTurnStarted(), source, conversationId });
-      return true;
-    }
-    return false;
+    return processPayload(payload, source, conversationId, elapsedSinceTurnStarted());
   }
 
   function inspectPayloadText(text, source, conversationId) {
@@ -595,8 +726,9 @@
   }
 
   function installFetchObserver() {
-    if (typeof window.fetch !== "function" || window.fetch.__codexTokenUsageWrapped) return;
-    const originalFetch = window.fetch.bind(window);
+    if (typeof window.fetch !== "function" || window.fetch.__codexTokenUsageWrapped === SCRIPT_VERSION) return;
+    const baseFetch = window.fetch.__codexTokenUsageOriginal || window.fetch;
+    const originalFetch = baseFetch.bind(window);
     function wrappedFetch(input, init) {
       const url = requestUrl(input);
       const started = nowMs();
@@ -612,15 +744,16 @@
         return response;
       });
     }
-    wrappedFetch.__codexTokenUsageWrapped = true;
+    wrappedFetch.__codexTokenUsageWrapped = SCRIPT_VERSION;
+    wrappedFetch.__codexTokenUsageOriginal = baseFetch;
     window.fetch = wrappedFetch;
   }
 
   function installXhrObserver() {
     const Xhr = window.XMLHttpRequest;
-    if (!Xhr || Xhr.prototype.__codexTokenUsageWrapped) return;
-    const originalOpen = Xhr.prototype.open;
-    const originalSend = Xhr.prototype.send;
+    if (!Xhr || Xhr.prototype.__codexTokenUsageWrapped === SCRIPT_VERSION) return;
+    const originalOpen = Xhr.prototype.__codexTokenUsageOriginalOpen || Xhr.prototype.open;
+    const originalSend = Xhr.prototype.__codexTokenUsageOriginalSend || Xhr.prototype.send;
     Xhr.prototype.open = function open(method, url, ...rest) {
       this.__codexTokenUsageUrl = url;
       return originalOpen.call(this, method, url, ...rest);
@@ -639,11 +772,53 @@
       });
       return originalSend.apply(this, args);
     };
-    Xhr.prototype.__codexTokenUsageWrapped = true;
+    Xhr.prototype.__codexTokenUsageOriginalOpen = originalOpen;
+    Xhr.prototype.__codexTokenUsageOriginalSend = originalSend;
+    Xhr.prototype.__codexTokenUsageWrapped = SCRIPT_VERSION;
+  }
+
+  function isEditableTarget(target) {
+    return !!(
+      target &&
+      (target.tagName === "TEXTAREA" ||
+        target.tagName === "INPUT" ||
+        target.isContentEditable ||
+        target.closest?.("textarea,input,[contenteditable='true']"))
+    );
+  }
+
+  function isSendTrigger(event) {
+    const target = event.target;
+    if (event.type === "submit") return true;
+    if (event.type === "keydown") {
+      return event.key === "Enter" && !event.shiftKey && isEditableTarget(target);
+    }
+    if (event.type === "click") {
+      const label = `${target?.getAttribute?.("aria-label") || ""} ${target?.textContent || ""}`;
+      return /^(发送|提交|Send|Submit)$|send|submit/i.test(label);
+    }
+    return false;
+  }
+
+  function installTurnPendingObserver() {
+    if (window.__codexTokenUsageTurnPendingObserver === SCRIPT_VERSION) return;
+    const handler = (event) => {
+      try {
+        if (!isSendTrigger(event)) return;
+        markUserTurnPending();
+        pushDebug({ type: "pending-turn", source: event.type });
+      } catch (_) {
+        // Keep page input handling untouched.
+      }
+    };
+    ["click", "submit", "keydown"].forEach((type) => {
+      document.addEventListener?.(type, handler, true);
+    });
+    window.__codexTokenUsageTurnPendingObserver = SCRIPT_VERSION;
   }
 
   function installPostMessageObserver() {
-    if (window.__codexTokenUsageMessageObserver) return;
+    if (window.__codexTokenUsageMessageObserver === SCRIPT_VERSION) return;
     window.addEventListener?.(
       "message",
       (event) => {
@@ -655,12 +830,12 @@
       },
       true,
     );
-    window.__codexTokenUsageMessageObserver = true;
+    window.__codexTokenUsageMessageObserver = SCRIPT_VERSION;
   }
 
   function installWebSocketObserver() {
-    if (typeof window.WebSocket !== "function" || window.__codexTokenUsageWebSocketWrapped) return;
-    const NativeWebSocket = window.WebSocket;
+    if (typeof window.WebSocket !== "function" || window.__codexTokenUsageWebSocketWrapped === SCRIPT_VERSION) return;
+    const NativeWebSocket = window.__codexTokenUsageNativeWebSocket || window.WebSocket;
 
     function TokenUsageWebSocket(...args) {
       const socket = new NativeWebSocket(...args);
@@ -689,7 +864,8 @@
     }
 
     window.WebSocket = TokenUsageWebSocket;
-    window.__codexTokenUsageWebSocketWrapped = true;
+    window.__codexTokenUsageNativeWebSocket = NativeWebSocket;
+    window.__codexTokenUsageWebSocketWrapped = SCRIPT_VERSION;
   }
 
   function normalizeContextReading(reading) {
@@ -731,14 +907,13 @@
 
   function installContextMeterObserver() {
     const captureState = window.__codexContextMeterCaptureState;
-    if (captureState && !captureState.__codexTokenUsageWrapped) {
-      const originalInspectText = captureState.inspectText;
+    if (captureState && captureState.__codexTokenUsageWrapped !== SCRIPT_VERSION) {
+      const originalInspectText = captureState.__codexTokenUsageOriginalInspectText || captureState.inspectText;
       if (typeof originalInspectText === "function") {
         captureState.inspectText = function codexTokenUsageInspectText(text, source, conversationId) {
           const started = elapsedSinceTurnStarted();
           try {
-            const usage = extractUsage(text);
-            if (usage) rememberMetric({ usage, elapsedMs: started, source: source || "context-capture", conversationId });
+            processPayload(text, source || "context-capture", conversationId, started);
           } catch (_) {
             // Keep the upstream context meter path intact.
           }
@@ -746,13 +921,12 @@
         };
       }
 
-      const originalInspectValue = captureState.inspectValue;
+      const originalInspectValue = captureState.__codexTokenUsageOriginalInspectValue || captureState.inspectValue;
       if (typeof originalInspectValue === "function") {
         captureState.inspectValue = function codexTokenUsageInspectValue(value, source, conversationId) {
           let reading = null;
           try {
-            const usage = extractUsage(value);
-            if (usage) rememberMetric({ usage, elapsedMs: elapsedSinceTurnStarted(), source: source || "context-value", conversationId });
+            processPayload(value, source || "context-value", conversationId, elapsedSinceTurnStarted());
           } catch (_) {
             // Continue to the original inspector.
           }
@@ -761,7 +935,9 @@
           return reading;
         };
       }
-      captureState.__codexTokenUsageWrapped = true;
+      captureState.__codexTokenUsageOriginalInspectText = originalInspectText;
+      captureState.__codexTokenUsageOriginalInspectValue = originalInspectValue;
+      captureState.__codexTokenUsageWrapped = SCRIPT_VERSION;
     }
 
     readContextMeterMetric();
@@ -946,6 +1122,7 @@
     badge.dataset.metricId = displayMetric.id || "";
     badge.dataset.status = displayMetric.status || "complete";
     badge.dataset.conversationId = displayMetric.conversationId || "";
+    badge.dataset.version = SCRIPT_VERSION;
     badge.dataset.placement = target === document.querySelector("main") ? "fallback" : "message-actions";
     badge.textContent = formatBadgeText(displayMetric);
     document.querySelectorAll(`.${BADGE_CLASS}`).forEach((node) => {
@@ -959,7 +1136,8 @@
   }
 
   function installDomObserver() {
-    if (!window.MutationObserver || window.__codexTokenUsageDomObserver) return;
+    if (!window.MutationObserver || window.__codexTokenUsageDomObserverVersion === SCRIPT_VERSION) return;
+    window.__codexTokenUsageDomObserver?.disconnect?.();
     window.__codexTokenUsageDomObserver = new MutationObserver(() => {
       const nextConversationId = conversationIdFromActiveRow() || conversationIdFromLocation();
       if (nextConversationId && nextConversationId !== state.activeConversationId) setActiveConversationId(nextConversationId);
@@ -974,11 +1152,12 @@
     } else {
       start();
     }
+    window.__codexTokenUsageDomObserverVersion = SCRIPT_VERSION;
   }
 
   function installRouteObserver() {
-    if (window.__codexTokenUsageRouteObserver) return;
-    window.__codexTokenUsageRouteObserver = true;
+    if (window.__codexTokenUsageRouteObserver === SCRIPT_VERSION) return;
+    window.__codexTokenUsageRouteObserver = SCRIPT_VERSION;
     const sync = () => setActiveConversationId(conversationIdFromActiveRow() || conversationIdFromLocation());
     const originals = window.__codexTokenUsageRouteOriginals || {};
     window.__codexTokenUsageRouteOriginals = originals;
@@ -1000,6 +1179,7 @@
 
   installFetchObserver();
   installXhrObserver();
+  installTurnPendingObserver();
   installPostMessageObserver();
   installWebSocketObserver();
   installContextMeterObserver();
@@ -1014,11 +1194,13 @@
       normalizeUsage,
       normalizeContextReading,
       parseElapsedMs,
+      processPayload,
       rememberMetric,
       markTurnStarted: markNetworkTurnStarted,
       setActiveConversationId,
       dispatchDocumentEvent: (type, event) => document.listeners?.[type]?.({ type, ...event }),
       getDisplayMetric: metricForActiveConversation,
+      getStoredDetails: readStoredDetails,
       getTokenUsage: () => window.__codexTokenUsage,
     };
   }

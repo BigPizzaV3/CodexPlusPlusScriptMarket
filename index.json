@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-06-08T06:45:59.000Z",
+  "updated_at": "2026-06-11T00:00:00.000Z",
   "scripts": [
     {
       "id": "codex-context-ring-restore",
@@ -80,18 +80,26 @@
         "sidebar",
         "sessions",
         "ui"
-      {
-"id": "codex-zhcn-translate",
-"name": "Codex简体中文汉化",
-"author": "hL091015",
-"script_url": "https://raw.githubusercontent.com/hL091015/CodexPlusPlusScriptMarket/main/scripts/zh_CN汉化.user.js",
-"sha256": "72214D31D425D1CE936B457AA43FCC40DF55F4DE3B9B140F9510C7F392CDC845",
-"description": "Codex客户端全界面简体汉化补丁"
-},
       ],
       "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-list-pagebuster.js",
       "sha256": "756ee2e2a91df449738192ae500de1ab75cbbc7129968982ca37f6f5a9aad78e"
+    },
+    {
+      "id": "codex-zhcn-translate",
+      "name": "Codex简体中文汉化",
+      "description": "Codex客户端全界面简体汉化补丁",
+      "version": "0.1.0",
+      "author": "hL091015",
+      "tags": [
+        "translate",
+        "chinese",
+        "localization",
+        "ui"
+      ],
+      "homepage": "https://github.com/hL091015/CodexPlusPlusScriptMarket",
+      "script_url": "https://raw.githubusercontent.com/hL091015/CodexPlusPlusScriptMarket/main/scripts/zh_CN汉化.user.js",
+      "sha256": "72214D31D425D1CE936B457AA43FCC40DF55F4DE3B9B140F9510C7F392CDC845"
     }
   ]
 }

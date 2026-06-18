@@ -1,7 +1,11 @@
 (() => {
-  const TARGET = 500;
+  const TARGET = 1000;
+  const CLI_PAGE_SIZE = 100;
+  const CLI_MAX_PAGES = 20;
   const SCRIPT_KEY = "__codexListPagebuster";
   const STORAGE_KEY = "__codexListPagebusterThreads";
+  const STORAGE_VERSION_KEY = "__codexListPagebusterStorageVersion";
+  const STORAGE_VERSION = "2026-06-18-global-history-v5";
   const PROJECT_LIST_SELECTOR = "[data-app-action-sidebar-project-list-id]";
   const THREAD_SELECTOR = "[data-app-action-sidebar-thread-id]";
   const SUPPLEMENT_SELECTOR = "[data-clpb-history-section]";
@@ -18,6 +22,7 @@
   const ARCHIVED_IDS_KEY = "__codexListPagebusterArchivedIds";
   const HIDDEN_IDS_KEY = "__codexListPagebusterHiddenIds";
   const COLLAPSED_PROJECTS_KEY = "__codexListPagebusterCollapsedProjects";
+  const GLOBAL_EXTRA_HISTORY = true;
   const SIGNALS_MODULE_RE = /(?:\.\/)?assets\/app-server-manager-signals-[A-Za-z0-9_-]+\.js/g;
   const SIGNALS_MODULE_FALLBACKS = [
     "./assets/app-server-manager-signals-Csopz8aM.js",
@@ -348,6 +353,23 @@
     }
   }
 
+  function migrateStorageForGlobalHistory() {
+    try {
+      const version = localStorage.getItem(STORAGE_VERSION_KEY);
+      if (version === STORAGE_VERSION) return;
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(HIDDEN_IDS_KEY);
+      localStorage.setItem(STORAGE_VERSION_KEY, STORAGE_VERSION);
+      state.supplementIds = "";
+      log("global history storage migrated", {
+        previousVersion: version || "(none)",
+        version: STORAGE_VERSION
+      });
+    } catch (error) {
+      log("global history storage migration failed", String(error));
+    }
+  }
+
   function captureThreadsFromText(text) {
     if (typeof text !== "string" || !text || text.length > 10_000_000) return 0;
     try {
@@ -432,6 +454,18 @@
     }
     if (changed) writeHiddenIds(hiddenIds);
     return hiddenIds;
+  }
+
+  function snapshotProjectCounts(limit = 20) {
+    const counts = new Map();
+    for (const thread of readSnapshotThreads()) {
+      const label = basename(thread.cwd);
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, limit)
+      .map(([project, count]) => ({ project, count }));
   }
 
   function collectSidebarProjectBasenames() {
@@ -827,19 +861,33 @@
     });
   }
 
-  async function listThreadsFromCli({ archived, limit = TARGET }) {
+  function threadListParams({ archived, cursor, global }) {
+    const params = {
+      archived,
+      cursor,
+      limit: CLI_PAGE_SIZE,
+      sortKey: "updated_at"
+    };
+    if (global) {
+      return {
+        ...params,
+        modelProviders: [],
+        sourceKinds: ["cli", "vscode", "appServer", "unknown"],
+        useStateDbOnly: true,
+        includeAllWorkspaces: true,
+        includeAllProjects: true
+      };
+    }
+    return { ...params, modelProviders: null };
+  }
+
+  async function listThreadsFromCliVariant({ archived, limit, global }) {
     const threads = [];
     let cursor = null;
-    for (let page = 0; page < 20 && threads.length < limit; page += 1) {
+    for (let page = 0; page < CLI_MAX_PAGES && threads.length < limit; page += 1) {
       const result = await sendCliRequest(
         "thread/list",
-        {
-          archived,
-          cursor,
-          limit: 50,
-          modelProviders: null,
-          sortKey: "updated_at"
-        },
+        threadListParams({ archived, cursor, global }),
         { timeoutMs: 12000 }
       );
       const data = Array.isArray(result?.data) ? result.data : [];
@@ -848,6 +896,18 @@
       if (!cursor || data.length === 0) break;
     }
     return threads;
+  }
+
+  async function listThreadsFromCli({ archived, limit = TARGET }) {
+    if (!GLOBAL_EXTRA_HISTORY) {
+      return listThreadsFromCliVariant({ archived, limit, global: false });
+    }
+    try {
+      return await listThreadsFromCliVariant({ archived, limit, global: true });
+    } catch (error) {
+      log("global thread/list failed; retrying default scope", String(error));
+      return listThreadsFromCliVariant({ archived, limit, global: false });
+    }
   }
 
   async function refreshSnapshotFromCli(force = false) {
@@ -1480,6 +1540,16 @@
   window[SCRIPT_KEY] = {
     expand: () => expandNativeProjectLists("manual"),
     open: openThread,
+    refresh: () => refreshSnapshotFromCli(true),
+    resetHistory: () => {
+      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(HIDDEN_IDS_KEY);
+      localStorage.setItem(STORAGE_VERSION_KEY, STORAGE_VERSION);
+      state.supplementIds = "";
+      refreshSnapshotFromCli(true);
+      scheduleExpand("reset-history");
+    },
+    render: () => renderSupplementalHistory("manual"),
     status: () => ({
       projects: document.querySelectorAll(PROJECT_LIST_SELECTOR).length,
       threads: document.querySelectorAll(`${THREAD_SELECTOR}:not([data-clpb-managed-row])`).length,
@@ -1488,12 +1558,17 @@
       projectSupplementRows: document.querySelectorAll(`${PROJECT_SUPPLEMENT_ITEM_SELECTOR}:not([hidden])`).length,
       collapsedProjects: collectCollapsedProjectRoots().size,
       snapshotThreads: readSnapshotThreads().length,
+      snapshotProjects: snapshotProjectCounts(20),
       extraHistoryRows: document.querySelectorAll("[data-clpb-history-section] [data-clpb-managed-row]").length,
+      historySectionText: document.querySelector(SUPPLEMENT_SELECTOR)?.innerText || "",
       compatibilityMode: state.compatibilityMode,
       internalActions: state.internalActionStatus,
       internalActionRetryInMs: Math.max(0, state.internalActionUnavailableUntil - Date.now()),
       lastInternalActionError: state.lastInternalActionError,
       lastSnapshotRefreshError: state.lastSnapshotRefreshError,
+      lastSnapshotRefreshAt: state.lastSnapshotRefreshAt,
+      snapshotRefreshInFlight: state.snapshotRefreshInFlight,
+      globalExtraHistory: GLOBAL_EXTRA_HISTORY,
       expandButtons: countExpandButtons(),
       href: location.href
     }),
@@ -1504,9 +1579,10 @@
   patchRequests();
   installObserver();
   installNativeHistoryKeeper();
+  migrateStorageForGlobalHistory();
   log("loaded", window[SCRIPT_KEY].status());
   detectCompatibilityMode();
-  refreshSnapshotFromCli();
+  refreshSnapshotFromCli(true);
   scheduleExpand("load");
   scheduleSupplementRender("load", 0);
   [250, 750, 1500, 3000].forEach((ms) => {

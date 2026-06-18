@@ -2,7 +2,7 @@
   const API_KEY = "__codexPlusHideUsageAlert";
   const STYLE_ID = "codex-plus-hide-usage-alert-style";
   const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
-  const VERSION = 4;
+  const SCRIPT_VERSION = "0.1.2";
 
   const previous = window[API_KEY];
   if (previous && typeof previous.destroy === "function") {
@@ -18,9 +18,9 @@
   };
 
   const quotaBannerRe =
-    /(你的\s*Codex\s*消息限额已用尽|Codex\s*消息限额已用尽|message\s+limit|usage\s+limit)/i;
+    /(你的\s*Codex\s*消息限额已用尽|Codex\s*消息限额已用尽|message\s+limit|usage\s+limit|you['’]?re\s+out\s+of\s+Codex\s+messages|out\s+of\s+Codex\s+messages|你的\s*Codex\s*已用完|你的\s*Codex\s*消息\s*额度|你的\s*速率限制|速率限制\s*(?:将于|重置))/i;
   const quotaResetRe =
-    /(额度将于|继续使用\s*Codex|升级至\s*Plus|quota\s+will\s+reset|limit\s+will\s+reset|upgrade\s+to\s+plus)/i;
+    /(额度将于|继续使用\s*Codex|升级至\s*Plus|quota\s+will\s+reset|limit\s+will\s+reset|rate\s+limit\s+resets|resets?\s+on|continue\s+using\s+Codex|start\s+your\s+free\s+trial\s+of\s+Plus|upgrade\s+to\s+plus|速率限制|将于\s*\d|重置)/i;
   const usageCardRe =
     /(剩余\s*\d+%\s*使用量|重置频率|下次重置时间|remaining\s+\d+%\s+usage|usage\s+remaining|reset\s+frequency|next\s+reset)/i;
   const actionTextRe =
@@ -210,13 +210,13 @@
     }
     state.hidden.clear();
     document.getElementById(STYLE_ID)?.remove();
-    if (window[API_KEY]?.version === VERSION) {
+    if (window[API_KEY]?.version === SCRIPT_VERSION) {
       delete window[API_KEY];
     }
   }
 
   window[API_KEY] = {
-    version: VERSION,
+    version: SCRIPT_VERSION,
     state,
     scan,
     destroy,

@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "updated_at": "2026-06-02T00:00:00Z",
+  "updated_at": "2026-06-18T00:00:00Z",
   "scripts": [
     {
       "id": "codex-context-ring-restore",
       "name": "Codex Context Ring Restore",
-      "description": "一款尽量还原官方圆环上下文体验的插件：贴近官方圆环的样式、位置与读数逻辑，尽可能保持原生使用感。",
+      "description": "还原官方圆环上下文体验",
       "version": "0.1.2",
       "author": "win9zhx",
       "tags": [
@@ -15,14 +15,14 @@
         "restore",
         "native"
       ],
-      "homepage": "https://github.com/win9zhx/CodexPlusPlusScriptMarket/tree/add-codex-context-ring-restore/scripts",
+      "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-context-ring-restore.js",
       "sha256": "e3d9409442f17112fe41542fefab8cd62b2776fc8808d8ac2d841630f127d676"
     },
     {
       "id": "codex-context-used-meter",
       "name": "Codex Context Used Meter",
-      "description": "在 Codex App 对话界面顶部显示当前会话剩余上下文、已用/总 token，并提供轻量进度条和消耗动画。",
+      "description": "显示上下文用量",
       "version": "33",
       "author": "Minghou-Lei",
       "tags": [
@@ -31,15 +31,15 @@
         "ui",
         "meter"
       ],
-      "homepage": "https://github.com/Minghou-Lei/codex-context-used-meter",
+      "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/05fe34fee3e4dfa17a471a7b329a9a9313d844bb/scripts/codex-context-used-meter.js",
       "sha256": "f13df61c833b58048ba3f88b9013440e729dc7bc016dc578b7c6a708853344c0"
     },
     {
       "id": "hide-usage-alert",
       "name": "Hide Usage Alert",
-      "description": "隐藏 Codex Desktop 的额度提醒，适合 Codex++ 远程同步搭配 API Key 使用时减少 Free/Plus 账号额度弹窗干扰。",
-      "version": "4",
+      "description": "隐藏额度提醒",
+      "version": "0.1.2",
       "author": "Ghibli1024",
       "tags": [
         "usage",
@@ -47,15 +47,15 @@
         "ui",
         "hide"
       ],
-      "homepage": "https://github.com/Ghibli1024/codex-hide-usage-alert",
-      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/1e8ba79da3efb629153d79eaad678b2a48a801c5/scripts/hide-usage-alert.js",
-      "sha256": "031d7767ad5022e0be36a6213942de60b346b527667b174472cca4d3d0742073"
+      "homepage": "",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/hide-usage-alert.js",
+      "sha256": "b13279be9d6707c3109d0f71c7c1b56b2645cb659cbbca6a67f438022f3bae9c"
     },
     {
       "id": "codex-token-usage",
       "name": "Codex Token Usage",
-      "description": "在 Codex 每次回复完成后显示本次 token 输入、输出、缓存命中、上下文用量和耗时。",
-      "version": "0.1.0",
+      "description": "显示token消耗统计",
+      "version": "0.1.7",
       "author": "Albert_Luo",
       "tags": [
         "codex",
@@ -64,15 +64,15 @@
         "metrics",
         "cache"
       ],
-      "homepage": "https://github.com/kokotao/codex-token-usage-script",
+      "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-token-usage.js",
-      "sha256": "cee3188c1a90083f27c01d3e1d48af42b074b0e38f05507c970f18145f376ad5"
+      "sha256": "03808d22f53da374837227636ebd9f1ba593fe5aba6219e90e636d7ed7c806eb"
     },
     {
       "id": "codex-list-pagebuster",
       "name": "Codex List Pagebuster",
-      "description": "补强 Codex Desktop 左侧原生会话列表，显示更多本地历史会话，并为无法进入原生列表的旧会话提供兜底入口。",
-      "version": "0.1.3",
+      "description": "补强 Codex Desktop 左侧原生会话列表，优先从本地全局历史拉取更多会话，并为无法进入原生列表的旧会话提供兜底入口。",
+      "version": "0.1.4",
       "author": "puppnn",
       "tags": [
         "codex",
@@ -83,7 +83,23 @@
       ],
       "homepage": "https://github.com/puppnn/codex-plusplus-list-pagebuster",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-list-pagebuster.js",
-      "sha256": "2592d3ef69fa50008010274f114e59f874dca91d07807a87c00daa763ce67957"
+      "sha256": "995ff856223c5b56077405f7130071e0bd8ac8fa621c544c16bfc426f0ea9ba2"
+    },
+    {
+      "id": "codex-zhcn-translate",
+      "name": "Codex简体中文汉化",
+      "description": "全界面简体汉化补丁",
+      "version": "1.0",
+      "author": "hL091015",
+      "tags": [
+        "translation",
+        "chinese",
+        "zh-CN",
+        "ui"
+      ],
+      "homepage": "",
+      "script_url": "https://raw.githubusercontent.com/hL091015/CodexPlusPlusScriptMarket/main/scripts/zh_CN%E6%B1%89%E5%8C%96.user.js",
+      "sha256": "72214D31D425D1CE936B457AA43FCC40DF55F4DE3B9B140F9510C7F392CDC845"
     }
   ]
 }

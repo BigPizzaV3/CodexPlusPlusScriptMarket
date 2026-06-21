@@ -5,7 +5,7 @@
   const SCRIPT_KEY = "__codexListPagebuster";
   const STORAGE_KEY = "__codexListPagebusterThreads";
   const STORAGE_VERSION_KEY = "__codexListPagebusterStorageVersion";
-  const STORAGE_VERSION = "2026-06-01-global-history-v4";
+  const STORAGE_VERSION = "2026-06-18-global-history-v5";
   const PROJECT_LIST_SELECTOR = "[data-app-action-sidebar-project-list-id]";
   const THREAD_SELECTOR = "[data-app-action-sidebar-thread-id]";
   const SUPPLEMENT_SELECTOR = "[data-clpb-history-section]";
@@ -14,8 +14,14 @@
   const EXPAND_TEXT = /^(?:\u5c55\u5f00\u663e\u793a|\u663e\u793a\u66f4\u591a|Show more|Show all)$/i;
   const KEYWORDS = /(?:thread|threads|session|sessions|history|recent|conversation|project)/i;
   const LIMIT_KEYS = ["limit", "pageSize", "page_size", "first", "take", "perPage", "per_page", "count", "max", "size", "n"];
+  const MAX_EXTRA_HISTORY_ROWS = 100;
+  const INTERNAL_ACTION_RETRY_MS = 120000;
+  const NATIVE_KEEPER_INTERVAL_MS = 8000;
+  const RENDER_DEBOUNCE_MS = 250;
+  const SCROLL_IDLE_MS = 350;
   const ARCHIVED_IDS_KEY = "__codexListPagebusterArchivedIds";
   const HIDDEN_IDS_KEY = "__codexListPagebusterHiddenIds";
+  const COLLAPSED_PROJECTS_KEY = "__codexListPagebusterCollapsedProjects";
   const GLOBAL_EXTRA_HISTORY = true;
   const SIGNALS_MODULE_RE = /(?:\.\/)?assets\/app-server-manager-signals-[A-Za-z0-9_-]+\.js/g;
   const SIGNALS_MODULE_FALLBACKS = [
@@ -32,9 +38,14 @@
     timers: new Set(),
     clicked: new WeakSet(),
     scheduled: false,
+    renderingSupplement: false,
+    renderTimer: 0,
+    lastScrollAt: 0,
+    scrollListener: null,
     autoExpandEnabled: true,
     programmaticExpand: false,
     projectClickListener: null,
+    userCollapsedProjectRoots: new Set(),
     autoExpandDeadlineMs: Date.now() + 8000,
     lastProjectRoots: new Set(),
     fetchPatched: false,
@@ -42,9 +53,17 @@
     supplementIds: "",
     promoteInFlight: false,
     promotedKey: "",
+    nextPromoteAt: 0,
+    keeperStopped: false,
     internalActionModulePromise: null,
+    internalActionUnavailableUntil: 0,
+    internalActionStatus: "unknown",
+    compatibilityMode: "detecting",
+    lastInternalActionError: "",
     snapshotRefreshInFlight: false,
     lastSnapshotRefreshAt: 0,
+    lastSnapshotRefreshError: "",
+    logOnceKeys: new Set(),
     originalFetch: window.fetch,
     originalXhrOpen: XMLHttpRequest.prototype.open,
     originalXhrSend: XMLHttpRequest.prototype.send
@@ -56,12 +75,33 @@
     } catch {}
   }
 
+  function logOnce(key, ...args) {
+    if (state.logOnceKeys.has(key)) return;
+    state.logOnceKeys.add(key);
+    log(...args);
+  }
+
+  function setCompatibilityMode(mode, reason = "") {
+    if (state.compatibilityMode === mode) return;
+    state.compatibilityMode = mode;
+    log("compatibility mode", mode, reason);
+  }
+
+  function canAttemptInternalAction() {
+    return Date.now() >= state.internalActionUnavailableUntil;
+  }
+
+  function isFallbackMode() {
+    return state.compatibilityMode === "fallback";
+  }
+
   function setManagedTimeout(fn, ms) {
     const timer = window.setTimeout(() => {
       state.timers.delete(timer);
       fn();
     }, ms);
     state.timers.add(timer);
+    return timer;
   }
 
   function rewriteUrl(raw) {
@@ -118,7 +158,14 @@
         } catch (error) {
           log("fetch patch error", String(error));
         }
-        return originalFetch(input, init);
+        const responsePromise = originalFetch(input, init);
+        try {
+          const url = typeof input === "string" ? input : input?.url;
+          if (typeof url === "string" && KEYWORDS.test(url)) {
+            responsePromise.then((response) => captureThreadsFromFetchResponse(response)).catch(() => {});
+          }
+        } catch {}
+        return responsePromise;
       };
       state.fetchPatched = true;
     }
@@ -126,6 +173,7 @@
     if (!state.xhrPatched) {
       XMLHttpRequest.prototype.open = function patchedOpen(method, url, ...rest) {
         const next = KEYWORDS.test(String(url)) ? rewriteUrl(String(url)) : url;
+        this.__clpbTrackedUrl = String(next || url || "");
         if (next !== url) log("xhr url", url, "->", next);
         return state.originalXhrOpen.call(this, method, next, ...rest);
       };
@@ -139,10 +187,31 @@
         } catch (error) {
           log("xhr patch error", String(error));
         }
+        try {
+          this.addEventListener("load", () => {
+            try {
+              const url = String(this.__clpbTrackedUrl || "");
+              if (!KEYWORDS.test(url)) return;
+              captureThreadsFromText(this.responseText);
+            } catch {}
+          });
+        } catch {}
         return state.originalXhrSend.call(this, body);
       };
       state.xhrPatched = true;
     }
+  }
+
+  function scheduleSupplementRender(reason = "scheduled", delay = RENDER_DEBOUNCE_MS) {
+    if (state.renderTimer) {
+      window.clearTimeout(state.renderTimer);
+      state.timers.delete(state.renderTimer);
+    }
+    const wait = Date.now() - state.lastScrollAt < SCROLL_IDLE_MS ? Math.max(delay, SCROLL_IDLE_MS) : delay;
+    state.renderTimer = setManagedTimeout(() => {
+      state.renderTimer = 0;
+      renderSupplementalHistory(reason);
+    }, wait);
   }
 
   function isExpandButton(button) {
@@ -205,6 +274,24 @@
 
   function writeHiddenIds(ids) {
     writeIdSet(HIDDEN_IDS_KEY, ids, "hidden");
+  }
+
+  function readCollapsedProjectRoots() {
+    try {
+      const raw = localStorage.getItem(COLLAPSED_PROJECTS_KEY);
+      const roots = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(roots) ? roots.map(normalizePathForCompare).filter(Boolean) : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  function writeCollapsedProjectRoots(roots) {
+    try {
+      localStorage.setItem(COLLAPSED_PROJECTS_KEY, JSON.stringify(Array.from(roots)));
+    } catch (error) {
+      log("collapsed projects write failed", String(error));
+    }
   }
 
   function threadRawId(threadOrId) {
@@ -270,9 +357,6 @@
     try {
       const version = localStorage.getItem(STORAGE_VERSION_KEY);
       if (version === STORAGE_VERSION) return;
-      // Earlier builds could keep a current-project-only snapshot or hide
-      // old cross-project threads after a failed metadata check. Rebuild from
-      // the broad local CLI history on the next refresh.
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(HIDDEN_IDS_KEY);
       localStorage.setItem(STORAGE_VERSION_KEY, STORAGE_VERSION);
@@ -284,6 +368,55 @@
     } catch (error) {
       log("global history storage migration failed", String(error));
     }
+  }
+
+  function captureThreadsFromText(text) {
+    if (typeof text !== "string" || !text || text.length > 10_000_000) return 0;
+    try {
+      return captureThreadsFromPayload(JSON.parse(text));
+    } catch {
+      return 0;
+    }
+  }
+
+  async function captureThreadsFromFetchResponse(response) {
+    try {
+      if (!response?.ok) return 0;
+      const contentType = String(response.headers?.get?.("content-type") || "");
+      if (contentType && !/json|text/i.test(contentType)) return 0;
+      const text = await response.clone().text();
+      return captureThreadsFromText(text);
+    } catch {
+      return 0;
+    }
+  }
+
+  function collectThreadLikeObjects(value, out = [], depth = 0) {
+    if (!value || depth > 5 || out.length >= TARGET) return out;
+    if (Array.isArray(value)) {
+      const normalized = value.map(normalizeListedThread).filter(Boolean);
+      if (normalized.length > 0) {
+        out.push(...normalized);
+        return out;
+      }
+      for (const item of value) collectThreadLikeObjects(item, out, depth + 1);
+      return out;
+    }
+    if (typeof value !== "object") return out;
+    for (const key of ["data", "threads", "items", "results", "conversations", "nodes"]) {
+      if (value[key] != null) collectThreadLikeObjects(value[key], out, depth + 1);
+    }
+    return out;
+  }
+
+  function captureThreadsFromPayload(payload) {
+    const threads = collectThreadLikeObjects(payload);
+    if (threads.length === 0) return 0;
+    const count = mergeSnapshotThreads(threads);
+    state.supplementIds = "";
+    scheduleExpand("captured-threads");
+    log("captured threads", { captured: threads.length, snapshot: count });
+    return threads.length;
   }
 
   function pruneSnapshotThreads(idsToRemove) {
@@ -323,7 +456,7 @@
     return hiddenIds;
   }
 
-  function snapshotProjectCounts(limit = 12) {
+  function snapshotProjectCounts(limit = 20) {
     const counts = new Map();
     for (const thread of readSnapshotThreads()) {
       const label = basename(thread.cwd);
@@ -399,6 +532,19 @@
     return snapshotRoots;
   }
 
+  function collectCollapsedProjectRoots() {
+    const roots = new Set();
+    for (const row of document.querySelectorAll("[data-app-action-sidebar-project-id]")) {
+      const collapsed =
+        row.getAttribute("data-app-action-sidebar-project-collapsed") === "true" ||
+        row.getAttribute("aria-expanded") === "false";
+      if (!collapsed) continue;
+      const root = normalizePathForCompare(row.getAttribute("data-app-action-sidebar-project-id"));
+      if (root) roots.add(root);
+    }
+    return roots;
+  }
+
   function threadHasVisibleProject(thread, projectRoots) {
     const cwd = normalizePathForCompare(thread?.cwd);
     if (!cwd) return false;
@@ -409,6 +555,32 @@
       }
     }
     return false;
+  }
+
+  function threadBelongsToAnyProject(thread, projectRoots) {
+    const cwd = normalizePathForCompare(thread?.cwd);
+    if (!cwd) return false;
+    for (const root of projectRoots) {
+      if (!root) continue;
+      if (cwd === root || cwd.startsWith(`${root}/`) || root.startsWith(`${cwd}/`)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function isThreadHiddenByCollapsedProject(thread, collapsedRoots) {
+    const roots = collapsedRoots || collectCollapsedProjectRoots();
+    return threadBelongsToAnyProject(thread, roots);
+  }
+
+  function collectMissingNativeThreads(collapsedRoots) {
+    const roots = collapsedRoots || collectCollapsedProjectRoots();
+    const nativeIds = collectNativeThreadIds();
+    return readSnapshotThreads().filter((thread) => {
+      if (nativeIds.has(threadDomId(thread))) return false;
+      return !isThreadHiddenByCollapsedProject(thread, roots);
+    });
   }
 
   function collectNativeThreadIds() {
@@ -460,15 +632,27 @@
     return sendRequest(type, payload);
   }
 
-  function findInternalRequestHelper(mod) {
-    const preferred = ["ts", "It", "ln"];
-    for (const key of preferred) {
-      const value = mod?.[key];
-      if (typeof value !== "function") continue;
-      const source = Function.prototype.toString.call(value);
-      if (/sendRequest\s*\(/.test(source)) return { key, fn: value };
-    }
+  function isHighLevelConversationHelper(source) {
+    return /beforeSendRequest|inheritThreadSettings|turnStartParams|thread-follower-start-turn|getStreamRole|workspaceRoots/.test(source);
+  }
 
+  function scoreInternalRequestHelper(key, value, source) {
+    if (!/sendRequest/.test(source)) return 0;
+    if (isHighLevelConversationHelper(source)) return 0;
+
+    let score = 0;
+    if (value.length > 0 && value.length <= 2) score += 20;
+    if (/return\s+[$\w]+\.sendRequest\s*\(\s*[$\w]+\s*,\s*[$\w]+\s*\)/.test(source)) score += 100;
+    if (/function\s+[$\w]+\s*\(\s*[$\w]+\s*,\s*[$\w]+\s*\)\s*\{\s*return\s+[$\w]+\.sendRequest/.test(source)) score += 50;
+    if (/sendRequest\s*=\s*\(\s*[$\w]+\s*,\s*[$\w]+\s*\)\s*=>/.test(source)) score += 40;
+    if (/\bdebug-run-app-action-request\b/.test(source)) score += 30;
+    if (/\bsendRequest\s*\(\s*[$\w]+\s*,\s*[$\w]+\s*\)/.test(source)) score += 10;
+    if (["ts", "It", "ln"].includes(key)) score += 5;
+    return score;
+  }
+
+  function findInternalRequestHelper(mod) {
+    const candidates = [];
     for (const key of Object.keys(mod || {})) {
       const value = mod[key];
       if (typeof value !== "function") continue;
@@ -478,9 +662,11 @@
       } catch {
         continue;
       }
-      if (/sendRequest\s*\(/.test(source)) return { key, fn: value };
+      const score = scoreInternalRequestHelper(key, value, source);
+      if (score > 0) candidates.push({ key, fn: value, score });
     }
-    return null;
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0] || null;
   }
 
   function normalizeSignalsModulePath(path) {
@@ -552,6 +738,9 @@
   }
 
   async function loadInternalActionModule() {
+    if (!canAttemptInternalAction()) {
+      throw new Error(state.lastInternalActionError || "Codex internal request helper is temporarily unavailable");
+    }
     if (!state.internalActionModulePromise) {
       state.internalActionModulePromise = (async () => {
         const candidates = await discoverSignalsModuleCandidates();
@@ -562,6 +751,10 @@
             const helper = findInternalRequestHelper(mod);
             if (helper) {
               log("internal action module", candidate, helper.key);
+              state.internalActionStatus = "available";
+              state.lastInternalActionError = "";
+              state.internalActionUnavailableUntil = 0;
+              setCompatibilityMode("native", "internal action available");
               return helper.fn;
             }
           } catch (error) {
@@ -571,6 +764,11 @@
         throw lastError || new Error("Codex internal request helper module was not found");
       })().catch((error) => {
         state.internalActionModulePromise = null;
+        state.internalActionStatus = "unavailable";
+        state.lastInternalActionError = String(error?.message || error);
+        state.internalActionUnavailableUntil = Date.now() + INTERNAL_ACTION_RETRY_MS;
+        setCompatibilityMode("fallback", state.lastInternalActionError);
+        logOnce("internal-action-unavailable", "internal action unavailable; using DOM-only fallback", state.lastInternalActionError);
         throw error;
       });
     }
@@ -652,6 +850,9 @@
   }
 
   async function sendCliRequest(method, params, options = {}) {
+    if (!canAttemptInternalAction()) {
+      throw new Error(state.lastInternalActionError || "Codex internal request helper is temporarily unavailable");
+    }
     return callInternalAction("send-cli-request-for-host", {
       hostId: "local",
       method,
@@ -713,6 +914,7 @@
     const now = Date.now();
     if (state.snapshotRefreshInFlight) return;
     if (!force && now - state.lastSnapshotRefreshAt < 30000) return;
+    if (!canAttemptInternalAction()) return;
     state.snapshotRefreshInFlight = true;
     state.lastSnapshotRefreshAt = now;
     try {
@@ -734,17 +936,19 @@
       });
       state.supplementIds = "";
       scheduleExpand("snapshot-refresh");
+      state.lastSnapshotRefreshError = "";
     } catch (error) {
-      log("snapshot refresh failed", String(error));
+      state.lastSnapshotRefreshError = String(error?.message || error);
+      logOnce("snapshot-refresh-failed", "snapshot refresh failed; keeping existing snapshot", state.lastSnapshotRefreshError);
     } finally {
       state.snapshotRefreshInFlight = false;
     }
   }
 
   async function loadThreadIntoNativeCache(rawId) {
-    await callInternalAction("load-recent-conversation-ids-for-host", {
+    await callInternalAction("hydrate-pinned-threads", {
       hostId: "local",
-      conversationIds: [rawId]
+      threadIds: [rawId]
     });
     const result = await sendCliRequest(
       "thread/read",
@@ -767,48 +971,120 @@
     }
     const thread = normalizeListedThread(rawThread);
     if (thread) mergeSnapshotThreads([thread]);
-    return true;
+    return waitForNativeThreadRow(threadDomId(rawId), 3000);
+  }
+
+  async function validateMissingNativeIds(ids) {
+    const nativeIds = collectNativeThreadIds();
+    const foundSet = new Set(ids.filter((id) => nativeIds.has(threadDomId(id))));
+    const missingIds = ids.filter((id) => !foundSet.has(id));
+    const idsToRemove = [];
+    for (const id of missingIds) {
+      try {
+        const result = await sendCliRequest(
+          "thread/read",
+          {
+            threadId: id,
+            includeTurns: false
+          },
+          { timeoutMs: 12000 }
+        );
+        const rawThread = result?.thread || result;
+        if (rawThread?.archived === true || rawThread?.status?.type === "archived") {
+          rememberArchivedIds([id]);
+          idsToRemove.push(id);
+        } else if (shouldHideThread(rawThread)) {
+          rememberHiddenIds([id]);
+          idsToRemove.push(id);
+        } else {
+          const thread = normalizeListedThread(rawThread);
+          if (thread) mergeSnapshotThreads([thread]);
+        }
+      } catch (error) {
+        log("thread validation failed", id, String(error?.message || error));
+      }
+    }
+    if (idsToRemove.length > 0) {
+      const removed = pruneSnapshotThreads(idsToRemove);
+      if (removed > 0) {
+        log("stale snapshot pruned", {
+          removed,
+          stale: idsToRemove.length
+        });
+      }
+    }
+    log("thread metadata check", {
+      requested: ids.length,
+      found: foundSet.size,
+      pending: missingIds.length,
+      removed: idsToRemove.length
+    });
+    scheduleExpand("metadata-check");
   }
 
   async function promoteMissingToNative(missing) {
     const ids = Array.from(new Set(missing.map(threadRawId).filter(Boolean)));
     if (ids.length === 0 || state.promoteInFlight) return;
+    if (!canAttemptInternalAction()) return;
     const key = ids.join("|");
-    if (key === state.promotedKey) return;
+    if (key === state.promotedKey && Date.now() < state.nextPromoteAt) return;
     state.promoteInFlight = true;
     state.promotedKey = key;
+    state.nextPromoteAt = Date.now() + 1000;
     try {
-      const results = await Promise.all(
-        ids.map(async (id) => {
-          try {
-            return (await loadThreadIntoNativeCache(id)) ? id : null;
-          } catch {
-            return null;
-          }
-        })
-      );
-      const foundSet = new Set(results.filter(Boolean));
-      const staleIds = ids.filter((id) => !foundSet.has(id));
-      if (staleIds.length > 0) {
-        const removed = pruneSnapshotThreads(staleIds);
-        if (removed > 0) {
-          log("stale snapshot pruned", {
-            removed,
-            stale: staleIds.length
-          });
-        }
-      }
-      log("thread metadata check", {
-        requested: ids.length,
-        found: foundSet.size
+      await callInternalAction("hydrate-pinned-threads", {
+        hostId: "local",
+        threadIds: ids
       });
-      setManagedTimeout(() => scheduleExpand("metadata-check"), 250);
+      setManagedTimeout(() => scheduleExpand("native-hydrate"), 100);
+      setManagedTimeout(() => {
+        validateMissingNativeIds(ids).catch((error) => {
+          log("thread validation failed", String(error?.message || error));
+        });
+      }, 2500);
+      log("native hydrate requested", {
+        requested: ids.length
+      });
     } catch (error) {
       state.promotedKey = "";
-      log("thread metadata check failed", String(error));
+      logOnce("thread-metadata-check-failed", "thread metadata check failed", String(error?.message || error));
     } finally {
       state.promoteInFlight = false;
     }
+  }
+
+  function ensureNativeHistory(reason = "keeper") {
+    const threads = readSnapshotThreads();
+    const missingNative = collectMissingNativeThreads();
+    if (missingNative.length > 0) {
+      log("native history gap", {
+        reason,
+        snapshot: threads.length,
+        native: collectNativeThreadIds().size,
+        missing: missingNative.length
+      });
+      promoteMissingToNative(missingNative);
+    }
+  }
+
+  function detectCompatibilityMode() {
+    loadInternalActionModule()
+      .then(() => {
+        refreshSnapshotFromCli(true);
+        scheduleSupplementRender("compat-native", 0);
+      })
+      .catch(() => {
+        scheduleSupplementRender("compat-fallback", 0);
+      });
+  }
+
+  function installNativeHistoryKeeper() {
+    const tick = () => {
+      if (state.keeperStopped) return;
+      ensureNativeHistory("keeper");
+      setManagedTimeout(tick, NATIVE_KEEPER_INTERVAL_MS);
+    };
+    setManagedTimeout(tick, NATIVE_KEEPER_INTERVAL_MS);
   }
 
   function findNativeThreadRow(localId) {
@@ -931,6 +1207,7 @@
     item.className = "after:block after:h-px after:content-[''] last:after:hidden";
     item.setAttribute("role", "listitem");
     item.setAttribute("data-clpb-supplemental-item", "");
+    item.setAttribute("data-clpb-thread-dom-id", threadId);
     if (options.project) item.setAttribute("data-clpb-project-supplemental-item", "");
 
     const row = document.createElement("div");
@@ -981,9 +1258,25 @@
     return Array.from(projectList.querySelectorAll("button")).some(isExpandButton);
   }
 
-  function renderProjectSupplementalHistory(threads, nativeIds) {
-    document.querySelectorAll(PROJECT_SUPPLEMENT_ITEM_SELECTOR).forEach((item) => item.remove());
+  function isUserCollapsedProject(root) {
+    return state.userCollapsedProjectRoots.has(root);
+  }
 
+  function updateUserCollapsedProject(projectList, root) {
+    const collapsed = projectHasCollapsedThreads(projectList);
+    const before = state.userCollapsedProjectRoots.size;
+    if (collapsed) {
+      state.userCollapsedProjectRoots.add(root);
+    } else {
+      state.userCollapsedProjectRoots.delete(root);
+    }
+    if (before !== state.userCollapsedProjectRoots.size) {
+      writeCollapsedProjectRoots(state.userCollapsedProjectRoots);
+      log("project collapsed state", { root, collapsed });
+    }
+  }
+
+  function renderProjectSupplementalHistory(threads, nativeIds) {
     const sidebarProjectIds = new Set();
     for (const row of document.querySelectorAll("[data-app-action-sidebar-project-id]")) {
       const value = normalizePathForCompare(row.getAttribute("data-app-action-sidebar-project-id"));
@@ -991,11 +1284,13 @@
     }
 
     let rendered = 0;
+    let removed = 0;
     const seen = new Set();
+    const desired = new Set();
     for (const projectList of document.querySelectorAll(PROJECT_LIST_SELECTOR)) {
       const root = normalizePathForCompare(projectList.getAttribute("data-app-action-sidebar-project-list-id"));
       if (!root) continue;
-      if (projectHasCollapsedThreads(projectList)) continue;
+      if (isUserCollapsedProject(root)) continue;
 
       const nestedProjects = [];
       for (const pid of sidebarProjectIds) {
@@ -1016,14 +1311,27 @@
         return true;
       });
       for (const thread of matches) {
-        seen.add(threadDomId(thread));
-        list.appendChild(makeSupplementalRow(thread, { project: true }));
-        rendered += 1;
+        const id = threadDomId(thread);
+        seen.add(id);
+        desired.add(id);
+        const existing = list.querySelector(`[data-clpb-project-supplemental-item][data-clpb-thread-dom-id="${CSS.escape(id)}"]`);
+        if (!existing) {
+          list.appendChild(makeSupplementalRow(thread, { project: true }));
+          rendered += 1;
+        }
       }
     }
 
-    if (rendered > 0) {
-      log("project supplement rendered", { rendered });
+    for (const item of document.querySelectorAll(PROJECT_SUPPLEMENT_ITEM_SELECTOR)) {
+      const id = item.getAttribute("data-clpb-thread-dom-id");
+      if (!id || !desired.has(id)) {
+        item.remove();
+        removed += 1;
+      }
+    }
+
+    if (rendered > 0 || removed > 0) {
+      log("project supplement rendered", { rendered, removed });
     }
     return seen;
   }
@@ -1032,62 +1340,80 @@
     return Array.from(document.querySelectorAll(`${PROJECT_LIST_SELECTOR} button`)).filter(isExpandButton).length;
   }
 
-  function renderSupplementalHistory() {
+  function renderSupplementalHistory(reason = "render") {
+    if (state.renderingSupplement) return;
+    if (Date.now() - state.lastScrollAt < SCROLL_IDLE_MS) {
+      scheduleSupplementRender(reason, SCROLL_IDLE_MS);
+      return;
+    }
     const scroll = document.querySelector("[data-app-action-sidebar-scroll]");
     if (!scroll) return;
 
-    const threads = readSnapshotThreads();
-    const nativeIds = collectNativeThreadIds();
-    const projectRoots = collectVisibleProjectRoots();
-    const missingNative = threads.filter((thread) => !nativeIds.has(threadDomId(thread)));
-    const projectSupplementIds = renderProjectSupplementalHistory(missingNative, nativeIds);
-    const sidebarBasenames = collectSidebarProjectBasenames();
-    const missing = missingNative.filter((thread) => {
-      if (projectSupplementIds.has(threadDomId(thread))) return false;
-      if (threadHasVisibleProject(thread, projectRoots)) return false;
-      if (sidebarBasenames.size > 0) {
-        const cwdParts = normalizePathForCompare(thread.cwd).split("/").filter(Boolean);
-        if (cwdParts.some((part) => sidebarBasenames.has(part))) return false;
+    state.renderingSupplement = true;
+    try {
+      const threads = readSnapshotThreads();
+      const nativeIds = collectNativeThreadIds();
+      const collapsedRoots = collectCollapsedProjectRoots();
+      const projectRoots = collectVisibleProjectRoots();
+      const missingNative = threads.filter((thread) => {
+        if (nativeIds.has(threadDomId(thread))) return false;
+        return !isThreadHiddenByCollapsedProject(thread, collapsedRoots);
+      });
+      promoteMissingToNative(missingNative);
+
+      const projectSupplementIds = isFallbackMode() ? renderProjectSupplementalHistory(missingNative, nativeIds) : new Set();
+      const sidebarBasenames = collectSidebarProjectBasenames();
+      const missingAll = missingNative.filter((thread) => {
+        if (projectSupplementIds.has(threadDomId(thread))) return false;
+        if (threadHasVisibleProject(thread, projectRoots)) return false;
+        if (sidebarBasenames.size > 0) {
+          const cwdParts = normalizePathForCompare(thread.cwd).split("/").filter(Boolean);
+          if (cwdParts.some((part) => sidebarBasenames.has(part))) return false;
+        }
+        return true;
+      });
+      const omittedMissing = Math.max(0, missingAll.length - MAX_EXTRA_HISTORY_ROWS);
+      const missing = isFallbackMode() ? missingAll.slice(0, MAX_EXTRA_HISTORY_ROWS) : [];
+      const nextIds = missing.map((thread) => threadDomId(thread)).join("|");
+      const existing = document.querySelector(SUPPLEMENT_SELECTOR);
+
+      if (missing.length === 0) {
+        existing?.remove();
+        state.supplementIds = "";
+        return;
       }
-      return true;
-    });
-    const nextIds = missing.map((thread) => threadDomId(thread)).join("|");
-    const existing = document.querySelector(SUPPLEMENT_SELECTOR);
+      if (existing && state.supplementIds === nextIds) return;
 
-    promoteMissingToNative(missingNative);
-
-    if (missing.length === 0) {
       existing?.remove();
-      state.supplementIds = "";
-      return;
+      state.supplementIds = nextIds;
+
+      const section = document.createElement("div");
+      section.className = "px-row-x";
+      section.setAttribute("data-app-action-sidebar-section", "");
+      section.setAttribute("data-clpb-history-section", "");
+
+      const heading = document.createElement("div");
+      heading.className = "flex h-8 items-center px-2 text-xs font-semibold uppercase text-token-text-tertiary";
+      heading.textContent = `Extra history (${missingAll.length}${omittedMissing ? `, showing ${missing.length}` : ""})`;
+
+      const list = document.createElement("div");
+      list.className = "flex flex-col gap-px";
+      list.setAttribute("role", "list");
+      list.setAttribute("aria-label", "Extra history");
+      missing.forEach((thread) => list.appendChild(makeSupplementalRow(thread)));
+
+      section.append(heading, list);
+      scroll.appendChild(section);
+      log("supplement rendered", {
+        reason,
+        missing: missing.length,
+        omitted: omittedMissing,
+        snapshot: threads.length,
+        native: nativeIds.size
+      });
+    } finally {
+      state.renderingSupplement = false;
     }
-    if (existing && state.supplementIds === nextIds) return;
-
-    existing?.remove();
-    state.supplementIds = nextIds;
-
-    const section = document.createElement("div");
-    section.className = "px-row-x";
-    section.setAttribute("data-app-action-sidebar-section", "");
-    section.setAttribute("data-clpb-history-section", "");
-
-    const heading = document.createElement("div");
-    heading.className = "flex h-8 items-center px-2 text-xs font-semibold uppercase text-token-text-tertiary";
-    heading.textContent = `Extra history (${missing.length})`;
-
-    const list = document.createElement("div");
-    list.className = "flex flex-col gap-px";
-    list.setAttribute("role", "list");
-    list.setAttribute("aria-label", "Extra history");
-    missing.forEach((thread) => list.appendChild(makeSupplementalRow(thread)));
-
-    section.append(heading, list);
-    scroll.appendChild(section);
-    log("supplement rendered", {
-      missing: missing.length,
-      snapshot: threads.length,
-      native: nativeIds.size
-    });
   }
 
   function expandNativeProjectLists(reason = "scan") {
@@ -1115,14 +1441,14 @@
         remainingExpandButtons: countExpandButtons()
       });
     }
-    renderSupplementalHistory();
+    scheduleSupplementRender("expand-native", 0);
     return clicked;
   }
 
   function autoExpandNativeProjectLists(reason) {
     const withinAutoWindow = Date.now() <= state.autoExpandDeadlineMs;
     if (!state.autoExpandEnabled || !withinAutoWindow) {
-      renderSupplementalHistory();
+      scheduleSupplementRender(`auto-expand:${reason}`, 0);
       return 0;
     }
     return expandNativeProjectLists(reason);
@@ -1140,7 +1466,7 @@
           return;
         }
       }
-      renderSupplementalHistory();
+      scheduleSupplementRender(`schedule:${reason}`, 0);
     });
   }
 
@@ -1150,7 +1476,17 @@
       const target = event.target;
       const button = target instanceof Element ? target.closest(`${PROJECT_LIST_SELECTOR} button`) : null;
       if (button) {
+        const projectList = button.closest(PROJECT_LIST_SELECTOR);
+        const root = normalizePathForCompare(projectList?.getAttribute("data-app-action-sidebar-project-list-id"));
         state.autoExpandEnabled = false;
+        if (projectList && root) {
+          for (const ms of [0, 150]) {
+            setManagedTimeout(() => {
+              updateUserCollapsedProject(projectList, root);
+              scheduleSupplementRender("project-click", 0);
+            }, ms);
+          }
+        }
       }
     };
     document.addEventListener(
@@ -1159,7 +1495,22 @@
       true
     );
 
-    state.observer = new MutationObserver(() => scheduleExpand("mutation"));
+    const installScrollListener = () => {
+      const scroll = document.querySelector("[data-app-action-sidebar-scroll]");
+      if (!scroll || state.scrollListener) return;
+      state.scrollListener = () => {
+        state.lastScrollAt = Date.now();
+      };
+      scroll.addEventListener("scroll", state.scrollListener, { passive: true });
+    };
+    installScrollListener();
+    setManagedTimeout(installScrollListener, 1000);
+
+    state.observer = new MutationObserver(() => {
+      if (state.renderingSupplement) return;
+      installScrollListener();
+      scheduleSupplementRender("mutation");
+    });
     state.observer.observe(document.documentElement, {
       childList: true,
       subtree: true
@@ -1167,9 +1518,14 @@
   }
 
   function stop() {
+    state.keeperStopped = true;
     if (state.observer) state.observer.disconnect();
     if (state.projectClickListener) {
       document.removeEventListener("click", state.projectClickListener, true);
+    }
+    const scroll = document.querySelector("[data-app-action-sidebar-scroll]");
+    if (scroll && state.scrollListener) {
+      scroll.removeEventListener("scroll", state.scrollListener);
     }
     for (const timer of state.timers) window.clearTimeout(timer);
     state.timers.clear();
@@ -1193,17 +1549,23 @@
       refreshSnapshotFromCli(true);
       scheduleExpand("reset-history");
     },
-    render: renderSupplementalHistory,
+    render: () => renderSupplementalHistory("manual"),
     status: () => ({
       projects: document.querySelectorAll(PROJECT_LIST_SELECTOR).length,
-      threads: document.querySelectorAll(THREAD_SELECTOR).length,
+      threads: document.querySelectorAll(`${THREAD_SELECTOR}:not([data-clpb-managed-row])`).length,
       nativeThreads: collectNativeThreadIds().size,
-      supplementThreads: document.querySelectorAll("[data-clpb-supplemental-row]").length,
-      projectSupplementItems: document.querySelectorAll(PROJECT_SUPPLEMENT_ITEM_SELECTOR).length,
+      supplementThreads: document.querySelectorAll("[data-clpb-supplemental-item]:not([hidden]) [data-clpb-supplemental-row]").length,
+      projectSupplementRows: document.querySelectorAll(`${PROJECT_SUPPLEMENT_ITEM_SELECTOR}:not([hidden])`).length,
+      collapsedProjects: collectCollapsedProjectRoots().size,
       snapshotThreads: readSnapshotThreads().length,
-      missingNativeThreads: readSnapshotThreads().filter((thread) => !collectNativeThreadIds().has(threadDomId(thread))).length,
       snapshotProjects: snapshotProjectCounts(20),
+      extraHistoryRows: document.querySelectorAll("[data-clpb-history-section] [data-clpb-managed-row]").length,
       historySectionText: document.querySelector(SUPPLEMENT_SELECTOR)?.innerText || "",
+      compatibilityMode: state.compatibilityMode,
+      internalActions: state.internalActionStatus,
+      internalActionRetryInMs: Math.max(0, state.internalActionUnavailableUntil - Date.now()),
+      lastInternalActionError: state.lastInternalActionError,
+      lastSnapshotRefreshError: state.lastSnapshotRefreshError,
       lastSnapshotRefreshAt: state.lastSnapshotRefreshAt,
       snapshotRefreshInFlight: state.snapshotRefreshInFlight,
       globalExtraHistory: GLOBAL_EXTRA_HISTORY,
@@ -1213,13 +1575,16 @@
     stop
   };
 
+  state.userCollapsedProjectRoots = readCollapsedProjectRoots();
   patchRequests();
   installObserver();
+  installNativeHistoryKeeper();
   migrateStorageForGlobalHistory();
   log("loaded", window[SCRIPT_KEY].status());
+  detectCompatibilityMode();
   refreshSnapshotFromCli(true);
   scheduleExpand("load");
-  renderSupplementalHistory();
+  scheduleSupplementRender("load", 0);
   [250, 750, 1500, 3000].forEach((ms) => {
     setManagedTimeout(() => autoExpandNativeProjectLists(`timer:${ms}`), ms);
   });

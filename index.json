@@ -118,6 +118,23 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/hL091015/CodexPlusPlusScriptMarket/main/scripts/zh_CN%E6%B1%89%E5%8C%96.user.js",
       "sha256": "72214D31D425D1CE936B457AA43FCC40DF55F4DE3B9B140F9510C7F392CDC845"
+    },
+    {
+      "id": "bennett-ui-improvements",
+      "name": "Bennett UI Improvements",
+      "description": "迁移自 b-nnett Bennett UI 的 renderer-only UI 增强",
+      "version": "1.0.5-bigpizza.1",
+      "author": "bennett; JHees",
+      "tags": [
+        "codex",
+        "ui",
+        "sidebar",
+        "settings",
+        "polish"
+      ],
+      "homepage": "",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
+      "sha256": "4c13009815d74b9aa911e80660cf70596c87340d2ed2f194dbe37915f9cc969f"
     }
   ]
 }

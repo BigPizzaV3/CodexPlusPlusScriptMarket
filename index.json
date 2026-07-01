@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-06-25T06:01:55.000Z",
+  "updated_at": "2026-07-01T07:43:41.000Z",
   "scripts": [
     {
       "id": "codex-context-ring-restore",
@@ -72,7 +72,7 @@
       "id": "codex-daily-token-usage",
       "name": "Codex Daily Token Usage",
       "description": "每日 Token 统计，近 5 日滚动存储，自动复用已有采集，支持 Model 价格、成本估算、趋势明细和分享图",
-      "version": "1.4.5",
+      "version": "1.4.7",
       "author": "kts-kris",
       "tags": [
         "codex",
@@ -84,7 +84,7 @@
       ],
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-daily-token-usage.js",
-      "sha256": "b565fe5a5728d52700d4d089d874a3f3e7f258a82fdea69762155ebbdf1c2c2f"
+      "sha256": "660499e55ac2f4b6cafd32403a584d9a8b0b6d761c5e68d27d793611df4af3b7"
     },
     {
       "id": "codex-list-pagebuster",

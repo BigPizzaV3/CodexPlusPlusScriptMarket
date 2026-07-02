@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-06-25T06:01:55.000Z",
+  "updated_at": "2026-07-02T00:20:19.000Z",
   "scripts": [
     {
       "id": "codex-context-ring-restore",
@@ -40,14 +40,14 @@
       "name": "Hide Usage Alert",
       "description": "隐藏额度提醒",
       "version": "0.1.2",
-      "author": "Ghibli1024",
+      "author": "0xTotoroX",
       "tags": [
         "usage",
         "quota",
         "ui",
         "hide"
       ],
-      "homepage": "",
+      "homepage": "https://github.com/0xTotoroX/codex-hide-usage-alert",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/hide-usage-alert.js",
       "sha256": "b13279be9d6707c3109d0f71c7c1b56b2645cb659cbbca6a67f438022f3bae9c"
     },
@@ -118,6 +118,22 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/hL091015/CodexPlusPlusScriptMarket/main/scripts/zh_CN%E6%B1%89%E5%8C%96.user.js",
       "sha256": "72214D31D425D1CE936B457AA43FCC40DF55F4DE3B9B140F9510C7F392CDC845"
+    },
+    {
+      "id": "tux-toolbar-buddy",
+      "name": "Tux Toolbar Buddy",
+      "description": "把菜单入口轻量化为Tux工具栏按钮，隐藏状态点和版本信息。",
+      "version": "0.1.0",
+      "author": "0xTotoroX",
+      "tags": [
+        "menu",
+        "toolbar",
+        "icon",
+        "ui"
+      ],
+      "homepage": "https://github.com/0xTotoroX/tux-toolbar-buddy",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tux-toolbar-buddy.js",
+      "sha256": "8f353ca2bb4e47e10be8ad70497330b0e7c25fd77aa69c2f40ad81b7cf449db1"
     }
   ]
 }

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-04T08:39:43.000Z",
+  "updated_at": "2026-07-06T07:49:15.683Z",
   "scripts": [
     {
       "id": "codex-context-ring-restore",
@@ -151,6 +151,23 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
       "sha256": "087a96fd4b407eb86c15e21cf7612debd7c27575638f64b840322e43675aef5d"
+    },
+    {
+      "id": "codexradar-iq-badge",
+      "name": "CodexRadar IQ Badge",
+      "description": "在推理菜单显示 CodexRadar 当日 IQ",
+      "version": "0.1.0",
+      "author": "38yuanzhao",
+      "tags": [
+        "codex",
+        "iq",
+        "reasoning",
+        "ui",
+        "radar"
+      ],
+      "homepage": "https://codexradar.com/",
+      "script_url": "https://raw.githubusercontent.com/38yuanzhao/CodexPlusPlusScriptMarket/codexradar-iq-badge/scripts/codexradar-iq-badge.js",
+      "sha256": "57c6fbead1f6d232c0c3cb46a8d7f4fd0ec8b0a791b0653c492ffa47bd4e50b5"
     }
   ]
 }

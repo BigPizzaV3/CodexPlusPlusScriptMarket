@@ -1,7 +1,41 @@
 {
   "version": 1,
-  "updated_at": "2026-07-16T08:27:07Z",
+  "updated_at": "2026-07-16T10:49:15Z",
   "scripts": [
+    {
+      "id": "ultra-full-access",
+      "name": "Ultra 完全访问",
+      "description": "在 Ultra 推理模式下保持完全访问权限，并同步修正权限请求与前端状态显示。仅处理已识别的 Ultra 任务，其他任务保留原有权限行为。",
+      "version": "2026.07.16.4",
+      "author": "AnctyEnly453",
+      "tags": [
+        "codex",
+        "ultra",
+        "permissions",
+        "full-access",
+        "ui"
+      ],
+      "homepage": "https://github.com/AnctyEnly453",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/ultra-full-access.js",
+      "sha256": "ca961405edf455f79602571f17827bfcf4aaaab2a467dc3a1450cc75d9619ff5"
+    },
+    {
+      "id": "codex-disk-write-guard",
+      "name": "Codex 磁盘写入修复",
+      "description": "修复 Codex Desktop 的异常磁盘写入：节流大型 Sentry 状态快照，并将 Git Review 固定为“仅上次变更”，减少 scope_v3.json 写放大与临时 Git 对象库造成的持续写入和瞬时峰值。",
+      "version": "2026.07.16.3",
+      "author": "AnctyEnly453",
+      "tags": [
+        "codex",
+        "disk",
+        "performance",
+        "sentry",
+        "git-review"
+      ],
+      "homepage": "https://github.com/AnctyEnly453",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-disk-write-guard.js",
+      "sha256": "4e4c9c710fab04116fb011c2b507ff2c5f379b39d4c7148699d47ecfdf260daf"
+    },
     {
       "id": "codex-context-used-meter",
       "name": "Codex Context Used Meter",

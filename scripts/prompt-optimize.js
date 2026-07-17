@@ -2,12 +2,12 @@
 @codex-plus-script
 name: Prompt Optimize
 description: Optimize the composer prompt with an external LLM; click ✨ to optimize, click again to restore.
-version: 1.0.0
+version: 1.0.1
 author: Codex++ Community
 */
 
 (() => {
-  const SCRIPT_VERSION = "1.0.0";
+  const SCRIPT_VERSION = "1.0.1";
   const API_KEY = "__codexPlusPromptOptimize";
   const MARKET_ID = "prompt-optimize";
   const BRIDGE_KEY = "__codexSessionDeleteBridge";
@@ -100,6 +100,7 @@ author: Codex++ Community
     disposed: false,
     loading: false,
     abort: null,
+    bridgePathUnsupported: false,
     lastWrittenText: null,
     writeToken: 0,
   };
@@ -1690,9 +1691,27 @@ author: Codex++ Community
     return typeof window[BRIDGE_KEY] === "function";
   }
 
+  function hasElectronFetchBridge() {
+    return typeof window.electronBridge?.sendMessageFromView === "function";
+  }
+
+  function hasRequestTransport() {
+    return hasCodexPlusBridge() || hasElectronFetchBridge();
+  }
+
+  function bridgeUnsupportedError() {
+    const error = new Error("当前 Codex++ 的 LLM Bridge 路由不可用");
+    error.code = "CPO_BRIDGE_UNSUPPORTED";
+    return error;
+  }
+
+  function isBridgeUnsupportedError(error) {
+    return error?.code === "CPO_BRIDGE_UNSUPPORTED";
+  }
+
   async function bridgeJson(payload, signal) {
     if (!hasCodexPlusBridge()) {
-      throw new Error("当前 Codex++ 版本不支持 LLM Bridge，请升级 Codex++");
+      throw bridgeUnsupportedError();
     }
     const call = Promise.resolve().then(() => window[BRIDGE_KEY](BRIDGE_PATH, payload || {}));
     if (!signal) return call;
@@ -1721,7 +1740,84 @@ author: Codex++ Community
     });
   }
 
-  async function requestJson({ upstreamUrl, method, headers, body, signal }) {
+  function responseErrorMessage(raw, fallback) {
+    const text = typeof raw === "string" ? raw : "";
+    if (text.trim()) {
+      try {
+        const data = JSON.parse(text);
+        return collapseWs(data?.error?.message || data?.message || data?.error || text).slice(0, 240);
+      } catch (_) {
+        return collapseWs(text).slice(0, 240);
+      }
+    }
+    return fallback;
+  }
+
+  function electronFetchJson({ upstreamUrl, method, headers, body, signal }) {
+    if (!hasElectronFetchBridge()) {
+      throw new Error("当前 Codex++ 不提供可用的 LLM 请求通道");
+    }
+    const upstream = normalizeBaseUrl(upstreamUrl);
+    const requestId = `prompt-optimize-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        window.clearTimeout(timer);
+        window.removeEventListener("message", onMessage);
+        signal?.removeEventListener?.("abort", onAbort);
+      };
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback(value);
+      };
+      const onAbort = () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        finish(reject, error);
+      };
+      const onMessage = (event) => {
+        const result = event?.data;
+        if (result?.type !== "fetch-response" || String(result.requestId || "") !== requestId) return;
+        const httpStatus = Number(result.status || 0);
+        const rawBody = typeof result.bodyJsonString === "string" ? result.bodyJsonString : "";
+        if (result.responseType === "error" || !(httpStatus >= 200 && httpStatus < 300)) {
+          const message = responseErrorMessage(result.error || rawBody, `HTTP ${httpStatus || "error"}`);
+          finish(reject, new Error(message));
+          return;
+        }
+        try {
+          finish(resolve, rawBody.trim() ? JSON.parse(rawBody) : {});
+        } catch (_) {
+          finish(reject, new Error("模型返回了无法解析的 JSON"));
+        }
+      };
+      const timer = window.setTimeout(() => {
+        finish(reject, new Error("LLM 请求超时"));
+      }, REQUEST_TIMEOUT_MS);
+      window.addEventListener("message", onMessage);
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener?.("abort", onAbort, { once: true });
+      try {
+        window.electronBridge.sendMessageFromView({
+          type: "fetch",
+          requestId,
+          url: upstream,
+          method: method || "POST",
+          headers: headers || {},
+          body: body == null ? null : typeof body === "string" ? body : JSON.stringify(body),
+        });
+      } catch (error) {
+        finish(reject, error);
+      }
+    });
+  }
+
+  async function requestJsonViaCodexBridge({ upstreamUrl, method, headers, body, signal }) {
     const upstream = normalizeBaseUrl(upstreamUrl);
     debugLog("bridge request", { upstream, method: method || "POST" });
     const result = await bridgeJson(
@@ -1737,7 +1833,7 @@ author: Codex++ Community
     if (!result || result.status !== "ok") {
       const message = collapseWs(result?.message || result?.error || "LLM Bridge 请求失败");
       if (/unknown bridge path|未知.*bridge/i.test(message)) {
-        throw new Error("当前 Codex++ 版本不支持 LLM Bridge，请升级 Codex++");
+        throw bridgeUnsupportedError();
       }
       throw new Error(message || "LLM Bridge 请求失败");
     }
@@ -1755,6 +1851,20 @@ author: Codex++ Community
       throw new Error(collapseWs(message).slice(0, 240));
     }
     return data;
+  }
+
+  async function requestJson(options) {
+    if (hasCodexPlusBridge() && !runtime.bridgePathUnsupported) {
+      try {
+        const data = await requestJsonViaCodexBridge(options);
+        return data;
+      } catch (error) {
+        if (!isBridgeUnsupportedError(error)) throw error;
+        runtime.bridgePathUnsupported = true;
+        debugLog("/llm-proxy unavailable; falling back to Electron fetch bridge");
+      }
+    }
+    return electronFetchJson(options);
   }
 
   async function callOpenAI({ baseUrl, apiKey, model, system, user, signal }) {
@@ -1867,8 +1977,8 @@ author: Codex++ Community
   }
 
   async function runOptimize() {
-    if (!hasCodexPlusBridge()) {
-      showToast("当前 Codex++ 版本不支持 LLM Bridge，请升级 Codex++", "error");
+    if (!hasRequestTransport()) {
+      showToast("当前 Codex++ 不提供可用的 LLM 请求通道", "error");
       return;
     }
     const settings = loadSettings();
@@ -2000,7 +2110,7 @@ author: Codex++ Community
     overlay.innerHTML = `
       <div class="cpo-card" role="dialog" aria-modal="true" aria-label="Prompt Optimize 设置">
         <h2>Prompt Optimize 设置</h2>
-        <p class="cpo-sub">配置外部 LLM。请求由 Codex++ 内置 LLM Bridge 代发，无需 sidecar 或本地代理。右键 ✨ 可再次打开本面板。</p>
+        <p class="cpo-sub">配置外部 LLM。请求优先由 Codex++ LLM Bridge 代发，并兼容当前发行版的 Electron 原生请求通道；无需 sidecar 或本地代理。右键 ✨ 可再次打开本面板。</p>
         <div class="cpo-grid">
           <label>协议
             <select data-cpo="protocol">
@@ -2012,9 +2122,15 @@ author: Codex++ Community
             <input data-cpo="baseUrl" type="url" spellcheck="false" placeholder="https://api.krill-ai.com/codex/v1" />
           </label>
           <div class="cpo-prompt-block">
-            <div class="cpo-prompt-head"><span>Codex++ LLM Bridge</span></div>
+            <div class="cpo-prompt-head"><span>Codex++ 请求通道</span></div>
             <div style="font-size:12px;line-height:1.45;color:#d4d4d8;">
-              ${hasCodexPlusBridge() ? "已检测到 Codex++ Bridge；请求将通过 /llm-proxy 发送。" : "当前版本未提供 Bridge，请先升级 Codex++。"}
+              ${hasCodexPlusBridge() && hasElectronFetchBridge()
+                ? "已检测到 LLM Bridge 与 Electron 原生通道；优先使用 /llm-proxy，不支持时自动兼容。"
+                : hasCodexPlusBridge()
+                  ? "已检测到 Codex++ LLM Bridge。"
+                  : hasElectronFetchBridge()
+                    ? "已检测到 Electron 原生请求通道，可兼容当前 Codex++ 发行版。"
+                    : "当前版本未提供可用请求通道。"}
             </div>
           </div>
           <label>API Key
@@ -2278,7 +2394,10 @@ author: Codex++ Community
       inputTag: input ? input.tagName : null,
       configured: isConfigured(),
       bridgeInjected: hasCodexPlusBridge(),
+      bridgePathUnsupported: runtime.bridgePathUnsupported,
       bridgePath: BRIDGE_PATH,
+      electronFetchBridge: hasElectronFetchBridge(),
+      requestTransportAvailable: hasRequestTransport(),
       settings: (() => {
         const s = loadSettings();
         return {
@@ -2377,7 +2496,7 @@ author: Codex++ Community
         if (typeof options.model === "string" && options.model.trim()) settings.model = options.model.trim();
         if (typeof options.baseUrl === "string" && options.baseUrl.trim()) settings.baseUrl = normalizeBaseUrl(options.baseUrl);
       }
-      if (!hasCodexPlusBridge()) throw new Error("当前 Codex++ 版本不支持 LLM Bridge，请升级 Codex++");
+      if (!hasRequestTransport()) throw new Error("当前 Codex++ 不提供可用的 LLM 请求通道");
       if (!isConfigured(settings)) {
         throw new Error("not configured");
       }

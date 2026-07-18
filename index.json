@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-16T08:27:07Z",
+  "updated_at": "2026-07-18T11:37:32Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -238,6 +238,29 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/Codex%20Model%20Matrix.js",
       "sha256": "0a25838a887699f8c8b72efc67f64d9df045697f6e1555b856fb10a9baa8f075"
+    },
+    {
+      "id": "dream-skin-engine",
+      "name": "Codex Dream Skin Engine",
+      "description": "Codex 多皮肤引擎：内置 3 套预置（桥本有菜 / 极光 Aurora / 暮色 Sunset），支持上传自己的背景图、明暗切换、一键恢复官方外观。右下角浮动 🎨 按钮打开面板实时切换，设置持久化到本地。Codex++ userscript 注入，无需 CDP。",
+      "version": "2.0.0",
+      "author": "Fei-Away",
+      "tags": [
+        "codex",
+        "dream",
+        "skin",
+        "theme",
+        "wallpaper",
+        "ui",
+        "engine",
+        "multi-skin",
+        "romantic-rose",
+        "aurora",
+        "sunset"
+      ],
+      "homepage": "https://github.com/Fei-Away/Codex-Dream-Skin",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/dream-skin-engine.js",
+      "sha256": "f49487fdf07e0033c6876a0298d2f284bf7ac013b3140844d758bcc182f45259"
     }
   ]
 }

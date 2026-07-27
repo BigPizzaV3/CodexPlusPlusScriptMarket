@@ -21,7 +21,7 @@
   "use strict";
 
   const INSTALL_KEY = "__bennettUiImprovementsBigPizza";
-  const VERSION = "1.0.13-bigpizza.1";
+  const VERSION = "1.0.17-bigpizza.1";
   const previous = window[INSTALL_KEY];
   if (previous && typeof previous.stop === "function") {
     try {
@@ -390,6 +390,7 @@ const FEATURES = {
   "render-markdown-preview-math"(api) {
     const STYLE_ID = "bennett-markdown-preview-math-style";
     const FORMULA_ATTR = "data-bennett-markdown-preview-math";
+    const TABLE_ATTR = "data-bennett-markdown-preview-math-table";
     const MARKDOWN_EXTENSION = /\.(?:md|markdown|mdown|mkd)$/i;
     const states = new Map();
     let disposed = false;
@@ -435,6 +436,39 @@ const FEATURES = {
       [${FORMULA_ATTR}] > .katex-display {
         width: 100%;
         margin: 0;
+      }
+      [${TABLE_ATTR}] {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        margin: 0.5em 0;
+        overflow-x: auto;
+      }
+      [${TABLE_ATTR}] table {
+        width: max-content;
+        min-width: min(100%, 36rem);
+        max-width: 100%;
+        border-collapse: collapse;
+        border-spacing: 0;
+        color: var(--color-token-text-primary, currentColor);
+        font: inherit;
+      }
+      [${TABLE_ATTR}] th,
+      [${TABLE_ATTR}] td {
+        min-width: 5em;
+        padding: 0.45em 0.75em;
+        border-bottom: 1px solid var(
+          --color-token-border-default,
+          color-mix(in srgb, currentColor 12%, transparent)
+        );
+        text-align: left;
+        vertical-align: top;
+      }
+      [${TABLE_ATTR}] th {
+        font-weight: 600;
+      }
+      [${TABLE_ATTR}] tr:last-child td {
+        border-bottom-color: transparent;
       }
     `;
     document.head.appendChild(style);
@@ -726,18 +760,74 @@ const FEATURES = {
       return null;
     }
 
+    function extensionValues(root) {
+      const values = [];
+      const queue = [root];
+      const visited = new Set();
+      while (queue.length && visited.size < 5000) {
+        const value = queue.shift();
+        if (
+          value == null ||
+          (typeof value !== "object" && typeof value !== "function") ||
+          visited.has(value)
+        ) {
+          continue;
+        }
+        visited.add(value);
+        values.push(value);
+        if (Array.isArray(value)) {
+          queue.push(...value);
+          continue;
+        }
+        if (value.inner && value.inner !== value) queue.push(value.inner);
+        if (value.extension && value.extension !== value) queue.push(value.extension);
+        if (Array.isArray(value.baseExtensions)) queue.push(...value.baseExtensions);
+      }
+      return values;
+    }
+
+    function discoverStateFieldClass(view) {
+      for (const value of extensionValues(view.state.config?.base)) {
+        const StateField = value?.constructor;
+        if (
+          typeof StateField?.define === "function" &&
+          typeof value?.create === "function" &&
+          typeof value?.slot === "function" &&
+          typeof value?.init === "function" &&
+          value.extension === value
+        ) {
+          return StateField;
+        }
+      }
+      return null;
+    }
+
+    function discoverDecorationsFacet(view) {
+      for (const wrapper of view.plugins) {
+        const decorationSet = wrapper?.value?.decorations;
+        if (!decorationSet) continue;
+        for (const extension of extensionValues(wrapper.plugin?.baseExtensions)) {
+          if (!extension?.facet || typeof extension.value !== "function") continue;
+          try {
+            if (extension.value(view) === decorationSet) return extension.facet;
+          } catch {
+            // This provider belongs to another view-plugin capability.
+          }
+        }
+      }
+      return null;
+    }
+
     function discoverCodeMirrorRuntime(controller) {
       const view = controller?.editorView;
       if (!view?.state?.doc || !view.dom) return null;
-      const pluginSpec = view.plugins
-        .map((wrapper) => wrapper?.plugin)
-        .find((plugin) => typeof plugin?.constructor?.fromClass === "function");
-      const ViewPlugin = pluginSpec?.constructor;
       const Decoration = discoverDecorationClass(view);
+      const StateField = discoverStateFieldClass(view);
+      const DecorationsFacet = discoverDecorationsFacet(view);
       const existingCompartment = controller.readOnlyCompartment
         || controller.selectionEditCompartment
         || Array.from(view.state.config?.compartments?.keys?.() || [])[0];
-      if (!ViewPlugin || !Decoration || !existingCompartment) return null;
+      if (!Decoration || !StateField || !DecorationsFacet || !existingCompartment) return null;
 
       const Compartment = existingCompartment.constructor;
       const StateEffect = existingCompartment.reconfigure([]).constructor;
@@ -747,7 +837,14 @@ const FEATURES = {
       ) {
         return null;
       }
-      return { view, ViewPlugin, Decoration, Compartment, StateEffect };
+      return {
+        view,
+        Decoration,
+        StateField,
+        DecorationsFacet,
+        Compartment,
+        StateEffect,
+      };
     }
 
     function formulaRange(formula, state) {
@@ -762,9 +859,100 @@ const FEATURES = {
       return { from: formula.start, to: formula.end, block: false };
     }
 
-    function selectionTouches(range, view) {
-      if (!view.hasFocus) return false;
-      return view.state.selection.ranges.some((selection) => (
+    function splitTableRow(lineText) {
+      let text = lineText.trim();
+      if (!text.includes("|")) return null;
+      if (text.startsWith("|")) text = text.slice(1);
+      if (text.endsWith("|") && !escapedAt(text, text.length - 1)) {
+        text = text.slice(0, -1);
+      }
+
+      const cells = [];
+      let start = 0;
+      let codeTicks = 0;
+      let mathDelimiter = null;
+      for (let i = 0; i < text.length; i += 1) {
+        if (text[i] === "`" && !escapedAt(text, i)) {
+          let ticks = 1;
+          while (text[i + ticks] === "`") ticks += 1;
+          if (!codeTicks) codeTicks = ticks;
+          else if (codeTicks === ticks) codeTicks = 0;
+          i += ticks - 1;
+          continue;
+        }
+        if (codeTicks) continue;
+        if (text[i] === "$" && !escapedAt(text, i)) {
+          const delimiter = text[i + 1] === "$" ? "$$" : "$";
+          if (!mathDelimiter) mathDelimiter = delimiter;
+          else if (mathDelimiter === delimiter) mathDelimiter = null;
+          i += delimiter.length - 1;
+          continue;
+        }
+        if (text[i] === "|" && !mathDelimiter && !escapedAt(text, i)) {
+          cells.push(text.slice(start, i).trim());
+          start = i + 1;
+        }
+      }
+      cells.push(text.slice(start).trim());
+      return cells.length >= 2 ? cells : null;
+    }
+
+    function delimiterAlignment(cell) {
+      const value = cell.trim();
+      if (!/^:?-{3,}:?$/.test(value)) return null;
+      const left = value.startsWith(":");
+      const right = value.endsWith(":");
+      return left && right ? "center" : right ? "right" : left ? "left" : "";
+    }
+
+    function parseMathTables(state) {
+      const tables = [];
+      for (let lineNumber = 1; lineNumber < state.doc.lines; lineNumber += 1) {
+        const headerLine = state.doc.line(lineNumber);
+        const delimiterLine = state.doc.line(lineNumber + 1);
+        const header = splitTableRow(headerLine.text);
+        const delimiter = splitTableRow(delimiterLine.text);
+        if (
+          !header ||
+          !delimiter ||
+          header.length !== delimiter.length
+        ) {
+          continue;
+        }
+        const alignments = delimiter.map(delimiterAlignment);
+        if (alignments.some((alignment) => alignment == null)) continue;
+
+        const rows = [header];
+        let lastLine = delimiterLine;
+        let nextLineNumber = lineNumber + 2;
+        while (nextLineNumber <= state.doc.lines) {
+          const line = state.doc.line(nextLineNumber);
+          const cells = splitTableRow(line.text);
+          if (!cells || cells.length !== header.length) break;
+          rows.push(cells);
+          lastLine = line;
+          nextLineNumber += 1;
+        }
+
+        const from = headerLine.from;
+        const to = lastLine.to;
+        const source = state.sliceDoc(from, to);
+        if (parseMath(source).length) {
+          tables.push({
+            from,
+            to,
+            source,
+            rows,
+            alignments,
+          });
+        }
+        lineNumber = nextLineNumber - 1;
+      }
+      return tables;
+    }
+
+    function selectionTouches(range, state) {
+      return state.selection.ranges.some((selection) => (
         selection.empty
           ? selection.from >= range.from && selection.from <= range.to
           : selection.from < range.to && selection.to > range.from
@@ -800,7 +988,11 @@ const FEATURES = {
         }
 
         get estimatedHeight() {
-          return this.block ? 40 : -1;
+          if (!this.block) return -1;
+          const contentLines = this.content
+            .split(/\r\n|\n|\r/)
+            .filter((line) => line.trim()).length;
+          return Math.max(40, contentLines * 18 + 16);
         }
 
         get lineBreaks() {
@@ -849,16 +1041,153 @@ const FEATURES = {
       };
     }
 
-    function createMathExtension(runtime, katex) {
-      const { ViewPlugin, Decoration } = runtime;
-      const FormulaWidget = createFormulaWidgetClass(katex);
+    function appendTableCellContent(ownerDocument, cell, text, katex) {
+      const formulas = parseMath(text);
+      let offset = 0;
+      for (const formula of formulas) {
+        if (formula.start > offset) {
+          cell.appendChild(ownerDocument.createTextNode(text.slice(offset, formula.start)));
+        }
+        const math = ownerDocument.createElement("span");
+        math.setAttribute(FORMULA_ATTR, formula.display ? "display-inline" : "inline");
+        math.setAttribute("role", "math");
+        math.setAttribute("aria-label", formula.content);
+        try {
+          math.innerHTML = katex.renderToString(formula.content, {
+            displayMode: formula.display,
+            strict: "ignore",
+            throwOnError: false,
+          });
+        } catch {
+          math.textContent = formula.content;
+        }
+        cell.appendChild(math);
+        offset = formula.end;
+      }
+      if (offset < text.length) {
+        cell.appendChild(ownerDocument.createTextNode(text.slice(offset)));
+      }
+    }
 
-      function buildDecorations(view) {
-        const source = view.state.doc.toString();
+    function createMathTableWidgetClass(katex) {
+      return class MathTableWidget {
+        constructor(table) {
+          this.table = table;
+        }
+
+        eq(other) {
+          return (
+            other instanceof this.constructor &&
+            other.table.source === this.table.source
+          );
+        }
+
+        updateDOM() {
+          return false;
+        }
+
+        compare(other) {
+          return this === other || (
+            this.constructor === other?.constructor &&
+            this.eq(other)
+          );
+        }
+
+        get estimatedHeight() {
+          return Math.max(72, this.table.rows.length * 38 + 12);
+        }
+
+        get lineBreaks() {
+          return 0;
+        }
+
+        ignoreEvent() {
+          return false;
+        }
+
+        coordsAt() {
+          return null;
+        }
+
+        get isHidden() {
+          return false;
+        }
+
+        get editable() {
+          return false;
+        }
+
+        destroy() {}
+
+        toDOM(view) {
+          const ownerDocument = view.dom.ownerDocument;
+          const wrapper = ownerDocument.createElement("div");
+          wrapper.setAttribute(TABLE_ATTR, "");
+          wrapper.setAttribute("contenteditable", "false");
+
+          const tableElement = ownerDocument.createElement("table");
+          const head = ownerDocument.createElement("thead");
+          const body = ownerDocument.createElement("tbody");
+          const headRow = ownerDocument.createElement("tr");
+          this.table.rows[0].forEach((text, index) => {
+            const cell = ownerDocument.createElement("th");
+            cell.scope = "col";
+            if (this.table.alignments[index]) {
+              cell.style.textAlign = this.table.alignments[index];
+            }
+            appendTableCellContent(ownerDocument, cell, text, katex);
+            headRow.appendChild(cell);
+          });
+          head.appendChild(headRow);
+
+          for (const row of this.table.rows.slice(1)) {
+            const rowElement = ownerDocument.createElement("tr");
+            row.forEach((text, index) => {
+              const cell = ownerDocument.createElement("td");
+              if (this.table.alignments[index]) {
+                cell.style.textAlign = this.table.alignments[index];
+              }
+              appendTableCellContent(ownerDocument, cell, text, katex);
+              rowElement.appendChild(cell);
+            });
+            body.appendChild(rowElement);
+          }
+
+          tableElement.append(head, body);
+          wrapper.appendChild(tableElement);
+          return wrapper;
+        }
+      };
+    }
+
+    function createMathExtension(runtime, katex) {
+      const { Decoration, StateField, DecorationsFacet } = runtime;
+      const FormulaWidget = createFormulaWidgetClass(katex);
+      const MathTableWidget = createMathTableWidgetClass(katex);
+
+      function buildDecorations(state) {
+        const source = state.doc.toString();
         const ranges = [];
+        const mathTables = parseMathTables(state);
+        for (const table of mathTables) {
+          if (selectionTouches(table, state)) continue;
+          ranges.push(
+            Decoration.replace({
+              widget: new MathTableWidget(table),
+              block: true,
+            }).range(table.from, table.to),
+          );
+        }
         for (const formula of parseMath(source)) {
-          const range = formulaRange(formula, view.state);
-          if (selectionTouches(range, view)) continue;
+          if (
+            mathTables.some((table) => (
+              formula.start >= table.from && formula.end <= table.to
+            ))
+          ) {
+            continue;
+          }
+          const range = formulaRange(formula, state);
+          if (selectionTouches(range, state)) continue;
           const widget = new FormulaWidget(formula.content, formula.display, range.block);
           let decoration;
           try {
@@ -874,20 +1203,19 @@ const FEATURES = {
         return Decoration.set(ranges, true);
       }
 
-      class MathPreviewPlugin {
-        constructor(view) {
-          this.decorations = buildDecorations(view);
-        }
-
-        update(update) {
-          if (update.docChanged || update.selectionSet || update.focusChanged) {
-            this.decorations = buildDecorations(update.view);
+      return StateField.define({
+        create(state) {
+          return buildDecorations(state);
+        },
+        update(decorations, transaction) {
+          if (transaction.docChanged || transaction.selection) {
+            return buildDecorations(transaction.state);
           }
+          return decorations;
+        },
+        provide(field) {
+          return DecorationsFacet.from(field);
         }
-      }
-
-      return ViewPlugin.fromClass(MathPreviewPlugin, {
-        decorations: (plugin) => plugin.decorations,
       });
     }
 
@@ -981,7 +1309,7 @@ const FEATURES = {
             0,
           ),
           nativeKatexLoaded: !!katexPromise && !lastError,
-          implementation: "CodeMirror replacement widgets",
+          implementation: "CodeMirror state-field replacement widgets",
           lastError,
           scope: "right-side Markdown file preview only",
         };

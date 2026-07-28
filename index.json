@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-16T08:27:07Z",
+  "updated_at": "2026-07-28T08:58:42Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -86,6 +86,24 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-daily-token-usage.js",
       "sha256": "80f5efb88d1e2e0da5c22f229b65d08710460a7c258bdaea7b82a84071fb7576"
+    },
+    {
+      "id": "codex-reconciled-token-usage",
+      "name": "Codex Reconciled Token Usage",
+      "description": "通过 MessagePort、rollout 尾读和 Codex++ 代理账本对账 Token、子代理用量及请求状态，需要 /token-usage/events bridge。",
+      "version": "1.0.0",
+      "author": "QingJunXue",
+      "tags": [
+        "codex",
+        "tokens",
+        "usage",
+        "reconciliation",
+        "subagents",
+        "cost"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-reconciled-token-usage.js",
+      "sha256": "c5b6dedcfbc1212b45075e9bad899486cc84014aa94d12ea75ff0a03a3cddd43"
     },
     {
       "id": "codex-list-pagebuster",

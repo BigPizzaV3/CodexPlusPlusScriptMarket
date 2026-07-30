@@ -121,8 +121,8 @@
     {
       "id": "bennett-ui-improvements",
       "name": "Bennett UI Improvements",
-      "description": "迁移自 b-nnett Bennett UI 的 renderer-only UI 增强，复用 Codex 内置 KaTeX 渲染右侧 Markdown 文件预览公式",
-      "version": "1.0.17-bigpizza.1",
+      "description": "迁移自 b-nnett Bennett UI 的 renderer-only UI 增强，支持右侧 Markdown 公式与数学表格原位渲染编辑、侧栏优化和跨账号会话刷新",
+      "version": "1.0.19-bigpizza.1",
       "author": "bennett; JHees",
       "tags": [
         "codex",
@@ -131,11 +131,12 @@
         "settings",
         "polish",
         "markdown",
-        "math"
+        "math",
+        "history"
       ],
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
-      "sha256": "f56ec64cd2c3bd8fc92304eba54825f2cd73f971ab097edfd85ed56d5017b057"
+      "sha256": "a4d47f1d27ec3f82d7cc8e557d66fefcf8cc56fce1693fb5343febb3f5b20c68"
     }
   ]
 }

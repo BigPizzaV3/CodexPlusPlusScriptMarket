@@ -21,7 +21,7 @@
   "use strict";
 
   const INSTALL_KEY = "__bennettUiImprovementsBigPizza";
-  const VERSION = "1.0.17-bigpizza.1";
+  const VERSION = "1.0.19-bigpizza.1";
   const previous = window[INSTALL_KEY];
   if (previous && typeof previous.stop === "function") {
     try {
@@ -106,6 +106,7 @@ module.exports = {
         "sidebar-chat-multi-select": false,
         "show-pinned-chat-project-names": false,
         "slash-menu-polish": true,
+        "cross-account-history-refresh": true,
       },
     };
     this._state = state;
@@ -230,6 +231,12 @@ function renderSettings(root, state) {
       title: "Slash menu polish",
       description:
         "Tighten the composer slash menu with denser rows, clearer active state, and calmer section headers.",
+    },
+    {
+      id: "cross-account-history-refresh",
+      title: "Cross-account history refresh",
+      description:
+        "Refresh cloud conversation history after account changes. This requires the active provider to support account-scoped thread listing.",
     },
   ];
 
@@ -391,6 +398,9 @@ const FEATURES = {
     const STYLE_ID = "bennett-markdown-preview-math-style";
     const FORMULA_ATTR = "data-bennett-markdown-preview-math";
     const TABLE_ATTR = "data-bennett-markdown-preview-math-table";
+    const CELL_ATTR = "data-bennett-markdown-preview-math-cell";
+    const EDITOR_ATTR = "data-bennett-markdown-preview-math-editor";
+    const EDITING_ATTR = "data-bennett-markdown-preview-math-editing";
     const MARKDOWN_EXTENSION = /\.(?:md|markdown|mdown|mkd)$/i;
     const states = new Map();
     let disposed = false;
@@ -437,6 +447,9 @@ const FEATURES = {
         width: 100%;
         margin: 0;
       }
+      [${FORMULA_ATTR}] {
+        cursor: text;
+      }
       [${TABLE_ATTR}] {
         display: block;
         width: 100%;
@@ -447,7 +460,7 @@ const FEATURES = {
       [${TABLE_ATTR}] table {
         width: max-content;
         min-width: min(100%, 36rem);
-        max-width: 100%;
+        max-width: none;
         border-collapse: collapse;
         border-spacing: 0;
         color: var(--color-token-text-primary, currentColor);
@@ -463,12 +476,54 @@ const FEATURES = {
         );
         text-align: left;
         vertical-align: top;
+        white-space: nowrap;
       }
       [${TABLE_ATTR}] th {
         font-weight: 600;
       }
       [${TABLE_ATTR}] tr:last-child td {
         border-bottom-color: transparent;
+      }
+      [${TABLE_ATTR}] [${CELL_ATTR}] {
+        cursor: text;
+        outline: none;
+      }
+      [${TABLE_ATTR}] [${CELL_ATTR}]:hover,
+      [${TABLE_ATTR}] [${CELL_ATTR}]:focus-visible {
+        background: color-mix(in srgb, currentColor 5%, transparent);
+      }
+      [${TABLE_ATTR}] [${CELL_ATTR}][${EDITING_ATTR}] {
+        background: color-mix(
+          in srgb,
+          var(--color-token-main-surface-primary, Canvas) 88%,
+          currentColor 12%
+        );
+        box-shadow: 0 0 0 1px var(
+          --color-token-focus-border,
+          color-mix(in srgb, currentColor 28%, transparent)
+        ) inset;
+      }
+      [${EDITOR_ATTR}] {
+        display: block;
+        box-sizing: border-box;
+        width: 100%;
+        min-width: 6em;
+        margin: 0;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        line-height: inherit;
+      }
+      [${TABLE_ATTR}] [${EDITOR_ATTR}] {
+        min-width: 0;
+        max-width: 100%;
+      }
+      textarea[${EDITOR_ATTR}] {
+        min-height: 3.2em;
+        resize: vertical;
+        white-space: pre;
       }
     `;
     document.head.appendChild(style);
@@ -859,46 +914,65 @@ const FEATURES = {
       return { from: formula.start, to: formula.end, block: false };
     }
 
-    function splitTableRow(lineText) {
-      let text = lineText.trim();
-      if (!text.includes("|")) return null;
-      if (text.startsWith("|")) text = text.slice(1);
-      if (text.endsWith("|") && !escapedAt(text, text.length - 1)) {
-        text = text.slice(0, -1);
+    function splitTableRow(lineText, lineFrom = 0) {
+      let contentFrom = 0;
+      let contentTo = lineText.length;
+      while (contentFrom < contentTo && /\s/.test(lineText[contentFrom])) {
+        contentFrom += 1;
+      }
+      while (contentTo > contentFrom && /\s/.test(lineText[contentTo - 1])) {
+        contentTo -= 1;
+      }
+      if (!lineText.slice(contentFrom, contentTo).includes("|")) return null;
+      if (lineText[contentFrom] === "|") contentFrom += 1;
+      if (
+        lineText[contentTo - 1] === "|" &&
+        !escapedAt(lineText, contentTo - 1)
+      ) {
+        contentTo -= 1;
       }
 
       const cells = [];
-      let start = 0;
+      let start = contentFrom;
       let codeTicks = 0;
       let mathDelimiter = null;
-      for (let i = 0; i < text.length; i += 1) {
-        if (text[i] === "`" && !escapedAt(text, i)) {
+      const pushCell = (from, to) => {
+        while (from < to && /\s/.test(lineText[from])) from += 1;
+        while (to > from && /\s/.test(lineText[to - 1])) to -= 1;
+        cells.push({
+          text: lineText.slice(from, to),
+          from: lineFrom + from,
+          to: lineFrom + to,
+        });
+      };
+      for (let i = contentFrom; i < contentTo; i += 1) {
+        if (lineText[i] === "`" && !escapedAt(lineText, i)) {
           let ticks = 1;
-          while (text[i + ticks] === "`") ticks += 1;
+          while (lineText[i + ticks] === "`") ticks += 1;
           if (!codeTicks) codeTicks = ticks;
           else if (codeTicks === ticks) codeTicks = 0;
           i += ticks - 1;
           continue;
         }
         if (codeTicks) continue;
-        if (text[i] === "$" && !escapedAt(text, i)) {
-          const delimiter = text[i + 1] === "$" ? "$$" : "$";
+        if (lineText[i] === "$" && !escapedAt(lineText, i)) {
+          const delimiter = lineText[i + 1] === "$" ? "$$" : "$";
           if (!mathDelimiter) mathDelimiter = delimiter;
           else if (mathDelimiter === delimiter) mathDelimiter = null;
           i += delimiter.length - 1;
           continue;
         }
-        if (text[i] === "|" && !mathDelimiter && !escapedAt(text, i)) {
-          cells.push(text.slice(start, i).trim());
+        if (lineText[i] === "|" && !mathDelimiter && !escapedAt(lineText, i)) {
+          pushCell(start, i);
           start = i + 1;
         }
       }
-      cells.push(text.slice(start).trim());
+      pushCell(start, contentTo);
       return cells.length >= 2 ? cells : null;
     }
 
     function delimiterAlignment(cell) {
-      const value = cell.trim();
+      const value = cell.text.trim();
       if (!/^:?-{3,}:?$/.test(value)) return null;
       const left = value.startsWith(":");
       const right = value.endsWith(":");
@@ -910,8 +984,8 @@ const FEATURES = {
       for (let lineNumber = 1; lineNumber < state.doc.lines; lineNumber += 1) {
         const headerLine = state.doc.line(lineNumber);
         const delimiterLine = state.doc.line(lineNumber + 1);
-        const header = splitTableRow(headerLine.text);
-        const delimiter = splitTableRow(delimiterLine.text);
+        const header = splitTableRow(headerLine.text, headerLine.from);
+        const delimiter = splitTableRow(delimiterLine.text, delimiterLine.from);
         if (
           !header ||
           !delimiter ||
@@ -927,7 +1001,7 @@ const FEATURES = {
         let nextLineNumber = lineNumber + 2;
         while (nextLineNumber <= state.doc.lines) {
           const line = state.doc.line(nextLineNumber);
-          const cells = splitTableRow(line.text);
+          const cells = splitTableRow(line.text, line.from);
           if (!cells || cells.length !== header.length) break;
           rows.push(cells);
           lastLine = line;
@@ -961,10 +1035,13 @@ const FEATURES = {
 
     function createFormulaWidgetClass(katex) {
       return class FormulaWidget {
-        constructor(content, display, block) {
+        constructor(content, display, block, source, editFrom, editTo) {
           this.content = content;
           this.display = display;
           this.block = block;
+          this.source = source;
+          this.editFrom = editFrom;
+          this.editTo = editTo;
         }
 
         eq(other) {
@@ -972,7 +1049,10 @@ const FEATURES = {
             other instanceof this.constructor &&
             other.content === this.content &&
             other.display === this.display &&
-            other.block === this.block
+            other.block === this.block &&
+            other.source === this.source &&
+            other.editFrom === this.editFrom &&
+            other.editTo === this.editTo
           );
         }
 
@@ -1000,7 +1080,7 @@ const FEATURES = {
         }
 
         ignoreEvent() {
-          return false;
+          return true;
         }
 
         coordsAt() {
@@ -1027,26 +1107,98 @@ const FEATURES = {
           element.setAttribute("contenteditable", "false");
           element.setAttribute("role", "math");
           element.setAttribute("aria-label", this.content);
-          try {
-            element.innerHTML = katex.renderToString(this.content, {
-              displayMode: this.display,
-              strict: "ignore",
-              throwOnError: false,
+          element.tabIndex = 0;
+          element.title = "单击编辑公式，Enter 或 Ctrl+Enter 提交，Esc 取消";
+
+          const renderFormula = () => {
+            element.removeAttribute(EDITING_ATTR);
+            element.replaceChildren();
+            try {
+              element.innerHTML = katex.renderToString(this.content, {
+                displayMode: this.display,
+                strict: "ignore",
+                throwOnError: false,
+              });
+            } catch {
+              element.textContent = this.content;
+            }
+          };
+          const beginEdit = (event) => {
+            if (event?.button != null && event.button !== 0) return;
+            if (element.hasAttribute(EDITING_ATTR)) return;
+            event?.preventDefault();
+            event?.stopPropagation();
+
+            const multiline = this.block || /[\r\n]/.test(this.source);
+            const editor = ownerDocument.createElement(multiline ? "textarea" : "input");
+            if (!multiline) editor.type = "text";
+            editor.value = this.source;
+            editor.setAttribute(EDITOR_ATTR, "");
+            editor.setAttribute("aria-label", "公式 LaTeX 源码");
+            editor.spellcheck = false;
+            element.setAttribute(EDITING_ATTR, "");
+            element.replaceChildren(editor);
+
+            let finished = false;
+            const finish = (commit) => {
+              if (finished) return;
+              finished = true;
+              const nextSource = editor.value;
+              if (
+                commit &&
+                nextSource !== this.source &&
+                !view.destroyed
+              ) {
+                view.dispatch({
+                  changes: {
+                    from: this.editFrom,
+                    to: this.editTo,
+                    insert: nextSource,
+                  },
+                });
+                return;
+              }
+              renderFormula();
+            };
+            editor.addEventListener("mousedown", (inputEvent) => {
+              inputEvent.stopPropagation();
             });
-          } catch {
-            element.textContent = this.content;
-          }
+            editor.addEventListener("keydown", (inputEvent) => {
+              if (inputEvent.key === "Escape") {
+                inputEvent.preventDefault();
+                finish(false);
+                return;
+              }
+              if (
+                inputEvent.key === "Enter" &&
+                (!multiline || inputEvent.ctrlKey || inputEvent.metaKey)
+              ) {
+                inputEvent.preventDefault();
+                finish(true);
+              }
+            });
+            editor.addEventListener("blur", () => finish(true), { once: true });
+            ownerDocument.defaultView?.setTimeout(() => {
+              editor.focus();
+              editor.select();
+            }, 0);
+          };
+          element.addEventListener("mousedown", beginEdit);
+          element.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") beginEdit(event);
+          });
+          renderFormula();
           return element;
         }
       };
     }
 
-    function appendTableCellContent(ownerDocument, cell, text, katex) {
+    function appendMathContent(ownerDocument, parent, text, katex) {
       const formulas = parseMath(text);
       let offset = 0;
       for (const formula of formulas) {
         if (formula.start > offset) {
-          cell.appendChild(ownerDocument.createTextNode(text.slice(offset, formula.start)));
+          parent.appendChild(ownerDocument.createTextNode(text.slice(offset, formula.start)));
         }
         const math = ownerDocument.createElement("span");
         math.setAttribute(FORMULA_ATTR, formula.display ? "display-inline" : "inline");
@@ -1061,11 +1213,71 @@ const FEATURES = {
         } catch {
           math.textContent = formula.content;
         }
-        cell.appendChild(math);
+        parent.appendChild(math);
         offset = formula.end;
       }
       if (offset < text.length) {
-        cell.appendChild(ownerDocument.createTextNode(text.slice(offset)));
+        parent.appendChild(ownerDocument.createTextNode(text.slice(offset)));
+      }
+    }
+
+    function closingMarker(text, marker, from) {
+      let index = text.indexOf(marker, from);
+      while (index >= 0) {
+        if (!escapedAt(text, index)) return index;
+        index = text.indexOf(marker, index + marker.length);
+      }
+      return -1;
+    }
+
+    function appendTableCellContent(ownerDocument, cell, text, katex) {
+      let offset = 0;
+      while (offset < text.length) {
+        const candidates = [
+          { marker: "**", tag: "strong" },
+          { marker: "__", tag: "strong" },
+          { marker: "~~", tag: "del" },
+          { marker: "`", tag: "code" },
+        ]
+          .map((candidate) => ({
+            ...candidate,
+            index: text.indexOf(candidate.marker, offset),
+          }))
+          .filter((candidate) => (
+            candidate.index >= 0 && !escapedAt(text, candidate.index)
+          ))
+          .sort((left, right) => left.index - right.index);
+        const token = candidates[0];
+        if (!token) {
+          appendMathContent(ownerDocument, cell, text.slice(offset), katex);
+          return;
+        }
+        if (token.index > offset) {
+          appendMathContent(
+            ownerDocument,
+            cell,
+            text.slice(offset, token.index),
+            katex,
+          );
+        }
+        const close = closingMarker(
+          text,
+          token.marker,
+          token.index + token.marker.length,
+        );
+        if (close < 0) {
+          appendMathContent(ownerDocument, cell, text.slice(token.index), katex);
+          return;
+        }
+        const node = ownerDocument.createElement(token.tag);
+        const content = text.slice(token.index + token.marker.length, close);
+        if (token.tag === "code") {
+          node.textContent = content;
+        } else {
+          appendTableCellContent(ownerDocument, node, content, katex);
+        }
+        cell.appendChild(node);
+        offset = close + token.marker.length;
       }
     }
 
@@ -1102,7 +1314,7 @@ const FEATURES = {
         }
 
         ignoreEvent() {
-          return false;
+          return true;
         }
 
         coordsAt() {
@@ -1129,25 +1341,112 @@ const FEATURES = {
           const head = ownerDocument.createElement("thead");
           const body = ownerDocument.createElement("tbody");
           const headRow = ownerDocument.createElement("tr");
-          this.table.rows[0].forEach((text, index) => {
+          const renderCell = (cell, cellData) => {
+            cell.setAttribute(CELL_ATTR, "");
+            cell.setAttribute("contenteditable", "false");
+            cell.setAttribute("aria-label", cellData.text || "空单元格");
+            cell.tabIndex = 0;
+            cell.title = "单击编辑此单元格，Enter 提交，Esc 取消";
+            appendTableCellContent(ownerDocument, cell, cellData.text, katex);
+
+            const beginEdit = (event) => {
+              if (event?.button != null && event.button !== 0) return;
+              if (cell.hasAttribute(EDITING_ATTR)) return;
+              event?.preventDefault();
+              event?.stopPropagation();
+
+              const cellStyle = ownerDocument.defaultView?.getComputedStyle(cell);
+              const horizontalPadding = cellStyle
+                ? (Number.parseFloat(cellStyle.paddingLeft) || 0)
+                  + (Number.parseFloat(cellStyle.paddingRight) || 0)
+                : 0;
+              const contentWidth = Math.max(
+                1,
+                Math.floor(cell.clientWidth - horizontalPadding),
+              );
+              const editor = ownerDocument.createElement("input");
+              editor.type = "text";
+              editor.value = cellData.text;
+              editor.setAttribute(EDITOR_ATTR, "");
+              editor.setAttribute("aria-label", "Markdown 表格单元格源码");
+              editor.spellcheck = false;
+              editor.style.width = `${contentWidth}px`;
+              editor.style.maxWidth = `${contentWidth}px`;
+              editor.style.minWidth = "0";
+              cell.setAttribute(EDITING_ATTR, "");
+              cell.replaceChildren(editor);
+
+              let finished = false;
+              const restore = () => {
+                cell.removeAttribute(EDITING_ATTR);
+                cell.replaceChildren();
+                appendTableCellContent(ownerDocument, cell, cellData.text, katex);
+              };
+              const finish = (commit) => {
+                if (finished) return;
+                finished = true;
+                const nextText = editor.value;
+                if (
+                  commit &&
+                  nextText !== cellData.text &&
+                  !view.destroyed
+                ) {
+                  view.dispatch({
+                    changes: {
+                      from: cellData.from,
+                      to: cellData.to,
+                      insert: nextText,
+                    },
+                  });
+                  return;
+                }
+                restore();
+              };
+              editor.addEventListener("mousedown", (inputEvent) => {
+                inputEvent.stopPropagation();
+              });
+              editor.addEventListener("keydown", (inputEvent) => {
+                if (inputEvent.key === "Escape") {
+                  inputEvent.preventDefault();
+                  finish(false);
+                  return;
+                }
+                if (inputEvent.key === "Enter") {
+                  inputEvent.preventDefault();
+                  finish(true);
+                }
+              });
+              editor.addEventListener("blur", () => finish(true), { once: true });
+              ownerDocument.defaultView?.setTimeout(() => {
+                editor.focus();
+                editor.select();
+              }, 0);
+            };
+            cell.addEventListener("mousedown", beginEdit);
+            cell.addEventListener("keydown", (event) => {
+              if (event.key === "Enter" || event.key === " ") beginEdit(event);
+            });
+          };
+
+          this.table.rows[0].forEach((cellData, index) => {
             const cell = ownerDocument.createElement("th");
             cell.scope = "col";
             if (this.table.alignments[index]) {
               cell.style.textAlign = this.table.alignments[index];
             }
-            appendTableCellContent(ownerDocument, cell, text, katex);
+            renderCell(cell, cellData);
             headRow.appendChild(cell);
           });
           head.appendChild(headRow);
 
           for (const row of this.table.rows.slice(1)) {
             const rowElement = ownerDocument.createElement("tr");
-            row.forEach((text, index) => {
+            row.forEach((cellData, index) => {
               const cell = ownerDocument.createElement("td");
               if (this.table.alignments[index]) {
                 cell.style.textAlign = this.table.alignments[index];
               }
-              appendTableCellContent(ownerDocument, cell, text, katex);
+              renderCell(cell, cellData);
               rowElement.appendChild(cell);
             });
             body.appendChild(rowElement);
@@ -1170,7 +1469,6 @@ const FEATURES = {
         const ranges = [];
         const mathTables = parseMathTables(state);
         for (const table of mathTables) {
-          if (selectionTouches(table, state)) continue;
           ranges.push(
             Decoration.replace({
               widget: new MathTableWidget(table),
@@ -1188,7 +1486,14 @@ const FEATURES = {
           }
           const range = formulaRange(formula, state);
           if (selectionTouches(range, state)) continue;
-          const widget = new FormulaWidget(formula.content, formula.display, range.block);
+          const widget = new FormulaWidget(
+            formula.content,
+            formula.display,
+            range.block,
+            state.sliceDoc(formula.start, formula.end),
+            formula.start,
+            formula.end,
+          );
           let decoration;
           try {
             decoration = Decoration.replace({
@@ -1325,6 +1630,142 @@ const FEATURES = {
       for (const state of Array.from(states.values())) removeState(state);
       style.remove();
       delete window.__bennettMarkdownPreviewMath;
+    };
+  },
+
+  /**
+   * Force Codex's recent-conversation cache to refresh after authentication
+   * changes. This is renderer-only so it can be used without rebuilding the
+   * Codex++ Rust launcher.
+   */
+  "cross-account-history-refresh"(api) {
+    const PATCH_VERSION = "2";
+    const clients = new Map();
+    let disposed = false;
+    let refreshTimer = null;
+    let scanTimer = null;
+    let modulePromise = null;
+    let initialRefreshScheduled = false;
+    let lastRefreshAt = 0;
+
+    const findAsset = (part) =>
+      Array.from(performance.getEntriesByType("resource"))
+        .map((entry) => entry.name)
+        .find((url) => {
+          const cleanUrl = String(url || "").split("?")[0];
+          return cleanUrl.includes("/assets/") && cleanUrl.includes(part) && cleanUrl.endsWith(".js");
+        }) || "";
+
+    const loadSignals = async () => {
+      if (!modulePromise) {
+        modulePromise = Promise.resolve().then(async () => {
+          const url = findAsset("app-initial-") || findAsset("app-server-manager-signals-");
+          if (!url) throw new Error("Codex history bridge asset not found");
+          return await import(url);
+        }).catch((error) => {
+          modulePromise = null;
+          throw error;
+        });
+      }
+      return await modulePromise;
+    };
+
+    const findRefreshBridge = (module) => {
+      if (typeof module?.ddt === "function") return module.ddt;
+      if (typeof module?.rn === "function") return module.rn;
+      return Object.values(module || {}).find((value) =>
+        typeof value === "function" && /sendRequest/.test(String(value)) && value.length >= 2,
+      );
+    };
+
+    const refresh = async (hostId = "local") => {
+      const signals = await loadSignals();
+      const bridge = findRefreshBridge(signals);
+      if (typeof bridge !== "function") throw new Error("Codex history bridge export not found");
+      lastRefreshAt = Date.now();
+      await bridge("refresh-recent-conversations-for-host", {
+        hostId: hostId || "local",
+        mode: "expanded",
+        sortKey: "updated_at",
+      });
+    };
+
+    const schedule = (hostId = "local") => {
+      if (disposed) return;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        refreshTimer = null;
+        void refresh(hostId).catch((error) => api.log.debug("history refresh failed", error));
+      }, 1200);
+    };
+
+    const patchClient = (client) => {
+      if (!client || typeof client.addNotificationCallback !== "function") return;
+      if (client.__bennettCrossAccountHistoryRefresh === PATCH_VERSION) return;
+      try {
+        const cleanup = client.addNotificationCallback(
+          ["account/login/completed", "account/updated"],
+          (notification) => {
+            if (notification?.method === "account/login/completed" && notification.params?.success === false) return;
+            schedule(client.getHostId?.() || client.hostId || "local");
+          },
+        );
+        clients.set(client, typeof cleanup === "function" ? cleanup : null);
+        client.__bennettCrossAccountHistoryRefresh = PATCH_VERSION;
+      } catch (error) {
+        api.log.debug("history notification hook unavailable", error);
+      }
+    };
+
+    const scan = async () => {
+      if (disposed) return;
+      try {
+        const signals = await loadSignals();
+        for (const value of Object.values(signals || {})) {
+          patchClient(value);
+          if (value && typeof value.get === "function") {
+            try {
+              patchClient(value.get());
+            } catch {
+            }
+          }
+        }
+        if (!initialRefreshScheduled) {
+          initialRefreshScheduled = true;
+          schedule("local");
+        }
+      } catch (error) {
+        api.log.debug("history refresh hook pending", error);
+      }
+    };
+
+    const onWindowWake = () => schedule("local");
+    window.addEventListener("focus", onWindowWake);
+    window.addEventListener("online", onWindowWake);
+    document.addEventListener("visibilitychange", onWindowWake);
+    void scan();
+    scanTimer = setInterval(() => {
+      void scan();
+      if (Date.now() - lastRefreshAt > 10000) schedule("local");
+    }, 5000);
+
+    return () => {
+      disposed = true;
+      if (refreshTimer) clearTimeout(refreshTimer);
+      if (scanTimer) clearInterval(scanTimer);
+      window.removeEventListener("focus", onWindowWake);
+      window.removeEventListener("online", onWindowWake);
+      document.removeEventListener("visibilitychange", onWindowWake);
+      for (const [client, cleanup] of clients) {
+        try {
+          cleanup?.();
+        } catch {
+        }
+        if (client.__bennettCrossAccountHistoryRefresh === PATCH_VERSION) {
+          delete client.__bennettCrossAccountHistoryRefresh;
+        }
+      }
+      clients.clear();
     };
   },
 
@@ -8869,6 +9310,7 @@ function switchControl(initial, onChange) {
     "sidebar-project-backgrounds",
     "render-markdown-preview-math",
     "slash-menu-polish",
+    "cross-account-history-refresh",
     "show-message-metrics-on-hover",
     "sidebar-chat-multi-select",
     "show-pinned-chat-project-names",
@@ -8926,7 +9368,7 @@ function switchControl(initial, onChange) {
     {
       id: "render-markdown-preview-math",
       title: "Markdown 预览数学公式",
-      detail: "在右侧 .md 文件预览中使用 Codex 内置 KaTeX 渲染 LaTeX，并以内嵌组件参与文本排版和滚动。选中公式时显示源码。",
+      detail: "在右侧 .md 文件预览中使用 Codex 内置 KaTeX 渲染 LaTeX；公式和数学表格保持原位排版，点击可编辑公式或单个表格单元格。",
       defaultEnabled: true,
       status: "支持 $…$、$$…$$、\\(…\\) 和 \\[…\\]",
     },
@@ -8934,6 +9376,13 @@ function switchControl(initial, onChange) {
       id: "slash-menu-polish",
       title: "斜杠菜单优化",
       detail: "压缩斜杠菜单行距，并强化选中状态。",
+      defaultEnabled: true,
+      status: "可用",
+    },
+    {
+      id: "cross-account-history-refresh",
+      title: "跨账号会话刷新",
+      detail: "登录或切换账号后刷新云端会话列表。",
       defaultEnabled: true,
       status: "可用",
     },

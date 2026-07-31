@@ -21,7 +21,7 @@
   "use strict";
 
   const INSTALL_KEY = "__bennettUiImprovementsBigPizza";
-  const VERSION = "1.0.23-bigpizza.2";
+  const VERSION = "1.0.23-bigpizza.3";
   const previous = window[INSTALL_KEY];
   if (previous && typeof previous.stop === "function") {
     try {
@@ -725,7 +725,14 @@ const FEATURES = {
     }
 
     function requestDesktopJson(command, params, timeoutMs = 15_000) {
-      const requestId = `bennett-preview-${Date.now()}-${++imageRequestSequence}`;
+      const requestSequence = ++imageRequestSequence;
+      const randomSuffix =
+        typeof window.crypto?.randomUUID === "function"
+          ? window.crypto.randomUUID()
+          : typeof window.crypto?.getRandomValues === "function"
+            ? Array.from(window.crypto.getRandomValues(new Uint32Array(4)), (value) => value.toString(16)).join("-")
+            : `${Date.now()}-${requestSequence}-${Math.random().toString(36).slice(2)}`;
+      const requestId = `bennett-preview-${randomSuffix}`;
       return new Promise((resolve, reject) => {
         let finished = false;
         const cleanup = () => {
@@ -740,6 +747,7 @@ const FEATURES = {
           callback(value);
         };
         const onMessage = (event) => {
+          if (event.source !== window) return;
           const data = event.data;
           if (
             !data ||
@@ -966,7 +974,7 @@ const FEATURES = {
     function loadImageSource(target, filePath, hostId) {
       const resolved = resolveImageTarget(target, filePath);
       if (!resolved) return Promise.reject(new Error("图片路径为空"));
-      if (/^data:/i.test(resolved)) return Promise.resolve(resolved);
+      if (/^(?:data|https?):/i.test(resolved)) return Promise.resolve(resolved);
       const key = `${hostId || "local"}\n${resolved}`;
       let pending = imageCache.get(key);
       if (pending) return pending;
@@ -2236,14 +2244,13 @@ const FEATURES = {
    * Codex++ Rust launcher.
    */
   "cross-account-history-refresh"(api) {
-    const PATCH_VERSION = "2";
+    const PATCH_VERSION = "3";
     const clients = new Map();
     let disposed = false;
     let refreshTimer = null;
     let scanTimer = null;
     let modulePromise = null;
     let initialRefreshScheduled = false;
-    let lastRefreshAt = 0;
 
     const findAsset = (part) =>
       Array.from(performance.getEntriesByType("resource"))
@@ -2279,7 +2286,6 @@ const FEATURES = {
       const signals = await loadSignals();
       const bridge = findRefreshBridge(signals);
       if (typeof bridge !== "function") throw new Error("Codex history bridge export not found");
-      lastRefreshAt = Date.now();
       await bridge("refresh-recent-conversations-for-host", {
         hostId: hostId || "local",
         mode: "expanded",
@@ -2343,7 +2349,6 @@ const FEATURES = {
     void scan();
     scanTimer = setInterval(() => {
       void scan();
-      if (Date.now() - lastRefreshAt > 10000) schedule("local");
     }, 5000);
 
     return () => {
@@ -10076,9 +10081,6 @@ function switchControl(initial, onChange) {
   });
   return btn;
 }
-
-
-
 
   const tweak = module.exports;
   const api = createBigPizzaRendererApi();

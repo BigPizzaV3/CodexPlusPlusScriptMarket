@@ -121,8 +121,8 @@
     {
       "id": "bennett-ui-improvements",
       "name": "Bennett UI Improvements",
-      "description": "迁移自 b-nnett Bennett UI 的 renderer-only UI 增强，支持右侧 Markdown 公式与数学表格原位渲染编辑、侧栏优化和跨账号会话刷新",
-      "version": "1.0.19-bigpizza.1",
+      "description": "彩色项目管理界面、5 小时/Weekly/Credit 额度显示，以及右侧 Markdown 预览中的 LaTeX 公式显示；由 b-nnett/codex-plusplus-bennett-ui 迁移适配至 BigPizzaV3 Codex++。",
+      "version": "1.0.23-bigpizza.2",
       "author": "bennett; JHees",
       "tags": [
         "codex",
@@ -134,9 +134,9 @@
         "math",
         "history"
       ],
-      "homepage": "",
+      "homepage": "https://github.com/JHees/bennett-ui-improvements-for-codexplusplus",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
-      "sha256": "a4d47f1d27ec3f82d7cc8e557d66fefcf8cc56fce1693fb5343febb3f5b20c68"
+      "sha256": "1fc4c93b71fd3009953577c566e040c7834b17510bdf7fc5e7e0403708ad63a8"
     }
   ]
 }

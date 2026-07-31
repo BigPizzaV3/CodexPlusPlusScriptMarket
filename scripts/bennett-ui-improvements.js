@@ -21,7 +21,7 @@
   "use strict";
 
   const INSTALL_KEY = "__bennettUiImprovementsBigPizza";
-  const VERSION = "1.0.19-bigpizza.1";
+  const VERSION = "1.0.23-bigpizza.2";
   const previous = window[INSTALL_KEY];
   if (previous && typeof previous.stop === "function") {
     try {
@@ -107,6 +107,7 @@ module.exports = {
         "show-pinned-chat-project-names": false,
         "slash-menu-polish": true,
         "cross-account-history-refresh": true,
+        "hide-usage-alert": true,
       },
     };
     this._state = state;
@@ -237,6 +238,12 @@ function renderSettings(root, state) {
       title: "Cross-account history refresh",
       description:
         "Refresh cloud conversation history after account changes. This requires the active provider to support account-scoped thread listing.",
+    },
+    {
+      id: "hide-usage-alert",
+      title: "Hide usage exhaustion alerts",
+      description:
+        "Hide Codex usage exhaustion banners and reset prompts.",
     },
   ];
 
@@ -401,8 +408,12 @@ const FEATURES = {
     const CELL_ATTR = "data-bennett-markdown-preview-math-cell";
     const EDITOR_ATTR = "data-bennett-markdown-preview-math-editor";
     const EDITING_ATTR = "data-bennett-markdown-preview-math-editing";
+    const IMAGE_ATTR = "data-bennett-markdown-preview-image";
+    const IMAGE_STATUS_ATTR = "data-bennett-markdown-preview-image-status";
+    const IMAGE_MAX_BYTES = 20 * 1024 * 1024;
     const MARKDOWN_EXTENSION = /\.(?:md|markdown|mdown|mkd)$/i;
     const states = new Map();
+    const imageCache = new Map();
     let disposed = false;
     let scanFrame = 0;
     let scanning = false;
@@ -410,6 +421,7 @@ const FEATURES = {
     let katexPromise = null;
     let mainModuleUrl = null;
     let lastError = null;
+    let imageRequestSequence = 0;
 
     const style = document.createElement("style");
     style.id = STYLE_ID;
@@ -449,6 +461,11 @@ const FEATURES = {
       }
       [${FORMULA_ATTR}] {
         cursor: text;
+      }
+      [${FORMULA_ATTR}][${EDITING_ATTR}] {
+        width: 100%;
+        min-width: 0;
+        overflow: visible;
       }
       [${TABLE_ATTR}] {
         display: block;
@@ -521,9 +538,48 @@ const FEATURES = {
         max-width: 100%;
       }
       textarea[${EDITOR_ATTR}] {
-        min-height: 3.2em;
+        min-height: 4.5em;
+        overflow-x: hidden;
+        overflow-y: hidden;
         resize: vertical;
-        white-space: pre;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      [${IMAGE_ATTR}] {
+        display: inline-block;
+        box-sizing: border-box;
+        max-width: 100%;
+        vertical-align: middle;
+        cursor: text;
+      }
+      [${IMAGE_ATTR}="block"] {
+        display: block;
+        width: 100%;
+        margin: 0.5em 0;
+      }
+      [${IMAGE_ATTR}] img {
+        display: block;
+        max-width: 100%;
+        height: auto;
+        border-radius: var(--radius-md, 0.375rem);
+      }
+      [${IMAGE_ATTR}="inline"] img {
+        max-height: 12em;
+      }
+      [${IMAGE_STATUS_ATTR}] {
+        display: inline-flex;
+        min-height: 2em;
+        max-width: 100%;
+        align-items: center;
+        padding: 0.35em 0.6em;
+        border: 1px solid var(
+          --color-token-border-default,
+          color-mix(in srgb, currentColor 12%, transparent)
+        );
+        border-radius: var(--radius-md, 0.375rem);
+        color: var(--color-token-text-secondary, currentColor);
+        font-size: 0.875em;
+        overflow-wrap: anywhere;
       }
     `;
     document.head.appendChild(style);
@@ -652,6 +708,288 @@ const FEATURES = {
         i = close + closer.length - 1;
       }
       return formulas;
+    }
+
+    function dispatchDesktopViewMessage(message) {
+      let forwarded = false;
+      const bridge = window.electronBridge;
+      if (typeof bridge?.sendMessageFromView === "function") {
+        forwarded = true;
+        bridge.sendMessageFromView(message).catch(() => {});
+      }
+      const event = new CustomEvent("codex-message-from-view", {
+        detail: message,
+      });
+      if (forwarded) event.__codexForwardedViaBridge = true;
+      window.dispatchEvent(event);
+    }
+
+    function requestDesktopJson(command, params, timeoutMs = 15_000) {
+      const requestId = `bennett-preview-${Date.now()}-${++imageRequestSequence}`;
+      return new Promise((resolve, reject) => {
+        let finished = false;
+        const cleanup = () => {
+          if (finished) return;
+          finished = true;
+          window.removeEventListener("message", onMessage);
+          window.clearTimeout(timer);
+        };
+        const finish = (callback, value) => {
+          if (finished) return;
+          cleanup();
+          callback(value);
+        };
+        const onMessage = (event) => {
+          const data = event.data;
+          if (
+            !data ||
+            typeof data !== "object" ||
+            data.type !== "fetch-response" ||
+            data.requestId !== requestId
+          ) {
+            return;
+          }
+          if (data.responseType !== "success") {
+            finish(reject, new Error(data.error || `${command} failed`));
+            return;
+          }
+          try {
+            const body = JSON.parse(data.bodyJsonString);
+            if (data.status >= 200 && data.status < 300) {
+              finish(resolve, body);
+            } else {
+              finish(reject, new Error(`HTTP ${data.status}`));
+            }
+          } catch (error) {
+            finish(reject, error);
+          }
+        };
+        const timer = window.setTimeout(() => {
+          dispatchDesktopViewMessage({ type: "cancel-fetch", requestId });
+          finish(reject, new Error(`${command} timed out`));
+        }, timeoutMs);
+        window.addEventListener("message", onMessage);
+        dispatchDesktopViewMessage({
+          type: "fetch",
+          requestId,
+          method: "POST",
+          url: `vscode://codex/${command}`,
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(params),
+        });
+      });
+    }
+
+    function parseImageTarget(inner) {
+      const value = inner.trim();
+      if (!value) return null;
+      if (value.startsWith("<")) {
+        const close = value.indexOf(">");
+        if (close <= 1) return null;
+        const target = value.slice(1, close).trim();
+        const remainder = value.slice(close + 1).trim();
+        const title = remainder.match(/^(?:"([^"]*)"|'([^']*)'|\(([^)]*)\))$/);
+        return {
+          target,
+          title: title ? title[1] ?? title[2] ?? title[3] ?? "" : "",
+        };
+      }
+      const titled = value.match(
+        /^(.*?)(?:\s+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))\s*$/,
+      );
+      if (!titled) return { target: value, title: "" };
+      return {
+        target: titled[1].trim(),
+        title: titled[2] ?? titled[3] ?? titled[4] ?? "",
+      };
+    }
+
+    function parseMarkdownImages(text) {
+      const masked = maskCode(text);
+      const images = [];
+      for (let start = 0; start < masked.length - 4; start += 1) {
+        if (
+          masked[start] !== "!" ||
+          masked[start + 1] !== "[" ||
+          escapedAt(masked, start)
+        ) {
+          continue;
+        }
+
+        let bracketDepth = 1;
+        let bracketClose = -1;
+        for (let index = start + 2; index < masked.length; index += 1) {
+          if (escapedAt(masked, index)) continue;
+          if (masked[index] === "[") bracketDepth += 1;
+          if (masked[index] === "]") {
+            bracketDepth -= 1;
+            if (!bracketDepth) {
+              bracketClose = index;
+              break;
+            }
+          }
+          if (masked[index] === "\n" || masked[index] === "\r") break;
+        }
+        if (bracketClose < 0 || masked[bracketClose + 1] !== "(") continue;
+
+        let parenthesisDepth = 1;
+        let quote = null;
+        let parenthesisClose = -1;
+        for (let index = bracketClose + 2; index < masked.length; index += 1) {
+          const character = masked[index];
+          if (escapedAt(masked, index)) continue;
+          if (quote) {
+            if (character === quote) quote = null;
+            continue;
+          }
+          if (character === '"' || character === "'") {
+            quote = character;
+            continue;
+          }
+          if (character === "(") parenthesisDepth += 1;
+          if (character === ")") {
+            parenthesisDepth -= 1;
+            if (!parenthesisDepth) {
+              parenthesisClose = index;
+              break;
+            }
+          }
+          if (character === "\n" || character === "\r") break;
+        }
+        if (parenthesisClose < 0) continue;
+
+        const parsed = parseImageTarget(
+          text.slice(bracketClose + 2, parenthesisClose),
+        );
+        if (!parsed?.target) continue;
+        images.push({
+          start,
+          end: parenthesisClose + 1,
+          alt: text.slice(start + 2, bracketClose),
+          target: parsed.target,
+          title: parsed.title,
+          source: text.slice(start, parenthesisClose + 1),
+        });
+        start = parenthesisClose;
+      }
+      return images;
+    }
+
+    function normalizeFilePath(path, separator) {
+      let value = path;
+      let prefix = "";
+      if (/^[A-Za-z]:[\\/]/.test(value)) {
+        prefix = `${value.slice(0, 2)}${separator}`;
+        value = value.slice(3);
+      } else if (/^[\\/]{2}/.test(value)) {
+        prefix = separator.repeat(2);
+        value = value.replace(/^[\\/]+/, "");
+      } else if (/^[\\/]/.test(value)) {
+        prefix = separator;
+        value = value.replace(/^[\\/]+/, "");
+      }
+      const parts = [];
+      for (const part of value.split(/[\\/]+/)) {
+        if (!part || part === ".") continue;
+        if (part === "..") {
+          if (parts.length && parts[parts.length - 1] !== "..") parts.pop();
+          else if (!prefix) parts.push(part);
+          continue;
+        }
+        parts.push(part);
+      }
+      return `${prefix}${parts.join(separator)}`;
+    }
+
+    function resolveImageTarget(target, filePath) {
+      let reference = target.trim();
+      if (!reference) return null;
+      if (/^(?:data|blob):/i.test(reference)) return reference;
+      if (/^https?:\/\//i.test(reference)) return reference;
+      if (/^file:\/\//i.test(reference)) {
+        try {
+          const url = new URL(reference);
+          reference = decodeURIComponent(url.pathname);
+          if (/^\/[A-Za-z]:\//.test(reference)) reference = reference.slice(1);
+        } catch {
+          return null;
+        }
+      } else {
+        try {
+          reference = decodeURIComponent(reference);
+        } catch {
+          // Keep the literal Markdown destination.
+        }
+      }
+
+      const windowsPath = /^[A-Za-z]:[\\/]/.test(filePath)
+        || filePath.includes("\\");
+      const separator = windowsPath ? "\\" : "/";
+      if (
+        /^[A-Za-z]:[\\/]/.test(reference) ||
+        /^[\\/]{2}/.test(reference) ||
+        (!windowsPath && reference.startsWith("/"))
+      ) {
+        return normalizeFilePath(reference, separator);
+      }
+      const lastSlash = Math.max(
+        filePath.lastIndexOf("/"),
+        filePath.lastIndexOf("\\"),
+      );
+      const directory = lastSlash >= 0 ? filePath.slice(0, lastSlash) : "";
+      return normalizeFilePath(
+        directory ? `${directory}${separator}${reference}` : reference,
+        separator,
+      );
+    }
+
+    function imageMimeType(target, provided) {
+      if (typeof provided === "string" && provided.startsWith("image/")) {
+        return provided;
+      }
+      const extension = target.split(/[?#]/)[0].match(/\.([A-Za-z0-9]+)$/)?.[1]?.toLowerCase();
+      return {
+        png: "image/png",
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        gif: "image/gif",
+        webp: "image/webp",
+        svg: "image/svg+xml",
+        bmp: "image/bmp",
+        ico: "image/x-icon",
+        avif: "image/avif",
+      }[extension] || null;
+    }
+
+    function loadImageSource(target, filePath, hostId) {
+      const resolved = resolveImageTarget(target, filePath);
+      if (!resolved) return Promise.reject(new Error("图片路径为空"));
+      if (/^data:/i.test(resolved)) return Promise.resolve(resolved);
+      const key = `${hostId || "local"}\n${resolved}`;
+      let pending = imageCache.get(key);
+      if (pending) return pending;
+      pending = requestDesktopJson("read-file-binary", {
+        hostId: hostId || "local",
+        path: resolved,
+        maxBytes: IMAGE_MAX_BYTES,
+      }, 20_000)
+        .then((result) => {
+          if (!result?.contentsBase64) {
+            if (/^https?:\/\//i.test(resolved)) return resolved;
+            throw new Error("图片不存在、格式不受支持或超过 20 MB");
+          }
+          const mimeType = imageMimeType(resolved, result.mimeType);
+          if (!mimeType) throw new Error("文件不是支持的图片格式");
+          return `data:${mimeType};base64,${result.contentsBase64}`;
+        })
+        .catch((error) => {
+          imageCache.delete(key);
+          throw error;
+        });
+      imageCache.set(key, pending);
+      return pending;
     }
 
     function currentMainModuleUrl() {
@@ -914,6 +1252,17 @@ const FEATURES = {
       return { from: formula.start, to: formula.end, block: false };
     }
 
+    function imageRange(image, state) {
+      const firstLine = state.doc.lineAt(image.start);
+      const lastLine = state.doc.lineAt(Math.max(image.start, image.end - 1));
+      const before = state.sliceDoc(firstLine.from, image.start);
+      const after = state.sliceDoc(image.end, lastLine.to);
+      if (!before.trim() && !after.trim()) {
+        return { from: firstLine.from, to: lastLine.to, block: true };
+      }
+      return { from: image.start, to: image.end, block: false };
+    }
+
     function splitTableRow(lineText, lineFrom = 0) {
       let contentFrom = 0;
       let contentTo = lineText.length;
@@ -1129,7 +1478,7 @@ const FEATURES = {
             event?.preventDefault();
             event?.stopPropagation();
 
-            const multiline = this.block || /[\r\n]/.test(this.source);
+            const multiline = this.display || this.block || /[\r\n]/.test(this.source);
             const editor = ownerDocument.createElement(multiline ? "textarea" : "input");
             if (!multiline) editor.type = "text";
             editor.value = this.source;
@@ -1139,6 +1488,12 @@ const FEATURES = {
             element.setAttribute(EDITING_ATTR, "");
             element.replaceChildren(editor);
 
+            const resizeEditor = () => {
+              if (!(editor instanceof HTMLTextAreaElement)) return;
+              editor.style.height = "auto";
+              editor.style.height = `${Math.max(editor.scrollHeight, 72)}px`;
+              view.requestMeasure?.();
+            };
             let finished = false;
             const finish = (commit) => {
               if (finished) return;
@@ -1163,6 +1518,7 @@ const FEATURES = {
             editor.addEventListener("mousedown", (inputEvent) => {
               inputEvent.stopPropagation();
             });
+            editor.addEventListener("input", resizeEditor);
             editor.addEventListener("keydown", (inputEvent) => {
               if (inputEvent.key === "Escape") {
                 inputEvent.preventDefault();
@@ -1179,6 +1535,7 @@ const FEATURES = {
             });
             editor.addEventListener("blur", () => finish(true), { once: true });
             ownerDocument.defaultView?.setTimeout(() => {
+              resizeEditor();
               editor.focus();
               editor.select();
             }, 0);
@@ -1188,6 +1545,204 @@ const FEATURES = {
             if (event.key === "Enter" || event.key === " ") beginEdit(event);
           });
           renderFormula();
+          return element;
+        }
+      };
+    }
+
+    function createImageWidgetClass(context) {
+      return class ImageWidget {
+        constructor(image, range) {
+          this.alt = image.alt;
+          this.target = image.target;
+          this.title = image.title;
+          this.source = image.source;
+          this.editFrom = image.start;
+          this.editTo = image.end;
+          this.block = range.block;
+          this.filePath = context.filePath;
+          this.hostId = context.hostId;
+        }
+
+        eq(other) {
+          return (
+            other instanceof this.constructor &&
+            other.alt === this.alt &&
+            other.target === this.target &&
+            other.title === this.title &&
+            other.source === this.source &&
+            other.editFrom === this.editFrom &&
+            other.editTo === this.editTo &&
+            other.block === this.block &&
+            other.filePath === this.filePath &&
+            other.hostId === this.hostId
+          );
+        }
+
+        updateDOM() {
+          return false;
+        }
+
+        compare(other) {
+          return this === other || (
+            this.constructor === other?.constructor &&
+            this.eq(other)
+          );
+        }
+
+        get estimatedHeight() {
+          return this.block ? 240 : -1;
+        }
+
+        get lineBreaks() {
+          return 0;
+        }
+
+        ignoreEvent() {
+          return true;
+        }
+
+        coordsAt() {
+          return null;
+        }
+
+        get isHidden() {
+          return false;
+        }
+
+        get editable() {
+          return false;
+        }
+
+        destroy(dom) {
+          if (dom) dom.__bennettImageActive = false;
+        }
+
+        toDOM(view) {
+          const ownerDocument = view.dom.ownerDocument;
+          const element = ownerDocument.createElement(this.block ? "div" : "span");
+          element.__bennettImageActive = true;
+          element.setAttribute(IMAGE_ATTR, this.block ? "block" : "inline");
+          element.setAttribute("contenteditable", "false");
+          element.setAttribute("role", "img");
+          element.setAttribute("aria-label", this.alt || this.title || this.target);
+          element.tabIndex = 0;
+          element.title = "单击编辑图片语法，Enter 提交，Esc 取消";
+
+          const renderStatus = (status, message) => {
+            element.removeAttribute(EDITING_ATTR);
+            const statusElement = ownerDocument.createElement("span");
+            statusElement.setAttribute(IMAGE_STATUS_ATTR, status);
+            statusElement.textContent = message;
+            element.replaceChildren(statusElement);
+            view.requestMeasure?.();
+          };
+
+          const renderImage = () => {
+            if (!element.__bennettImageActive) return;
+            renderStatus("loading", `正在加载图片：${this.alt || this.target}`);
+            loadImageSource(this.target, this.filePath, this.hostId)
+              .then((source) => {
+                if (
+                  !element.__bennettImageActive ||
+                  element.hasAttribute(EDITING_ATTR)
+                ) {
+                  return;
+                }
+                const image = ownerDocument.createElement("img");
+                image.alt = this.alt;
+                if (this.title) image.title = this.title;
+                image.addEventListener("load", () => view.requestMeasure?.(), {
+                  once: true,
+                });
+                image.addEventListener("error", () => {
+                  if (!element.__bennettImageActive) return;
+                  renderStatus(
+                    "error",
+                    `无法显示图片：${this.alt || this.target}`,
+                  );
+                }, { once: true });
+                image.src = source;
+                element.replaceChildren(image);
+                view.requestMeasure?.();
+              })
+              .catch((error) => {
+                if (
+                  !element.__bennettImageActive ||
+                  element.hasAttribute(EDITING_ATTR)
+                ) {
+                  return;
+                }
+                const detail = String(error?.message || error || "").trim();
+                renderStatus(
+                  "error",
+                  `无法加载图片：${this.alt || this.target}${detail ? `（${detail}）` : ""}`,
+                );
+              });
+          };
+
+          const beginEdit = (event) => {
+            if (event?.button != null && event.button !== 0) return;
+            if (element.hasAttribute(EDITING_ATTR)) return;
+            event?.preventDefault();
+            event?.stopPropagation();
+
+            const editor = ownerDocument.createElement("input");
+            editor.type = "text";
+            editor.value = this.source;
+            editor.setAttribute(EDITOR_ATTR, "");
+            editor.setAttribute("aria-label", "Markdown 图片语法");
+            editor.spellcheck = false;
+            element.setAttribute(EDITING_ATTR, "");
+            element.replaceChildren(editor);
+
+            let finished = false;
+            const finish = (commit) => {
+              if (finished) return;
+              finished = true;
+              const nextSource = editor.value;
+              if (
+                commit &&
+                nextSource !== this.source &&
+                !view.destroyed
+              ) {
+                view.dispatch({
+                  changes: {
+                    from: this.editFrom,
+                    to: this.editTo,
+                    insert: nextSource,
+                  },
+                });
+                return;
+              }
+              renderImage();
+            };
+            editor.addEventListener("mousedown", (inputEvent) => {
+              inputEvent.stopPropagation();
+            });
+            editor.addEventListener("keydown", (inputEvent) => {
+              if (inputEvent.key === "Escape") {
+                inputEvent.preventDefault();
+                finish(false);
+                return;
+              }
+              if (inputEvent.key === "Enter") {
+                inputEvent.preventDefault();
+                finish(true);
+              }
+            });
+            editor.addEventListener("blur", () => finish(true), { once: true });
+            ownerDocument.defaultView?.setTimeout(() => {
+              editor.focus();
+              editor.select();
+            }, 0);
+          };
+
+          element.addEventListener("mousedown", beginEdit);
+          element.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") beginEdit(event);
+          });
+          renderImage();
           return element;
         }
       };
@@ -1459,15 +2014,18 @@ const FEATURES = {
       };
     }
 
-    function createMathExtension(runtime, katex) {
+    function createMathExtension(runtime, katex, context) {
       const { Decoration, StateField, DecorationsFacet } = runtime;
       const FormulaWidget = createFormulaWidgetClass(katex);
+      const ImageWidget = createImageWidgetClass(context);
       const MathTableWidget = createMathTableWidgetClass(katex);
 
       function buildDecorations(state) {
         const source = state.doc.toString();
         const ranges = [];
         const mathTables = parseMathTables(state);
+        const images = parseMarkdownImages(source);
+        const formulas = parseMath(source);
         for (const table of mathTables) {
           ranges.push(
             Decoration.replace({
@@ -1476,10 +2034,34 @@ const FEATURES = {
             }).range(table.from, table.to),
           );
         }
-        for (const formula of parseMath(source)) {
+        for (const image of images) {
+          if (
+            mathTables.some((table) => (
+              image.start >= table.from && image.end <= table.to
+            ))
+          ) {
+            continue;
+          }
+          const range = imageRange(image, state);
+          const widget = new ImageWidget(image, range);
+          let decoration;
+          try {
+            decoration = Decoration.replace({
+              widget,
+              block: range.block,
+            }).range(range.from, range.to);
+          } catch {
+            decoration = Decoration.replace({ widget }).range(image.start, image.end);
+          }
+          ranges.push(decoration);
+        }
+        for (const formula of formulas) {
           if (
             mathTables.some((table) => (
               formula.start >= table.from && formula.end <= table.to
+            )) ||
+            images.some((image) => (
+              formula.start < image.end && formula.end > image.start
             ))
           ) {
             continue;
@@ -1544,7 +2126,14 @@ const FEATURES = {
       if (!runtime) return;
 
       const compartment = new runtime.Compartment();
-      const extension = createMathExtension(runtime, katex);
+      const extension = createMathExtension(runtime, katex, {
+        filePath: typeof controller.filePath === "string"
+          ? controller.filePath
+          : markdownFileNameFor(editor),
+        hostId: typeof controller.hostId === "string" && controller.hostId
+          ? controller.hostId
+          : "local",
+      });
       runtime.view.dispatch({
         effects: runtime.StateEffect.appendConfig.of(compartment.of(extension)),
       });
@@ -1613,8 +2202,15 @@ const FEATURES = {
             ),
             0,
           ),
+          renderedImages: Array.from(states.values()).reduce(
+            (count, state) => (
+              count + state.editor.querySelectorAll(`[${IMAGE_ATTR}] img`).length
+            ),
+            0,
+          ),
+          cachedImages: imageCache.size,
           nativeKatexLoaded: !!katexPromise && !lastError,
-          implementation: "CodeMirror state-field replacement widgets",
+          implementation: "CodeMirror formula, table, and image replacement widgets",
           lastError,
           scope: "right-side Markdown file preview only",
         };
@@ -1628,6 +2224,7 @@ const FEATURES = {
       if (scanFrame) cancelAnimationFrame(scanFrame);
       observer.disconnect();
       for (const state of Array.from(states.values())) removeState(state);
+      imageCache.clear();
       style.remove();
       delete window.__bennettMarkdownPreviewMath;
     };
@@ -1848,9 +2445,10 @@ const FEATURES = {
   },
 
   /**
-   * Surface 5h + Weekly rate limits in the sidebar slot where the "Upgrade"
-   * pill lives. Sources its data from Codex's authenticated app-server usage
-   * endpoint, with Codex's rendered rate-limit UI as a fallback.
+   * Surface 5h + Weekly rate limits and points balance in the sidebar slot
+   * where the "Upgrade" pill lives. Sources its data from Codex's
+   * authenticated app-server usage endpoint, with Codex's rendered
+   * rate-limit UI as a fallback.
    *
    * Strategy
    * --------
@@ -1865,6 +2463,7 @@ const FEATURES = {
      * Persisted snapshot:
      *   { fiveHour:{label,pct,resetAt} | null,
      *     weekly:  {label,pct,resetAt} | null,
+     *     points:   {label,value} | null,
      *     at:number }
      * `pct` is REMAINING (Codex displays remaining %, e.g. "100%").
      * `resetAt` is whatever Codex shows verbatim (typically "HH:MM",
@@ -1919,16 +2518,25 @@ const FEATURES = {
     };
 
     const applySnapshot = (partial, source) => {
-      if (!partial?.fiveHour && !partial?.weekly) return false;
-      if (accountMode === "api") return false;
+      if (
+        !partial?.fiveHour &&
+        !partial?.weekly &&
+        !Object.prototype.hasOwnProperty.call(partial || {}, "points")
+      ) {
+        return false;
+      }
       const next = {
         fiveHour: partial.fiveHour || snapshot?.fiveHour || null,
         weekly: partial.weekly || snapshot?.weekly || null,
+        points: Object.prototype.hasOwnProperty.call(partial, "points")
+          ? partial.points
+          : snapshot?.points || null,
         at: Date.now(),
       };
       const changed =
         JSON.stringify(next.fiveHour) !== JSON.stringify(snapshot?.fiveHour) ||
-        JSON.stringify(next.weekly) !== JSON.stringify(snapshot?.weekly);
+        JSON.stringify(next.weekly) !== JSON.stringify(snapshot?.weekly) ||
+        JSON.stringify(next.points) !== JSON.stringify(snapshot?.points);
       snapshot = next;
       writeSnapshot(api, snapshot);
       if (changed) {
@@ -2230,6 +2838,47 @@ const FEATURES = {
       };
     };
 
+    const pointValue = (value) => {
+      if (value == null) return null;
+      if (typeof value === "string" || typeof value === "number") {
+        const text = String(value).trim();
+        return text || null;
+      }
+      if (typeof value !== "object") return null;
+      if (value.unlimited === true) return "无限";
+      for (const key of [
+        "balance",
+        "remaining",
+        "available",
+        "amount",
+        "points",
+        "credits",
+        "value",
+      ]) {
+        const result = pointValue(value[key]);
+        if (result != null) return result;
+      }
+      return null;
+    };
+
+    const normalizePoints = (status) => {
+      if (!status || typeof status !== "object") return null;
+      const candidates = [
+        status.points,
+        status.point_balance,
+        status.pointBalance,
+        status.credits,
+        status.credit,
+        status.account?.points,
+        status.account?.credits,
+      ];
+      for (const candidate of candidates) {
+        const value = pointValue(candidate);
+        if (value != null) return { label: "Credit", value, kind: "points" };
+      }
+      return null;
+    };
+
     const pickClosestWindow = (windows, targetMinutes, predicate) => {
       let best = null;
       let bestDistance = Infinity;
@@ -2279,6 +2928,7 @@ const FEATURES = {
       return {
         fiveHour: normalizeUsageWindow(five, "5h"),
         weekly: normalizeUsageWindow(weekly, "Weekly"),
+        points: normalizePoints(status),
       };
     };
 
@@ -2323,9 +2973,11 @@ const FEATURES = {
     const applyUsageEvent = (message) => {
       if (!message || typeof message !== "object") return false;
       const windows = collectUsageWindows(message);
-      if (!windows.length) return false;
+      const points = normalizePoints(message);
+      if (!windows.length && !points) return false;
       const partial = snapshotFromUsageWindows(windows);
-      if (!partial.fiveHour && !partial.weekly) return false;
+      if (points) partial.points = points;
+      if (!partial.fiveHour && !partial.weekly && !partial.points) return false;
       directUsageAvailable = true;
       applySnapshot(partial, "rate-limit-event");
       return true;
@@ -2653,7 +3305,15 @@ const FEATURES = {
       const sidebarRect = sidebar.getBoundingClientRect();
       const rect = node.getBoundingClientRect();
       const bottomBand = Math.min(Math.max(sidebarRect.height * 0.22, 120), 240);
-      return rect.bottom >= sidebarRect.bottom - bottomBand;
+      const visibleBottom = Math.min(
+        sidebarRect.bottom,
+        window.innerHeight || document.documentElement.clientHeight || sidebarRect.bottom,
+      );
+      return (
+        rect.top < visibleBottom &&
+        rect.bottom <= visibleBottom + 8 &&
+        rect.bottom >= visibleBottom - bottomBand
+      );
     };
 
     const isCompactIconControl = (control) => {
@@ -2772,6 +3432,7 @@ const FEATURES = {
           button instanceof HTMLElement &&
           isVisibleElement(button) &&
           isNearSidebarBottom(sidebar, button) &&
+          !button.closest("section") &&
           !isUsageControlNode(button),
         );
       const deviceControls = controls.filter(isDeviceButton);
@@ -2822,6 +3483,7 @@ const FEATURES = {
         ? {
             fiveHour: { label: "API", pct: null, resetAt: null, apiMode: true },
             weekly: null,
+            points: null,
             at: Date.now(),
             apiMode: true,
           }
@@ -2831,6 +3493,7 @@ const FEATURES = {
         : {
             fiveHour: { label: "5h", pct: null, resetAt: null },
             weekly: { label: "Weekly", pct: null, resetAt: null },
+            points: null,
             at: 0,
           };
 
@@ -2940,6 +3603,92 @@ const FEATURES = {
       for (const slot of document.querySelectorAll('[data-codexpp="usage-floating-slot"]')) {
         slot.remove();
       }
+    };
+  },
+
+  /** Hide exhaustion banners and reset prompts without touching conversation content. */
+  "hide-usage-alert"() {
+    const STYLE_ID = "codex-plus-hide-usage-alert-style";
+    const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
+    const THREAD_FOOTER_SELECTOR =
+      "[data-thread-scroll-footer='true'], [data-thread-find-composer='true'], [data-codex-composer-root], [data-pip-obstacle='thread-footer']";
+    const ALERT_TARGET_SELECTOR = "aside, [role='alert'], [role='status'], [aria-live]";
+    const COMPOSER_SURFACE_SELECTOR =
+      "[data-codex-composer='true'], .composer-footer, .ProseMirror, textarea, input, [contenteditable='true'], [role='textbox']";
+    const quotaRe = /(Codex\s*消息限额已用尽|消息限额已用尽|message\s+limit|usage\s+limit|out\s+of\s+Codex\s+messages|额度|限额|quota|rate\s+limit)/i;
+    const resetRe = /(额度将于|继续使用\s*Codex|升级至\s*Plus|quota\s+will\s+reset|limit\s+will\s+reset|rate\s+limit\s+resets|reset|重置|upgrade\s+to\s+plus)/i;
+    const usageCardRe = /(剩余\s*\d+%\s*使用量|remaining\s+\d+%\s+usage|usage\s+remaining|reset\s+frequency|next\s+reset)/i;
+    const actionRe = /(升级|Plus|upgrade|pricing|重置|reset|限额|额度|限制|limit|quota)/i;
+    const hidden = new Set();
+    let observer = null;
+    let timer = 0;
+
+    const textOf = (node) => String(node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
+    const visibleBox = (node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width >= 160 && rect.height >= 16 && rect.bottom > 0 && rect.top < (window.innerHeight || 900);
+    };
+    const hasAction = (node, text) => actionRe.test(`${text} ${Array.from(node.querySelectorAll("button, a, [role='button']")).slice(0, 8).map((item) => textOf(item)).join(" ")}`);
+    const hasEditable = (node) => Boolean(node.querySelector("input, textarea, [contenteditable='true'], [role='textbox']"));
+    const touchesComposerSurface = (node) => Boolean(node.closest(COMPOSER_SURFACE_SELECTOR));
+    const touchesUsageControl = (node) => Boolean(node.closest("[data-codexpp='usage-slot'], [data-codexpp='usage-box'], [data-codexpp='usage-boxes']"));
+    const shouldHide = (node, allowAside = false) => {
+      if (!(node instanceof HTMLElement) || node.closest("[data-message-author-role], article")) return false;
+      if (node.matches(THREAD_FOOTER_SELECTOR)) return false;
+      if (!node.matches(allowAside ? "aside, [role='alert'], [role='status'], [aria-live]" : "[role='alert'], [role='status'], [aria-live]")) return false;
+      if (!visibleBox(node)) return false;
+      if (hasEditable(node) || touchesUsageControl(node) || touchesComposerSurface(node)) return false;
+      const text = textOf(node);
+      if (text.length < 12 || text.length > 500) return false;
+      const rect = node.getBoundingClientRect();
+      const bannerLike = rect.width >= 300 && rect.height >= 30 && rect.height <= 240 && quotaRe.test(text) && resetRe.test(text);
+      const cardLike = rect.width >= 160 && rect.width <= 560 && rect.height >= 70 && rect.height <= 340 && usageCardRe.test(text) && hasAction(node, text);
+      return (bannerLike || cardLike) && hasAction(node, text);
+    };
+    const findAlertTarget = (root) => {
+      if (!(root instanceof HTMLElement)) return null;
+      const candidates = [root, ...root.querySelectorAll(ALERT_TARGET_SELECTOR)];
+      for (const candidate of candidates) {
+        if (candidate instanceof HTMLElement && shouldHide(candidate, candidate.matches("aside"))) return candidate;
+      }
+      return null;
+    };
+    const hide = (node) => {
+      if (!(node instanceof HTMLElement) || node === document.body || node === document.documentElement) return;
+      node.setAttribute(HIDDEN_ATTR, "true");
+      hidden.add(node);
+    };
+    const scan = () => {
+      timer = 0;
+      if (!document.body) return;
+      for (const node of document.body.querySelectorAll(`[role="alert"], [role="status"], [aria-live], ${THREAD_FOOTER_SELECTOR}`)) {
+        if (!(node instanceof HTMLElement) || node.hasAttribute(HIDDEN_ATTR)) continue;
+        if (node.matches(THREAD_FOOTER_SELECTOR)) {
+          const target = findAlertTarget(node);
+          if (target && !target.hasAttribute(HIDDEN_ATTR)) hide(target);
+          continue;
+        }
+        if (shouldHide(node)) hide(node);
+      }
+    };
+    const schedule = () => {
+      if (!timer) timer = window.setTimeout(scan, 80);
+    };
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `[${HIDDEN_ATTR}="true"] { display: none !important; visibility: hidden !important; pointer-events: none !important; }`;
+    document.documentElement.appendChild(style);
+    observer = new MutationObserver(schedule);
+    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    scan();
+
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      observer?.disconnect();
+      for (const node of hidden) node.removeAttribute(HIDDEN_ATTR);
+      style.remove();
+      hidden.clear();
     };
   },
 
@@ -9075,18 +9824,39 @@ function writeSnapshot(api, snap) {
 }
 
 /**
- * Render a single rotating usage box. Click toggles between 5h and Weekly;
- * hover replaces the content with "Resets: HH:MM" for 5h or
+ * Render a single rotating usage box. Click toggles between 5h, Weekly, and points;
+ * hover replaces the content with "Resets: HH:MM" for 5h or a points value for
  * "Resets: Wed, HH:MM" for weekly. The currently-selected kind is persisted
  * to storage so it survives reloads.
  *
  * The returned element exposes `_refresh(snapshot)` so callers can update
  * values in place without unmount/remount.
  */
+function isApiSnapshot(snapshot) {
+  return Boolean(
+    snapshot?.apiMode === true ||
+      snapshot?.fiveHour?.apiMode === true ||
+      String(snapshot?.fiveHour?.label || "").trim().toUpperCase() === "API",
+  );
+}
+
 function renderUsageBox(api, snapshot) {
-  const ORDER = ["5h", "weekly"]; // toggle order
+  const BASE_ORDER = ["5h", "weekly"];
+  let order = [...BASE_ORDER];
   let kind = api.storage.get("usage:visible-kind", "5h");
-  if (!ORDER.includes(kind)) kind = "5h";
+  const syncOrder = (snap) => {
+    const hasPoints = !!(
+      snap?.points &&
+      snap.points.value != null &&
+      String(snap.points.value).trim() !== ""
+    );
+    order = hasPoints ? [...BASE_ORDER, "points"] : BASE_ORDER;
+    if (!order.includes(kind)) {
+      kind = "5h";
+      api.storage.set("usage:visible-kind", kind);
+    }
+  };
+  syncOrder(snapshot);
 
   const btn = document.createElement("button");
   btn.type = "button";
@@ -9121,8 +9891,11 @@ function renderUsageBox(api, snapshot) {
   };
 
   /** Pull the entry for `kind` out of the live snapshot. */
-  const entryFor = (snap, k) => (k === "5h" ? snap.fiveHour : snap.weekly);
-  const isApiSnapshot = (snap) => !!snap?.apiMode || snap?.fiveHour?.apiMode;
+  const entryFor = (snap, k) => {
+    if (k === "5h") return snap.fiveHour;
+    if (k === "weekly") return snap.weekly;
+    return snap.points;
+  };
 
   /** Apply colors + text for the *value* state (i.e. not hover). */
   const applyValueState = (snap) => {
@@ -9144,10 +9917,20 @@ function renderUsageBox(api, snapshot) {
     btn.classList.toggle("bg-token-foreground/5", !lowEnergy);
     btn.classList.toggle("text-token-text-primary", !lowEnergy);
 
-    setText(left, entry?.label || (kind === "5h" ? "5h" : "Weekly"));
+    setText(
+      left,
+      entry?.label || (kind === "5h" ? "5h" : kind === "weekly" ? "Weekly" : "Credit"),
+    );
 
     const pctEl = singleRightSpan();
-    setText(pctEl, remaining == null ? "—" : `${remaining}%`);
+    setText(
+      pctEl,
+      kind === "points"
+        ? entry?.value || "—"
+        : remaining == null
+          ? "—"
+          : `${remaining}%`,
+    );
     setClass(pctEl, lowEnergy ? "font-medium" : "text-token-text-secondary");
   };
 
@@ -9158,6 +9941,11 @@ function renderUsageBox(api, snapshot) {
       return;
     }
     const entry = entryFor(snap, kind);
+    if (kind === "points") {
+      // Credit is a stable balance value; hovering it must not replace the label.
+      applyValueState(snap);
+      return;
+    }
     setText(left, "Resets:");
     setClass(left, "truncate text-token-text-secondary");
     const t = singleRightSpan();
@@ -9184,13 +9972,8 @@ function renderUsageBox(api, snapshot) {
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (isApiSnapshot(currentSnap)) {
-      suppressHover = true;
-      applyValueState(currentSnap);
-      return;
-    }
-    const i = ORDER.indexOf(kind);
-    kind = ORDER[(i + 1) % ORDER.length];
+    const i = order.indexOf(kind);
+    kind = order[(i + 1) % order.length];
     api.storage.set("usage:visible-kind", kind);
     // Per the design: clicking shows the OTHER kind's value, even if the
     // cursor is still over the box.
@@ -9207,6 +9990,7 @@ function renderUsageBox(api, snapshot) {
   btn._refresh = (next) => {
     if (next === currentSnap) return;
     currentSnap = next;
+    syncOrder(next);
     if (btn.matches(":hover") && !suppressHover) applyHoverState(currentSnap);
     else applyValueState(currentSnap);
   };
@@ -9293,6 +10077,9 @@ function switchControl(initial, onChange) {
   return btn;
 }
 
+
+
+
   const tweak = module.exports;
   const api = createBigPizzaRendererApi();
   if (!tweak || typeof tweak.start !== "function") {
@@ -9314,6 +10101,7 @@ function switchControl(initial, onChange) {
     "show-message-metrics-on-hover",
     "sidebar-chat-multi-select",
     "show-pinned-chat-project-names",
+    "hide-usage-alert",
   ];
   const featureInfo = [
     {
@@ -9325,10 +10113,17 @@ function switchControl(initial, onChange) {
     },
     {
       id: "show-usage-in-sidebar",
-      title: "5 小时 / 周额度",
-      detail: "优先通过 Codex renderer fetch bridge 读取 /wham/usage，失败时再解析页面里的额度 UI。点击可在 5h 和 Weekly 之间切换。",
+      title: "5 小时 / 周 / Credit 额度",
+      detail: "优先通过 Codex renderer fetch bridge 读取 /wham/usage；默认显示 5h，点击可切换 Weekly；只有实际收到点数数据时才显示 Credit，API 模式显示 API。",
       defaultEnabled: true,
       status: "当前页面暴露额度信号时可用",
+    },
+    {
+      id: "hide-usage-alert",
+      title: "隐藏额度耗尽提示",
+      detail: "隐藏额度用完后的弹窗、重置提示和额度卡片。",
+      defaultEnabled: true,
+      status: "可用",
     },
     {
       id: "square-sidebar",
@@ -9367,8 +10162,8 @@ function switchControl(initial, onChange) {
     },
     {
       id: "render-markdown-preview-math",
-      title: "Markdown 预览数学公式",
-      detail: "在右侧 .md 文件预览中使用 Codex 内置 KaTeX 渲染 LaTeX；公式和数学表格保持原位排版，点击可编辑公式或单个表格单元格。",
+      title: "Markdown 预览增强",
+      detail: "在右侧 .md 文件预览中渲染 LaTeX、数学表格和图片；相对图片路径以当前文档为基准，点击内容可原位编辑源码。",
       defaultEnabled: true,
       status: "支持 $…$、$$…$$、\\(…\\) 和 \\[…\\]",
     },

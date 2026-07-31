@@ -21,7 +21,7 @@
   "use strict";
 
   const INSTALL_KEY = "__bennettUiImprovementsBigPizza";
-  const VERSION = "1.0.23-bigpizza.3";
+  const VERSION = "1.0.23-bigpizza.9";
   const previous = window[INSTALL_KEY];
   if (previous && typeof previous.stop === "function") {
     try {
@@ -171,7 +171,7 @@ function renderSettings(root, state) {
       id: "hide-upgrade-prompts",
       title: "Hide upgrade prompts",
       description:
-        'Hide the "Upgrade" pill in the app sidebar and the "Get Plus" button in the top bar.',
+        'Hide the Plus/Pro plan upgrade pill and Get Plus button, but keep Codex software-update notices visible.',
     },
     {
       id: "show-usage-in-sidebar",
@@ -2489,6 +2489,9 @@ const FEATURES = {
     let accountModeInFlight = false;
     let accountModeLastCheckedAt = 0;
     let accountModeLogged = false;
+    let accountModeCandidate = "unknown";
+    let accountModeCandidateCount = 0;
+    let accountModeCandidateAt = 0;
 
     const log = (...a) => api.log.info("[usage]", ...a);
     const ASIDE_SELECTOR = [
@@ -2758,7 +2761,7 @@ const FEATURES = {
       accountModeInFlight = true;
       try {
         let nextMode = "unknown";
-        let settingsMode = "unknown";
+        let explicitMode = false;
         const settings = await bridgePostJson("/settings/get", {});
         const profile = activeRelayProfile(settings);
         const relayMode = fieldValue(profile, "relayMode", "relay_mode");
@@ -2769,12 +2772,16 @@ const FEATURES = {
         );
         if (relayMode === "official" && !officialMixApiKey) {
           nextMode = "official";
+          explicitMode = true;
         } else if (relayMode === "pureApi" || relayMode === "pure_api") {
           nextMode = "api";
+          explicitMode = true;
         } else if (relayMode === "mixedApi" || relayMode === "mixed_api" || officialMixApiKey) {
           nextMode = "api";
+          explicitMode = true;
         } else if (!relayMode && legacyApiConfigured) {
           nextMode = "api";
+          explicitMode = true;
         }
 
         if (nextMode === "unknown") {
@@ -2784,23 +2791,47 @@ const FEATURES = {
             nextMode = "official";
           }
         }
-        if (nextMode === "unknown") nextMode = settingsMode;
+        if (nextMode === "unknown") return accountMode;
 
-        if (nextMode !== "unknown" && nextMode !== accountMode) {
-          accountMode = nextMode;
-          if (accountMode === "api") {
-            snapshot = {
-              fiveHour: { label: "API", pct: null, resetAt: null, apiMode: true },
-              weekly: null,
-              at: Date.now(),
-              apiMode: true,
-            };
-          } else if (snapshot?.apiMode) {
-            snapshot = null;
-          }
-          ensureMounted(true);
+        // Catalog responses can briefly reflect the previous provider while
+        // Codex is switching accounts. Require two matching non-explicit
+        // observations before changing the visible mode.
+        if (nextMode === accountMode) {
+          accountModeCandidate = "unknown";
+          accountModeCandidateCount = 0;
+          accountModeCandidateAt = 0;
+          return accountMode;
         }
-        if (!accountModeLogged && accountMode !== "unknown") {
+        if (accountMode !== "unknown" || !explicitMode) {
+          if (
+            accountModeCandidate === nextMode &&
+            now - accountModeCandidateAt < 45_000
+          ) {
+            accountModeCandidateCount += 1;
+          } else {
+            accountModeCandidate = nextMode;
+            accountModeCandidateCount = 1;
+            accountModeCandidateAt = now;
+          }
+          if (accountModeCandidateCount < 2) return accountMode;
+        }
+
+        accountModeCandidate = "unknown";
+        accountModeCandidateCount = 0;
+        accountModeCandidateAt = 0;
+        accountMode = nextMode;
+        if (accountMode === "api") {
+          snapshot = {
+            fiveHour: { label: "API", pct: null, resetAt: null, apiMode: true },
+            weekly: null,
+            at: Date.now(),
+            apiMode: true,
+          };
+        } else if (snapshot?.apiMode) {
+          snapshot = null;
+        }
+        ensureMounted(true);
+        if (!accountModeLogged) {
           accountModeLogged = true;
           log("account mode", accountMode);
         }
@@ -2811,7 +2842,6 @@ const FEATURES = {
         accountModeInFlight = false;
       }
     };
-
     const remainingPercent = (usedPercent) => {
       const used = Number(usedPercent);
       if (!Number.isFinite(used)) return null;
@@ -3561,29 +3591,41 @@ const FEATURES = {
     ensureMounted(true);
 
     // ── observers ─────────────────────────────────────────────────────
-    // We throttle to one tick per animation frame so a flood of React
-    // re-renders can't tank the renderer (Codex mutates the DOM heavily
-    // while typing). Coalesces N onMutate() calls into one scan.
+    // Codex mutates the renderer continuously while typing. Debounce quota
+    // work so we do not rescan the entire sidebar on every React commit.
     let scheduled = false;
+    let scheduleTimer = 0;
+    const runMutationScan = async () => {
+      const mode = await refreshAccountMode();
+      if (mode === "official") await refreshUsageFromApi();
+      if (accountMode === "official" && !directUsageAvailable) {
+        const grid = findBreakdownGrid();
+        if (grid) scanBreakdown(grid);
+        scanCompactUsage();
+      }
+      ensureMounted();
+    };
     const onMutate = () => {
       if (scheduled) return;
       scheduled = true;
-      requestAnimationFrame(() => {
+      scheduleTimer = window.setTimeout(() => {
+        scheduleTimer = 0;
         scheduled = false;
-        refreshAccountMode().then((mode) => {
-          if (mode === "official") refreshUsageFromApi();
-        });
-        if (accountMode === "official" && !directUsageAvailable) {
-          const grid = findBreakdownGrid();
-          if (grid) scanBreakdown(grid);
-          scanCompactUsage();
-        }
-        ensureMounted();
-      });
+        void runMutationScan();
+      }, 1000);
     };
 
     onMutate();
-    const obs = new MutationObserver(onMutate);
+    const IGNORED_MUTATION_SELECTOR =
+      "[data-codexpp], [data-codex-composer-root], [data-codex-composer='true'], [contenteditable='true'], textarea, [data-composer-overlay-floating-ui]";
+    const obs = new MutationObserver((records) => {
+      const relevant = records.some((record) => {
+        const target = record.target;
+        const element = target instanceof Element ? target : target?.parentElement;
+        return !(element instanceof Element && element.closest(IGNORED_MUTATION_SELECTOR));
+      });
+      if (relevant) onMutate();
+    });
     obs.observe(document.documentElement, { childList: true, subtree: true });
     const interval = window.setInterval(onMutate, 15_000);
     window.addEventListener("focus", onMutate);
@@ -3595,6 +3637,7 @@ const FEATURES = {
     return () => {
       obs.disconnect();
       window.clearInterval(interval);
+      if (scheduleTimer) window.clearTimeout(scheduleTimer);
       window.removeEventListener("focus", onMutate);
       window.removeEventListener("message", onUsageMessage);
       document.removeEventListener("visibilitychange", onMutate);
@@ -3613,47 +3656,128 @@ const FEATURES = {
 
   /** Hide exhaustion banners and reset prompts without touching conversation content. */
   "hide-usage-alert"() {
-    const STYLE_ID = "codex-plus-hide-usage-alert-style";
+    const STYLE_ID = "codexpp-bennett-hide-usage-alert-style";
     const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
     const THREAD_FOOTER_SELECTOR =
       "[data-thread-scroll-footer='true'], [data-thread-find-composer='true'], [data-codex-composer-root], [data-pip-obstacle='thread-footer']";
-    const ALERT_TARGET_SELECTOR = "aside, [role='alert'], [role='status'], [aria-live]";
+    const SCAN_SELECTOR =
+      "[role='alert'], [role='status'], [aria-live], header, section, aside, div";
     const COMPOSER_SURFACE_SELECTOR =
       "[data-codex-composer='true'], .composer-footer, .ProseMirror, textarea, input, [contenteditable='true'], [role='textbox']";
-    const quotaRe = /(Codex\s*消息限额已用尽|消息限额已用尽|message\s+limit|usage\s+limit|out\s+of\s+Codex\s+messages|额度|限额|quota|rate\s+limit)/i;
-    const resetRe = /(额度将于|继续使用\s*Codex|升级至\s*Plus|quota\s+will\s+reset|limit\s+will\s+reset|rate\s+limit\s+resets|reset|重置|upgrade\s+to\s+plus)/i;
-    const usageCardRe = /(剩余\s*\d+%\s*使用量|remaining\s+\d+%\s+usage|usage\s+remaining|reset\s+frequency|next\s+reset)/i;
-    const actionRe = /(升级|Plus|upgrade|pricing|重置|reset|限额|额度|限制|limit|quota)/i;
+    const quotaBannerRe =
+      /(你的\s*Codex\s*消息限额已用尽|Codex\s*消息限额已用尽|消息限额已用尽|message\s+limit|usage\s+limit|you['’]?re\s+out\s+of\s+Codex\s+messages|out\s+of\s+Codex\s+messages|你的\s*Codex\s*已用完|你的\s*Codex\s*消息\s*额度|你的\s*速率限制|速率限制\s*(?:将于|重置)|额度|限额|quota|rate\s+limit)/i;
+    const quotaResetRe =
+      /(额度将于|继续使用\s*Codex|升级至\s*Plus|quota\s+will\s+reset|limit\s+will\s+reset|rate\s+limit\s+resets|resets?\s+on|continue\s+using\s+Codex|start\s+your\s+free\s+trial\s+of\s+Plus|upgrade\s+to\s+plus|速率限制|将于\s*\d|重置|reset)/i;
+    const usageCardRe =
+      /(剩余\s*\d+%\s*使用量|重置频率|下次重置时间|remaining\s+\d+%\s+usage|usage\s+remaining|reset\s+frequency|next\s+reset)/i;
+    const actionTextRe =
+      /(升级|Plus|upgrade|pricing|plan|重置|reset|限额|额度|限制|limit|quota)/i;
     const hidden = new Set();
     let observer = null;
     let timer = 0;
 
-    const textOf = (node) => String(node?.innerText || node?.textContent || "").replace(/\s+/g, " ").trim();
+    const normalizeText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const candidateText = (node) =>
+      node instanceof HTMLElement ? normalizeText(node.innerText || node.textContent || "") : "";
     const visibleBox = (node) => {
       if (!(node instanceof HTMLElement)) return false;
       const rect = node.getBoundingClientRect();
-      return rect.width >= 160 && rect.height >= 16 && rect.bottom > 0 && rect.top < (window.innerHeight || 900);
+      if (!rect || rect.width < 180 || rect.height < 16) return false;
+      if (rect.bottom <= 0 || rect.top >= (window.innerHeight || 900)) return false;
+      if (rect.right <= 0 || rect.left >= (window.innerWidth || 1200)) return false;
+      return true;
     };
-    const hasAction = (node, text) => actionRe.test(`${text} ${Array.from(node.querySelectorAll("button, a, [role='button']")).slice(0, 8).map((item) => textOf(item)).join(" ")}`);
-    const hasEditable = (node) => Boolean(node.querySelector("input, textarea, [contenteditable='true'], [role='textbox']"));
-    const touchesComposerSurface = (node) => Boolean(node.closest(COMPOSER_SURFACE_SELECTOR));
-    const touchesUsageControl = (node) => Boolean(node.closest("[data-codexpp='usage-slot'], [data-codexpp='usage-box'], [data-codexpp='usage-boxes']"));
-    const shouldHide = (node, allowAside = false) => {
-      if (!(node instanceof HTMLElement) || node.closest("[data-message-author-role], article")) return false;
-      if (node.matches(THREAD_FOOTER_SELECTOR)) return false;
-      if (!node.matches(allowAside ? "aside, [role='alert'], [role='status'], [aria-live]" : "[role='alert'], [role='status'], [aria-live]")) return false;
+    const bannerBox = (node) => {
       if (!visibleBox(node)) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width >= 300 && rect.height >= 30 && rect.height <= 180;
+    };
+    const usageCardBox = (node) => {
+      if (!visibleBox(node)) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width >= 160 && rect.width <= 560 && rect.height >= 70 && rect.height <= 340;
+    };
+    const insideConversationContent = (node) =>
+      Boolean(
+        node.closest(
+          [
+            "[data-message-author-role]",
+            "[data-testid*='message' i]",
+            "[data-test-id*='message' i]",
+            "[data-thread-find-target]",
+            "article",
+          ].join(","),
+        ),
+      );
+    const hasAction = (node, text) => {
+      const actionableText = normalizeText(
+        Array.from(node.querySelectorAll("button, a, [role='button']"))
+          .slice(0, 8)
+          .map((item) => item.innerText || item.textContent || item.getAttribute("aria-label") || "")
+          .join(" "),
+      );
+      return actionTextRe.test(`${text} ${actionableText}`);
+    };
+    const hasEditable = (node) =>
+      Boolean(node.querySelector("input, textarea, [contenteditable='true'], [role='textbox']"));
+    const touchesComposerSurface = (node) => Boolean(node.closest(COMPOSER_SURFACE_SELECTOR));
+    const touchesUsageControl = (node) =>
+      Boolean(node.closest("[data-codexpp='usage-slot'], [data-codexpp='usage-box'], [data-codexpp='usage-boxes']"));
+    const looksLikeQuotaBanner = (node) => {
+      if (insideConversationContent(node) || !bannerBox(node)) return false;
       if (hasEditable(node) || touchesUsageControl(node) || touchesComposerSurface(node)) return false;
-      const text = textOf(node);
+      const text = candidateText(node);
+      if (text.length < 20 || text.length > 420) return false;
+      if (!quotaBannerRe.test(text) || !quotaResetRe.test(text)) return false;
+      return hasAction(node, text);
+    };
+    const looksLikeUsageCard = (node) => {
+      if (insideConversationContent(node) || !usageCardBox(node)) return false;
+      if (hasEditable(node) || touchesUsageControl(node) || touchesComposerSurface(node)) return false;
+      const text = candidateText(node);
+      if (text.length < 20 || text.length > 300) return false;
+      if (!usageCardRe.test(text)) return false;
+      if (!/剩余\s*\d+%\s*使用量|remaining\s+\d+%\s+usage|usage\s+remaining/i.test(text)) return false;
+      return hasAction(node, text);
+    };
+    const quotaBannerRoot = (node) => {
+      const parent = node.parentElement;
+      if (!parent || parent === document.body) return node;
+      const text = candidateText(parent);
+      if (text.length <= 420 && quotaBannerRe.test(text) && quotaResetRe.test(text) && bannerBox(parent)) return parent;
+      return node;
+    };
+    const usageCardRoot = (node) => {
+      if (node.getAttribute("role") === "status" && looksLikeUsageCard(node)) return node;
+      const status = node.closest('[role="status"]');
+      if (status && looksLikeUsageCard(status)) return status;
+      const childStatus = node.querySelector('[role="status"]');
+      if (childStatus && looksLikeUsageCard(childStatus)) return childStatus;
+      return node;
+    };
+    const shouldHide = (node, allowGeneric = false) => {
+      if (!(node instanceof HTMLElement) || insideConversationContent(node)) return false;
+      if (node.matches(THREAD_FOOTER_SELECTOR)) return false;
+      if (
+        !node.matches(
+          allowGeneric
+            ? "aside, header, section, div, [role='alert'], [role='status'], [aria-live]"
+            : "[role='alert'], [role='status'], [aria-live]",
+        )
+      ) return false;
+      if (!visibleBox(node) || hasEditable(node) || touchesUsageControl(node) || touchesComposerSurface(node)) return false;
+      const text = candidateText(node);
       if (text.length < 12 || text.length > 500) return false;
       const rect = node.getBoundingClientRect();
-      const bannerLike = rect.width >= 300 && rect.height >= 30 && rect.height <= 240 && quotaRe.test(text) && resetRe.test(text);
-      const cardLike = rect.width >= 160 && rect.width <= 560 && rect.height >= 70 && rect.height <= 340 && usageCardRe.test(text) && hasAction(node, text);
+      const bannerLike =
+        rect.width >= 300 && rect.height >= 30 && rect.height <= 240 && quotaBannerRe.test(text) && quotaResetRe.test(text);
+      const cardLike =
+        rect.width >= 160 && rect.width <= 560 && rect.height >= 70 && rect.height <= 340 && usageCardRe.test(text);
       return (bannerLike || cardLike) && hasAction(node, text);
     };
     const findAlertTarget = (root) => {
       if (!(root instanceof HTMLElement)) return null;
-      const candidates = [root, ...root.querySelectorAll(ALERT_TARGET_SELECTOR)];
+      const candidates = [root, ...root.querySelectorAll("aside, [role='alert'], [role='status'], [aria-live]")];
       for (const candidate of candidates) {
         if (candidate instanceof HTMLElement && shouldHide(candidate, candidate.matches("aside"))) return candidate;
       }
@@ -3667,24 +3791,28 @@ const FEATURES = {
     const scan = () => {
       timer = 0;
       if (!document.body) return;
-      for (const node of document.body.querySelectorAll(`[role="alert"], [role="status"], [aria-live], ${THREAD_FOOTER_SELECTOR}`)) {
-        if (!(node instanceof HTMLElement) || node.hasAttribute(HIDDEN_ATTR)) continue;
+      for (const node of document.body.querySelectorAll(SCAN_SELECTOR)) {
+        if (!(node instanceof HTMLElement) || node.getAttribute(HIDDEN_ATTR) === "true") continue;
         if (node.matches(THREAD_FOOTER_SELECTOR)) {
           const target = findAlertTarget(node);
-          if (target && !target.hasAttribute(HIDDEN_ATTR)) hide(target);
+          if (target && target.getAttribute(HIDDEN_ATTR) !== "true") hide(target);
           continue;
         }
-        if (shouldHide(node)) hide(node);
+        const generic = node.matches("aside, header, section, div");
+        if (looksLikeQuotaBanner(node) || looksLikeUsageCard(node) || shouldHide(node, generic)) hide(node);
       }
     };
-    const schedule = () => {
-      if (!timer) timer = window.setTimeout(scan, 80);
+    const schedule = (delay = 80) => {
+      if (!timer) timer = window.setTimeout(scan, delay);
     };
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `[${HIDDEN_ATTR}="true"] { display: none !important; visibility: hidden !important; pointer-events: none !important; }`;
+    document.getElementById(STYLE_ID)?.remove();
     document.documentElement.appendChild(style);
-    observer = new MutationObserver(schedule);
+    observer = new MutationObserver((mutations) => {
+      if (mutations.some((mutation) => mutation.addedNodes.length || mutation.type === "characterData")) schedule();
+    });
     observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
     scan();
 
@@ -3696,7 +3824,6 @@ const FEATURES = {
       hidden.clear();
     };
   },
-
   /**
    * Square sidebar: the visual "rounded sidebar" is actually the main
    * content panel — `<main class="main-surface ... rounded-s-2xl">` —
@@ -10109,7 +10236,7 @@ function switchControl(initial, onChange) {
     {
       id: "hide-upgrade-prompts",
       title: "隐藏升级提示",
-      detail: "隐藏侧栏和顶部栏中的 Upgrade / Get Plus 提示。",
+      detail: "隐藏 Plus/Pro 套餐升级提示，但保留 Codex 软件更新提示。",
       defaultEnabled: true,
       status: "可用",
     },

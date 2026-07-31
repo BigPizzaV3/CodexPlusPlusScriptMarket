@@ -139,8 +139,8 @@
     {
       "id": "bennett-ui-improvements",
       "name": "Bennett UI Improvements",
-      "description": "彩色项目管理界面、5 小时/Weekly/Credit 额度显示，以及右侧 Markdown 预览中的 LaTeX 公式显示；由 b-nnett/codex-plusplus-bennett-ui 迁移适配至 BigPizzaV3 Codex++。",
-      "version": "1.0.23-bigpizza.3",
+      "description": "彩色项目管理界面、5 小时/Weekly/Credit 额度显示、稳定的额度耗尽提示隐藏，以及右侧 Markdown 预览中的 LaTeX 公式显示；由 b-nnett/codex-plusplus-bennett-ui 迁移适配至 BigPizzaV3 Codex++。",
+      "version": "1.0.23-bigpizza.9",
       "author": "bennett; JHees",
       "tags": [
         "codex",
@@ -154,7 +154,7 @@
       ],
       "homepage": "https://github.com/JHees/bennett-ui-improvements-for-codexplusplus",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
-      "sha256": "79433e112d5641da1eea64d74743b6eb3e6ab90bebb60588c5a99c76eeb63d7b"
+      "sha256": "7c30e0d84a264c51af6e71d9cc2663113f5f53031cdc4820250f91931c71a7d4"
     }
   ]
 }

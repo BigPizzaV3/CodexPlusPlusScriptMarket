@@ -4,31 +4,29 @@
   const API_KEY = "__codexContextMeter";
   const STYLE_ID = "codex-context-meter-style";
   const ROOT_ID = "codex-context-meter";
-  const CAPTURE_STATE_KEY = "__codexContextMeterCaptureState";
+  const HISTORY_PORTAL_ID = "codex-context-meter-history-portal";
   const CONFIG_KEY = "__codexContextMeterConfig";
   const UI_STATE_STORAGE_KEY = "__codexContextMeterUiState";
   const PROVIDER_SUMMARY_KEY = "__codexContextMeterProviderSummary";
   const PROVIDER_SUMMARY_EVENT = "codex-context-meter-provider-summary";
-  const SCRIPT_VERSION = 81;
+  const SCRIPT_VERSION = 101;
   const UPDATE_INTERVAL_MS = 5000;
-  const SLOW_SCAN_INTERVAL_MS = 30000;
+  const SLOW_SCAN_INTERVAL_MS = UPDATE_INTERVAL_MS;
+  const CONTEXT_USAGE_BACKGROUND_SAMPLE_INTERVAL_MS = UPDATE_INTERVAL_MS;
+  const CONTEXT_USAGE_BACKGROUND_SAMPLE_MAX_CONVERSATIONS = 32;
   const SWITCH_RETRY_WINDOW_MS = 8000;
   const SWITCH_RETRY_INTERVAL_MS = 700;
   const NAVIGATION_PENDING_MS = 1500;
-  const CAPTURE_UPDATE_DELAY_MS = 30;
+  const NAVIGATION_UPDATE_DELAY_MS = 30;
   const MUTATION_UPDATE_DELAY_MS = 500;
   const ACTIVE_CONVERSATION_LOOKUP_CACHE_MS = 250;
   const APP_SIGNAL_READING_CACHE_MS = 120;
   const APP_SIGNAL_IMPORT_GRACE_MS = 600;
+  const INLINE_MOUNT_CACHE_MS = 5000;
   // 以下限额只约束兜底扫描；主路径读 app signal / 已缓存读数，不受这些值影响。
   const EXPENSIVE_FALLBACK_INTERVAL_MS = 2500;
   const REACT_HOST_SCAN_LIMIT = 180;
-  const STATUS_TEXT_NODE_SCAN_LIMIT = 1200;
-  const DOM_ATTRIBUTE_SCAN_LIMIT = 500;
-  const DOM_TEXT_PART_LIMIT = 120;
   const WINDOW_KEY_CACHE_MS = 10000;
-  const MAX_TEXT_LENGTH = 120000;
-  const MAX_CAPTURE_TEXT_LENGTH = 2000000;
   const SPEND_HISTORY_WINDOW_MS = 60 * 60 * 1000;
   const SPEND_HISTORY_MAX_ITEMS = 200;
   const SPEND_HISTORY_CHART_WIDTH = 244;
@@ -41,7 +39,22 @@
   const CONTEXT_SPEND_DEDUPE_KEY = "__codexContextMeterContextSpendDedupe";
   const PROVIDER_SPEND_DEDUPE_WINDOW_MS = 1500;
   const PROVIDER_SPEND_DEDUPE_KEY = "__codexContextMeterProviderSpendDedupe";
-  const HISTORY_PANEL_CLOSE_DELAY_MS = 240;
+  const HISTORY_PANEL_VIEWPORT_PADDING = 8;
+  const HISTORY_PANEL_GAP = 8;
+  const HISTORY_PANEL_MIN_WIDTH = 240;
+  const HISTORY_PANEL_MIN_HEIGHT = 80;
+  const HISTORY_PORTAL_THEME_VARIABLES = [
+    "--ccm-card-value",
+    "--ccm-panel-border",
+    "--ccm-panel-bg",
+    "--ccm-panel-text",
+    "--ccm-panel-shadow",
+    "--ccm-muted-strong",
+    "--ccm-muted",
+    "--ccm-muted-soft",
+    "--ccm-axis-line",
+    "--ccm-gridline",
+  ];
   const FLOAT_DRAG_HOLD_MS = 260;
   const FLOAT_SCALE_MIN = 0.7;
   const FLOAT_SCALE_MAX = 1.8;
@@ -49,6 +62,7 @@
   const DEFAULT_FLOATING_UI = {
     mode: "inline",
     floatingLayout: "horizontal",
+    theme: "dark",
     x: 16,
     y: 10,
     scale: 1,
@@ -73,19 +87,22 @@
       },
     },
   };
-  const CAPTURE_TEXT_HINT_RE = /context|token|usage|latestTokenUsageInfo|window|budget|remaining|上下文|令牌|使用|窗口/i;
+  const CODEX_COMPOSER_SELECTOR = `[data-codex-composer="true"]`;
+  const THREAD_COMPOSER_SELECTOR = `[data-thread-find-composer="true"]`;
+  const CODEX_INTELLIGENCE_TRIGGER_SELECTOR = `[data-codex-intelligence-trigger="true"]`;
+  const REACT_CONVERSATION_SCAN_DEPTH = 14;
+  const APP_SIGNAL_SELECTOR_SCAN_INTERVAL_MS = 2000;
+  const APP_SIGNAL_SELECTOR_SCAN_LIMIT = 360;
   const THREAD_CONTENT_SELECTOR = [
+    `[data-thread-find-target="conversation"]`,
+    THREAD_COMPOSER_SELECTOR,
     '[data-app-shell-main-content-layout*="thread"]',
-    '[class*="thread-edge"]',
-    '[class*="transcript"]',
-    '[data-testid*="thread"], [data-test-id*="thread"]',
-    '[data-testid*="conversation"], [data-test-id*="conversation"]',
   ].join(",");
   const REACT_STATE_HOST_SELECTOR = [
     "[data-app-action-sidebar-thread-id]",
-    "[data-testid*='thread' i]",
-    "[data-testid*='conversation' i]",
-    "[data-testid*='message' i]",
+    THREAD_COMPOSER_SELECTOR,
+    CODEX_COMPOSER_SELECTOR,
+    `[data-thread-find-target="conversation"]`,
     "[data-message-author-role]",
     "main",
     "article",
@@ -93,14 +110,17 @@
   const CONVERSATION_CONTENT_SELECTOR = [
     `[data-thread-find-target]`,
     `[data-message-author-role]`,
-    `[data-testid*="conversation" i]`,
-    `[data-testid*="message" i]`,
     `article`,
+  ].join(",");
+  const INVALID_INLINE_MOUNT_SELECTOR = [
+    "button",
+    "[role='button']",
+    "[aria-haspopup]",
+    "[data-codex-intelligence-trigger]",
   ].join(",");
   const MESSAGE_MUTATION_SELECTOR = [
     `[data-thread-find-target]`,
     `[data-message-author-role]`,
-    `[data-testid*="message" i]`,
     `article`,
   ].join(",");
   const PREFERRED_STATUS_KEYS = [
@@ -132,8 +152,16 @@
   const PREFERRED_STATUS_KEY_SET = new Set(PREFERRED_STATUS_KEYS);
   const STATUS_TREE_KEY_RE = /context|usage|status|thread|conversation|token|query|data|props|memoized|pending|return|child|sibling|state|value|current|store|atom|map|cache/i;
   const APP_SIGNAL_SCOPE_KEY_RE = /memoized|pending|dependencies|firstContext|context|value|current|return|child|sibling|state|store|node|chain|scope|provider|props|query|cache/i;
-  const VALUE_TEXT_KEY_RE = /context|token|tokens|usage|window|budget|remaining|上下文|令牌|使用|窗口/i;
+  const CONVERSATION_REACT_KEY_RE = /^(?:props|children|memoizedProps|pendingProps|memoizedState|stateNode|child|sibling|return|alternate|value|current|context|node|chain|conversationId|localConversationId|threadId|id|key|params|thread|conversation)$/;
   const REACT_PRIVATE_KEY_RE = /^__react(?:Props|Fiber|Container)\$/;
+  const CONVERSATION_ID_KEYS = [
+    "conversationId",
+    "localConversationId",
+    "threadId",
+    "id",
+    "key",
+  ];
+  const CONVERSATION_ID_KEY_SET = new Set(CONVERSATION_ID_KEYS);
 
   for (const key of Object.keys(window)) {
     if (!/CodexContextUsageMeter(?:Installed)?$/.test(key)) continue;
@@ -163,10 +191,6 @@
 
   window[INSTALL_KEY] = true;
 
-  const contextTerms =
-    /context|token|tokens|usage|window|budget|remaining|上下文|令牌|使用|窗口/i;
-  const ratioWords =
-    /context|token|tokens|usage|window|budget|remaining|上下文|令牌|使用|窗口/i;
   const state = {
     activeConversationId: null,
     lastReading: null,
@@ -177,13 +201,20 @@
     contextCard: null,
     providerCard: null,
     historyPanel: null,
+    historyPortal: null,
     value: null,
     fill: null,
+    compressionZone: null,
+    contextRing: null,
     providerValue: null,
     providerFill: null,
+    providerRing: null,
     providerSummary: null,
     inlineHost: null,
     inlineBefore: null,
+    inlineMountCache: null,
+    inlineMountPending: false,
+    inlineMountLookupAt: 0,
     uiState: DEFAULT_FLOATING_UI,
     contextMenu: null,
     contextMenuCloseListener: null,
@@ -204,6 +235,8 @@
     providerSummaryListener: null,
     lastScanAt: 0,
     lastScannedConversationId: null,
+    contextUsageBackgroundSampleAt: 0,
+    contextUsageBackgroundSampleConversationIds: [],
     navigationPendingUntil: 0,
     switchRetryUntil: 0,
     retryTimer: 0,
@@ -221,12 +254,14 @@
     appSignalCachedReading: null,
     appSignalCachedConversationId: null,
     appSignalCachedAt: 0,
+    appSignalLastSuccessAt: 0,
     appSignalModulesRequestedAt: 0,
+    appSignalTokenUsageSelector: null,
+    appSignalTokenUsageSelectorExport: null,
+    appSignalTokenUsageSelectorLookupAt: 0,
     waitingForAppSignalModules: false,
     expensiveFallbackScannedAt: 0,
     expensiveFallbackConversationId: null,
-    windowContextTextKeys: null,
-    windowContextTextKeysAt: 0,
     windowUsageKeys: null,
     windowUsageKeysAt: 0,
     reactPrivateKeyCache: new WeakMap(),
@@ -236,21 +271,6 @@
     threadContentLookupAt: 0,
     threadContentLookupResult: false,
   };
-
-  function getCaptureState() {
-    let captureState = window[CAPTURE_STATE_KEY];
-    if (!captureState || typeof captureState !== "object") {
-      captureState = {};
-      window[CAPTURE_STATE_KEY] = captureState;
-    }
-
-    captureState.version = SCRIPT_VERSION;
-    captureState.inspectText = inspectCandidateText;
-    captureState.inspectValue = inspectCandidateValue;
-    captureState.acceptReading = acceptReading;
-    captureState.parsePayloadText = parsePayloadText;
-    return captureState;
-  }
 
   function installStyle() {
     const existingStyle = document.getElementById(STYLE_ID);
@@ -262,6 +282,40 @@
     style.dataset.version = String(SCRIPT_VERSION);
     style.textContent = `
       #${ROOT_ID} {
+        --ccm-card-border: rgba(255, 255, 255, 0.16);
+        --ccm-card-bg: rgba(20, 22, 28, 0.78);
+        --ccm-card-bg-strong: rgba(20, 22, 28, 0.88);
+        --ccm-card-text: rgba(255, 255, 255, 0.92);
+        --ccm-card-value: rgba(255, 255, 255, 0.98);
+        --ccm-card-shadow: 0 5px 18px rgba(0, 0, 0, 0.18);
+        --ccm-card-shadow-strong: 0 8px 28px rgba(0, 0, 0, 0.24);
+        --ccm-ring-rest: rgba(255, 255, 255, 0.18);
+        --ccm-ring-core: rgba(20, 22, 28, 0.96);
+        --ccm-track-bg: rgba(255, 255, 255, 0.16);
+        --ccm-panel-border: rgba(255, 255, 255, 0.14);
+        --ccm-panel-bg: rgba(16, 18, 24, 0.94);
+        --ccm-panel-text: rgba(255, 255, 255, 0.9);
+        --ccm-panel-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+        --ccm-muted-strong: rgba(255, 255, 255, 0.72);
+        --ccm-muted: rgba(255, 255, 255, 0.48);
+        --ccm-muted-soft: rgba(255, 255, 255, 0.46);
+        --ccm-axis-line: rgba(255, 255, 255, 0.16);
+        --ccm-gridline: rgba(255, 255, 255, 0.1);
+        --ccm-fill-normal: #22c55e;
+        --ccm-fill-normal-start: #2563eb;
+        --ccm-fill-normal-end: #22c55e;
+        --ccm-fill-notice: #0ea5e9;
+        --ccm-fill-notice-start: #06b6d4;
+        --ccm-fill-notice-end: #0ea5e9;
+        --ccm-fill-warn: #ea580c;
+        --ccm-fill-warn-start: #d97706;
+        --ccm-fill-warn-end: #ea580c;
+        --ccm-fill-danger: #dc2626;
+        --ccm-fill-danger-start: #e11d48;
+        --ccm-fill-danger-end: #dc2626;
+        --ccm-fill-critical: #b91c1c;
+        --ccm-fill-critical-start: #be123c;
+        --ccm-fill-critical-end: #b91c1c;
         --ccm-ring-size: 22px;
         --ccm-ring-width: 3px;
         --ccm-inline-max-width: 210px;
@@ -282,6 +336,28 @@
         user-select: none;
         /* Codex/Electron 顶部可能是窗口拖拽区；不退出拖拽区时，真实鼠标 hover 会被系统层吞掉。 */
         -webkit-app-region: no-drag;
+      }
+
+      #${ROOT_ID}[data-theme="light"] {
+        --ccm-card-border: rgba(15, 23, 42, 0.14);
+        --ccm-card-bg: rgba(248, 250, 252, 0.9);
+        --ccm-card-bg-strong: rgba(248, 250, 252, 0.96);
+        --ccm-card-text: rgba(15, 23, 42, 0.86);
+        --ccm-card-value: rgba(15, 23, 42, 0.96);
+        --ccm-card-shadow: 0 5px 18px rgba(15, 23, 42, 0.14);
+        --ccm-card-shadow-strong: 0 8px 28px rgba(15, 23, 42, 0.18);
+        --ccm-ring-rest: rgba(15, 23, 42, 0.24);
+        --ccm-ring-core: rgba(248, 250, 252, 0.96);
+        --ccm-track-bg: rgba(15, 23, 42, 0.2);
+        --ccm-panel-border: rgba(15, 23, 42, 0.12);
+        --ccm-panel-bg: rgba(255, 255, 255, 0.96);
+        --ccm-panel-text: rgba(15, 23, 42, 0.88);
+        --ccm-panel-shadow: 0 10px 30px rgba(15, 23, 42, 0.16);
+        --ccm-muted-strong: rgba(51, 65, 85, 0.72);
+        --ccm-muted: rgba(71, 85, 105, 0.58);
+        --ccm-muted-soft: rgba(71, 85, 105, 0.54);
+        --ccm-axis-line: rgba(15, 23, 42, 0.16);
+        --ccm-gridline: rgba(15, 23, 42, 0.1);
       }
 
       #${ROOT_ID}[data-placement="inline"] {
@@ -311,8 +387,7 @@
       }
 
       #${ROOT_ID}[data-placement="inline"] .ccm-value,
-      #${ROOT_ID}[data-placement="inline"] .ccm-provider-value,
-      #${ROOT_ID}[data-placement="inline"] .ccm-history-panel {
+      #${ROOT_ID}[data-placement="inline"] .ccm-provider-value {
         display: none !important;
       }
 
@@ -333,6 +408,17 @@
         display: none !important;
       }
 
+      #${HISTORY_PORTAL_ID} {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483647;
+        pointer-events: none;
+      }
+
+      #${HISTORY_PORTAL_ID}[hidden] {
+        display: none !important;
+      }
+
       #${ROOT_ID} .ccm-card {
         position: relative;
         box-sizing: border-box;
@@ -341,11 +427,11 @@
         min-width: 0;
         max-width: var(--ccm-inline-max-width);
         padding: 5px 8px;
-        border: 1px solid rgba(255, 255, 255, 0.16);
+        border: 1px solid var(--ccm-card-border);
         border-radius: 999px;
-        background: rgba(20, 22, 28, 0.78);
-        color: rgba(255, 255, 255, 0.92);
-        box-shadow: 0 5px 18px rgba(0, 0, 0, 0.18);
+        background: var(--ccm-card-bg);
+        color: var(--ccm-card-text);
+        box-shadow: var(--ccm-card-shadow);
         font: 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         overflow: visible;
         backdrop-filter: blur(10px);
@@ -357,8 +443,8 @@
         max-width: 240px;
         padding: 8px 10px 9px;
         border-radius: 8px;
-        background: rgba(20, 22, 28, 0.88);
-        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.24);
+        background: var(--ccm-card-bg-strong);
+        box-shadow: var(--ccm-card-shadow-strong);
       }
 
       #${ROOT_ID}[data-placement="floating"] .ccm-row {
@@ -395,7 +481,8 @@
         height: var(--ccm-ring-size);
         border-radius: 50%;
         background:
-          conic-gradient(var(--ccm-fill-color, #4ade80) 0deg, var(--ccm-fill-color, #4ade80) var(--ccm-ring-angle, 0deg), rgba(255, 255, 255, 0.18) var(--ccm-ring-angle, 0deg) 360deg);
+          conic-gradient(var(--ccm-fill-color, var(--ccm-fill-normal)) 0deg, var(--ccm-fill-color, var(--ccm-fill-normal)) var(--ccm-ring-angle, 0deg), var(--ccm-ring-rest) var(--ccm-ring-angle, 0deg) 360deg);
+        filter: drop-shadow(0 1px 1px rgba(15, 23, 42, 0.16));
       }
 
       #${ROOT_ID} .ccm-ring::after {
@@ -403,11 +490,11 @@
         position: absolute;
         inset: var(--ccm-ring-width);
         border-radius: 50%;
-        background: rgba(20, 22, 28, 0.96);
+        background: var(--ccm-ring-core);
       }
 
       #${ROOT_ID} .ccm-value {
-        color: rgba(255, 255, 255, 0.98);
+        color: var(--ccm-card-value);
         font-weight: 650;
         font-variant-numeric: tabular-nums;
         overflow: hidden;
@@ -422,12 +509,12 @@
         height: 7px;
         overflow: hidden;
         border-radius: 999px;
-        background: rgba(255, 255, 255, 0.16);
+        background: var(--ccm-track-bg);
       }
 
       #${ROOT_ID} .ccm-fill {
-        --ccm-fill-color: #4ade80;
-        --ccm-fill-gradient: linear-gradient(90deg, #4ea1ff, #4ade80);
+        --ccm-fill-color: var(--ccm-fill-normal);
+        --ccm-fill-gradient: linear-gradient(90deg, var(--ccm-fill-normal-start), var(--ccm-fill-normal-end));
         width: 0%;
         height: 100%;
         border-radius: inherit;
@@ -459,7 +546,7 @@
       }
 
       #${ROOT_ID} .ccm-provider-value {
-        color: rgba(255, 255, 255, 0.98);
+        color: var(--ccm-card-value);
         font-weight: 650;
         font-variant-numeric: tabular-nums;
         overflow: hidden;
@@ -471,32 +558,32 @@
       #${ROOT_ID} .ccm-context-card[data-level="warn"] .ccm-ring,
       #${ROOT_ID} .ccm-provider-card[data-level="warn"] .ccm-ring,
       #${ROOT_ID} .ccm-provider-card[data-level="warn"] .ccm-fill {
-        --ccm-fill-color: #f97316;
-        --ccm-fill-gradient: linear-gradient(90deg, #f59e0b, #f97316);
+        --ccm-fill-color: var(--ccm-fill-warn);
+        --ccm-fill-gradient: linear-gradient(90deg, var(--ccm-fill-warn-start), var(--ccm-fill-warn-end));
       }
 
       #${ROOT_ID} .ccm-context-card[data-level="danger"] .ccm-fill,
       #${ROOT_ID} .ccm-context-card[data-level="danger"] .ccm-ring,
       #${ROOT_ID} .ccm-provider-card[data-level="danger"] .ccm-ring,
       #${ROOT_ID} .ccm-provider-card[data-level="danger"] .ccm-fill {
-        --ccm-fill-color: #ef4444;
-        --ccm-fill-gradient: linear-gradient(90deg, #fb7185, #ef4444);
+        --ccm-fill-color: var(--ccm-fill-danger);
+        --ccm-fill-gradient: linear-gradient(90deg, var(--ccm-fill-danger-start), var(--ccm-fill-danger-end));
       }
 
       #${ROOT_ID} .ccm-context-card[data-level="notice"] .ccm-fill,
       #${ROOT_ID} .ccm-context-card[data-level="notice"] .ccm-ring,
       #${ROOT_ID} .ccm-provider-card[data-level="notice"] .ccm-ring,
       #${ROOT_ID} .ccm-provider-card[data-level="notice"] .ccm-fill {
-        --ccm-fill-color: #38bdf8;
-        --ccm-fill-gradient: linear-gradient(90deg, #22d3ee, #38bdf8);
+        --ccm-fill-color: var(--ccm-fill-notice);
+        --ccm-fill-gradient: linear-gradient(90deg, var(--ccm-fill-notice-start), var(--ccm-fill-notice-end));
       }
 
       #${ROOT_ID} .ccm-context-card[data-level="critical"] .ccm-fill,
       #${ROOT_ID} .ccm-context-card[data-level="critical"] .ccm-ring,
       #${ROOT_ID} .ccm-provider-card[data-level="critical"] .ccm-ring,
       #${ROOT_ID} .ccm-provider-card[data-level="critical"] .ccm-fill {
-        --ccm-fill-color: #dc2626;
-        --ccm-fill-gradient: linear-gradient(90deg, #f43f5e, #dc2626);
+        --ccm-fill-color: var(--ccm-fill-critical);
+        --ccm-fill-gradient: linear-gradient(90deg, var(--ccm-fill-critical-start), var(--ccm-fill-critical-end));
       }
 
       #${ROOT_ID} .ccm-context-card[data-compression-warning="true"] .ccm-compression-zone {
@@ -508,7 +595,7 @@
         right: 0;
       }
 
-      #${ROOT_ID} .ccm-history-panel {
+      #${HISTORY_PORTAL_ID} .ccm-history-panel {
         position: absolute;
         top: calc(100% + 8px);
         left: 0;
@@ -517,13 +604,15 @@
         box-sizing: border-box;
         width: max-content;
         min-width: 240px;
-        max-width: min(560px, calc(100vw - 32px));
+        max-width: min(560px, var(--ccm-history-max-width, calc(100vw - 32px)));
+        max-height: var(--ccm-history-max-height, calc(100vh - 16px));
+        overflow: hidden;
         padding: 9px 10px 10px;
-        border: 1px solid rgba(255, 255, 255, 0.14);
+        border: 1px solid var(--ccm-panel-border);
         border-radius: 8px;
-        background: rgba(16, 18, 24, 0.94);
-        color: rgba(255, 255, 255, 0.9);
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+        background: var(--ccm-panel-bg);
+        color: var(--ccm-panel-text);
+        box-shadow: var(--ccm-panel-shadow);
         font: 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         opacity: 0;
         transform: translateY(-4px);
@@ -534,7 +623,15 @@
         transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
       }
 
-      #${ROOT_ID} .ccm-history-panel::before {
+      #${HISTORY_PORTAL_ID} .ccm-history-panel {
+        position: fixed;
+        top: var(--ccm-history-top, 0px);
+        left: var(--ccm-history-left, 0px);
+        right: auto;
+        z-index: 2147483647;
+      }
+
+      #${HISTORY_PORTAL_ID} .ccm-history-panel::before {
         content: "";
         position: absolute;
         left: 0;
@@ -544,39 +641,39 @@
         pointer-events: auto;
       }
 
-      #${ROOT_ID}[data-history-open="true"] .ccm-history-panel {
+      #${HISTORY_PORTAL_ID}[data-history-open="true"] .ccm-history-panel {
         opacity: 1;
         transform: translateY(0);
         pointer-events: auto;
         visibility: visible;
       }
 
-      #${ROOT_ID} .ccm-history-grid {
+      #${HISTORY_PORTAL_ID} .ccm-history-grid {
         display: grid;
         grid-template-columns: minmax(0, 260px) minmax(0, 260px);
         gap: 12px;
       }
 
-      #${ROOT_ID} .ccm-history-grid[data-provider-visible="false"] {
+      #${HISTORY_PORTAL_ID} .ccm-history-grid[data-provider-visible="false"] {
         grid-template-columns: minmax(0, 292px);
       }
 
-      #${ROOT_ID} .ccm-history-section {
+      #${HISTORY_PORTAL_ID} .ccm-history-section {
         min-width: 0;
         --ccm-history-accent: #38bdf8;
         --ccm-history-fill: rgba(56, 189, 248, 0.12);
       }
 
-      #${ROOT_ID} .ccm-history-section[data-history-kind="provider"] {
+      #${HISTORY_PORTAL_ID} .ccm-history-section[data-history-kind="provider"] {
         --ccm-history-accent: #f97316;
         --ccm-history-fill: rgba(249, 115, 22, 0.12);
       }
 
-      #${ROOT_ID} .ccm-history-section[hidden] {
+      #${HISTORY_PORTAL_ID} .ccm-history-section[hidden] {
         display: none !important;
       }
 
-      #${ROOT_ID} .ccm-history-head {
+      #${HISTORY_PORTAL_ID} .ccm-history-head {
         display: flex;
         align-items: baseline;
         justify-content: space-between;
@@ -585,54 +682,54 @@
         white-space: nowrap;
       }
 
-      #${ROOT_ID} .ccm-history-title {
-        color: rgba(255, 255, 255, 0.98);
+      #${HISTORY_PORTAL_ID} .ccm-history-title {
+        color: var(--ccm-card-value);
         font-weight: 700;
       }
 
-      #${ROOT_ID} .ccm-history-total {
-        color: rgba(255, 255, 255, 0.72);
+      #${HISTORY_PORTAL_ID} .ccm-history-total {
+        color: var(--ccm-muted-strong);
         font-variant-numeric: tabular-nums;
       }
 
-      #${ROOT_ID} .ccm-history-chart {
+      #${HISTORY_PORTAL_ID} .ccm-history-chart {
         position: relative;
         width: 100%;
         min-height: 78px;
       }
 
-      #${ROOT_ID} .ccm-history-svg {
+      #${HISTORY_PORTAL_ID} .ccm-history-svg {
         display: block;
         width: 100%;
         height: 78px;
         overflow: visible;
       }
 
-      #${ROOT_ID} .ccm-history-axis-line {
+      #${HISTORY_PORTAL_ID} .ccm-history-axis-line {
         fill: none;
-        stroke: rgba(255, 255, 255, 0.16);
+        stroke: var(--ccm-axis-line);
         stroke-width: 1;
         vector-effect: non-scaling-stroke;
       }
 
-      #${ROOT_ID} .ccm-history-axis-label {
-        fill: rgba(255, 255, 255, 0.46);
+      #${HISTORY_PORTAL_ID} .ccm-history-axis-label {
+        fill: var(--ccm-muted-soft);
         font-size: 10px;
         font-variant-numeric: tabular-nums;
       }
 
-      #${ROOT_ID} .ccm-history-gridline {
+      #${HISTORY_PORTAL_ID} .ccm-history-gridline {
         fill: none;
-        stroke: rgba(255, 255, 255, 0.1);
+        stroke: var(--ccm-gridline);
         stroke-dasharray: 2 4;
         stroke-width: 1;
       }
 
-      #${ROOT_ID} .ccm-history-area {
+      #${HISTORY_PORTAL_ID} .ccm-history-area {
         fill: var(--ccm-history-fill);
       }
 
-      #${ROOT_ID} .ccm-history-line {
+      #${HISTORY_PORTAL_ID} .ccm-history-line {
         fill: none;
         stroke: var(--ccm-history-accent);
         stroke-linecap: round;
@@ -641,48 +738,69 @@
         vector-effect: non-scaling-stroke;
       }
 
-      #${ROOT_ID} .ccm-history-point {
+      #${HISTORY_PORTAL_ID} .ccm-history-point {
         fill: #fff7ed;
         stroke: var(--ccm-history-accent);
         stroke-width: 1.5;
       }
 
-      #${ROOT_ID} .ccm-history-hit {
+      #${HISTORY_PORTAL_ID} .ccm-history-hit {
         fill: transparent;
         pointer-events: all;
       }
 
-      #${ROOT_ID} .ccm-history-caption {
+      #${HISTORY_PORTAL_ID} .ccm-history-caption {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
         margin-top: 2px;
-        color: rgba(255, 255, 255, 0.48);
+        color: var(--ccm-muted);
         font-size: 11px;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }
 
-      #${ROOT_ID} .ccm-history-empty {
+      #${HISTORY_PORTAL_ID} .ccm-history-empty {
         position: absolute;
         inset: 19px 0 auto 0;
-        color: rgba(255, 255, 255, 0.46);
+        color: var(--ccm-muted-soft);
       }
 
       .ccm-context-menu {
+        --ccm-menu-border: rgba(255, 255, 255, 0.14);
+        --ccm-menu-bg: rgba(18, 20, 26, 0.96);
+        --ccm-menu-text: rgba(255, 255, 255, 0.92);
+        --ccm-menu-shadow: 0 12px 32px rgba(0, 0, 0, 0.36);
+        --ccm-menu-hover: rgba(255, 255, 255, 0.1);
+        --ccm-menu-checked: rgba(255, 255, 255, 0.08);
+        --ccm-menu-separator: rgba(255, 255, 255, 0.12);
+        --ccm-menu-check: #86efac;
+        --ccm-menu-hint: rgba(255, 255, 255, 0.48);
         position: fixed;
         z-index: 2147483647;
         min-width: 150px;
         padding: 5px;
-        border: 1px solid rgba(255, 255, 255, 0.14);
+        border: 1px solid var(--ccm-menu-border);
         border-radius: 8px;
-        background: rgba(18, 20, 26, 0.96);
-        color: rgba(255, 255, 255, 0.92);
-        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.36);
+        background: var(--ccm-menu-bg);
+        color: var(--ccm-menu-text);
+        box-shadow: var(--ccm-menu-shadow);
         font: 12px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         backdrop-filter: blur(12px);
         -webkit-app-region: no-drag;
+      }
+
+      .ccm-context-menu[data-theme="light"] {
+        --ccm-menu-border: rgba(15, 23, 42, 0.12);
+        --ccm-menu-bg: rgba(255, 255, 255, 0.98);
+        --ccm-menu-text: rgba(15, 23, 42, 0.9);
+        --ccm-menu-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+        --ccm-menu-hover: rgba(15, 23, 42, 0.08);
+        --ccm-menu-checked: rgba(15, 23, 42, 0.07);
+        --ccm-menu-separator: rgba(15, 23, 42, 0.12);
+        --ccm-menu-check: #16a34a;
+        --ccm-menu-hint: rgba(71, 85, 105, 0.58);
       }
 
       .ccm-context-menu button {
@@ -702,30 +820,30 @@
       }
 
       .ccm-context-menu button:hover {
-        background: rgba(255, 255, 255, 0.1);
+        background: var(--ccm-menu-hover);
       }
 
       .ccm-context-menu button[aria-checked="true"] {
-        background: rgba(255, 255, 255, 0.08);
+        background: var(--ccm-menu-checked);
       }
 
       .ccm-context-menu .ccm-menu-separator {
         height: 1px;
         margin: 5px 4px;
-        background: rgba(255, 255, 255, 0.12);
+        background: var(--ccm-menu-separator);
       }
 
       .ccm-context-menu .ccm-menu-check {
         flex: 0 0 14px;
         width: 14px;
-        color: #86efac;
+        color: var(--ccm-menu-check);
         font-weight: 800;
         text-align: center;
       }
 
       .ccm-context-menu .ccm-menu-hint {
         padding: 5px 8px 6px 21px;
-        color: rgba(255, 255, 255, 0.48);
+        color: var(--ccm-menu-hint);
         font-size: 11px;
         line-height: 1.3;
         white-space: nowrap;
@@ -792,27 +910,142 @@
     document.head.appendChild(style);
   }
 
-  function ensureRoot() {
-    let root = document.getElementById(ROOT_ID);
-    if (root) {
+  function bindRootElements(root) {
+    if (!root) return;
+
+    state.root = root;
+    state.contextCard = root.querySelector(".ccm-context-card");
+    state.providerCard = root.querySelector(".ccm-provider-card");
+    state.historyPortal = document.getElementById(HISTORY_PORTAL_ID);
+    state.historyPanel = state.historyPortal?.querySelector(".ccm-history-panel") || null;
+    state.value = root.querySelector(".ccm-value");
+    state.fill = root.querySelector(".ccm-fill");
+    state.compressionZone = root.querySelector(".ccm-compression-zone");
+    state.contextRing = root.querySelector(".ccm-context-card .ccm-ring");
+    state.providerValue = root.querySelector(".ccm-provider-value");
+    state.providerFill = root.querySelector(".ccm-provider-fill");
+    state.providerRing = root.querySelector(".ccm-provider-card .ccm-ring");
+  }
+
+  function isRootBound(root) {
+    return !!(
+      root &&
+      state.root === root &&
+      state.contextCard &&
+      state.value &&
+      state.fill &&
+      state.compressionZone &&
+      state.contextRing &&
+      state.providerCard &&
+      state.providerValue &&
+      state.providerFill &&
+      state.providerRing &&
+      state.historyPortal &&
+      state.historyPanel
+    );
+  }
+
+  function historyPanelMarkup() {
+    return `
+      <div class="ccm-history-panel" aria-hidden="true">
+        <div class="ccm-history-grid">
+          <div class="ccm-history-section" data-history-kind="context">
+            <div class="ccm-history-head">
+              <span class="ccm-history-title">Context / Session</span>
+              <span class="ccm-history-total">--</span>
+            </div>
+            <div class="ccm-history-chart"></div>
+          </div>
+          <div class="ccm-history-section" data-history-kind="provider">
+            <div class="ccm-history-head">
+              <span class="ccm-history-title">Provider / Session</span>
+              <span class="ccm-history-total">--</span>
+            </div>
+            <div class="ccm-history-chart"></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function syncHistoryPortalTheme(root) {
+    const portal = state.historyPortal || document.getElementById(HISTORY_PORTAL_ID);
+    if (!root || !portal) return;
+
+    portal.dataset.theme = root.dataset.theme === "light" ? "light" : "dark";
+    const computed = getComputedStyle(root);
+    for (const name of HISTORY_PORTAL_THEME_VARIABLES) {
+      const value = computed.getPropertyValue(name);
+      if (value) portal.style.setProperty(name, value.trim());
+    }
+  }
+
+  function ensureHistoryPortal(root) {
+    let portal = state.historyPortal && state.historyPortal.isConnected
+      ? state.historyPortal
+      : document.getElementById(HISTORY_PORTAL_ID);
+    if (!portal) {
+      portal = document.createElement("div");
+      portal.id = HISTORY_PORTAL_ID;
+      portal.dataset.historyOpen = "false";
+      document.body.appendChild(portal);
+    } else if (portal.parentNode !== document.body) {
+      document.body.appendChild(portal);
+    }
+
+    if (portal.dataset.infrastructureVersion !== String(SCRIPT_VERSION)) {
+      portal.innerHTML = historyPanelMarkup();
+      portal.dataset.infrastructureVersion = String(SCRIPT_VERSION);
+    }
+
+    state.historyPortal = portal;
+    state.historyPanel = portal.querySelector(".ccm-history-panel");
+    if (root && portal.dataset.historyOpen !== root.dataset.historyOpen) {
+      portal.dataset.historyOpen = root.dataset.historyOpen === "true" ? "true" : "false";
+    }
+    if (state.historyPanel) {
+      state.historyPanel.setAttribute(
+        "aria-hidden",
+        portal.dataset.historyOpen === "true" ? "false" : "true",
+      );
+    }
+    syncHistoryPortalTheme(root);
+    return portal;
+  }
+
+  function ensureRootInfrastructure(root) {
+    ensureHistoryPortal(root);
+    if (root.dataset.infrastructureVersion !== String(SCRIPT_VERSION)) {
       root.querySelector(".ccm-hover-zone")?.remove();
+      root.querySelector(".ccm-history-panel")?.remove();
       const contextTrack = root.querySelector(".ccm-context-card .ccm-track");
       if (contextTrack && !contextTrack.querySelector(".ccm-compression-zone")) {
         contextTrack.insertBefore(document.createElement("div"), contextTrack.firstChild);
         contextTrack.firstElementChild.className = "ccm-compression-zone";
       }
-      state.root = root;
-      state.contextCard = root.querySelector(".ccm-context-card");
-      state.providerCard = root.querySelector(".ccm-provider-card");
-      state.historyPanel = root.querySelector(".ccm-history-panel");
-      state.value = root.querySelector(".ccm-value");
-      state.fill = root.querySelector(".ccm-fill");
-      state.providerValue = root.querySelector(".ccm-provider-value");
-      state.providerFill = root.querySelector(".ccm-provider-fill");
-      installHistoryHover(root);
-      installContextMenu(root);
-      installFloatingControls(root);
-      mountRoot(root);
+      root.dataset.infrastructureVersion = String(SCRIPT_VERSION);
+    }
+    if (!isRootBound(root)) bindRootElements(root);
+    installHistoryHover(root);
+    installContextMenu(root);
+    installFloatingControls(root);
+  }
+
+  function isInlineMountCurrent(root) {
+    const uiState = state.uiState || readUiState();
+    if (uiState.mode === "floating") return root.parentNode === document.body && root.dataset.placement === "floating";
+    if (root.dataset.placement !== "inline") return false;
+    if (!state.inlineHost || !state.inlineHost.isConnected || root.parentNode !== state.inlineHost) return false;
+    if (state.inlineHost.closest(INVALID_INLINE_MOUNT_SELECTOR)) return false;
+    return state.inlineBefore ? state.inlineBefore.isConnected && root.nextSibling === state.inlineBefore : true;
+  }
+
+  function ensureRoot() {
+    let root = state.root && state.root.isConnected ? state.root : document.getElementById(ROOT_ID);
+    if (root) {
+      ensureRootInfrastructure(root);
+      state.uiState = readUiState();
+      if (!isInlineMountCurrent(root)) mountRoot(root);
       return root;
     }
 
@@ -838,71 +1071,52 @@
           <div class="ccm-fill ccm-provider-fill"></div>
         </div>
       </div>
-      <div class="ccm-history-panel" aria-hidden="true">
-        <div class="ccm-history-grid">
-          <div class="ccm-history-section" data-history-kind="context">
-            <div class="ccm-history-head">
-              <span class="ccm-history-title">Context / Session</span>
-              <span class="ccm-history-total">--</span>
-            </div>
-            <div class="ccm-history-chart"></div>
-          </div>
-          <div class="ccm-history-section" data-history-kind="provider">
-            <div class="ccm-history-head">
-              <span class="ccm-history-title">Provider / Session</span>
-              <span class="ccm-history-total">--</span>
-            </div>
-            <div class="ccm-history-chart"></div>
-          </div>
-        </div>
-      </div>
     `;
-    state.root = root;
-    state.contextCard = root.querySelector(".ccm-context-card");
-    state.providerCard = root.querySelector(".ccm-provider-card");
-    state.historyPanel = root.querySelector(".ccm-history-panel");
-    state.value = root.querySelector(".ccm-value");
-    state.fill = root.querySelector(".ccm-fill");
-    state.providerValue = root.querySelector(".ccm-provider-value");
-    state.providerFill = root.querySelector(".ccm-provider-fill");
-    installHistoryHover(root);
-    installContextMenu(root);
-    installFloatingControls(root);
+    ensureRootInfrastructure(root);
     mountRoot(root);
     return root;
   }
 
   function findInlineMount() {
+    const now = Date.now();
+    if (
+      state.inlineMountCache &&
+      now - state.inlineMountLookupAt < INLINE_MOUNT_CACHE_MS &&
+      state.inlineMountCache.parent &&
+      state.inlineMountCache.parent.isConnected &&
+      (!state.inlineMountCache.before || state.inlineMountCache.before.isConnected)
+    ) {
+      return state.inlineMountCache;
+    }
+    state.inlineMountLookupAt = now;
+
     const visibleDirectChildren = (node) =>
       Array.from(node.children || []).filter((child) => child.id !== ROOT_ID && isVisibleElement(child));
-    const buttonLikeCount = (node) =>
-      Array.from(node.querySelectorAll("button, [role='button']")).filter((child) => isVisibleElement(child)).length;
-    const nodeLabel = (node) =>
-      `${node.textContent || ""} ${node.getAttribute?.("aria-label") || ""} ${node.getAttribute?.("title") || ""} ${node.getAttribute?.("data-testid") || ""}`;
-    const isComposerAction = (node) =>
-      /send|submit|attach|upload|file|image|screenshot|voice|audio|mic|microphone|dictat/i.test(nodeLabel(node));
-    const looksLikeProviderModelControl = (node) => {
-      if (!node || node.id === ROOT_ID || !isVisibleElement(node)) return false;
-      if (node.closest("textarea, input, [contenteditable='true'], [role='textbox']")) return false;
-      if (isComposerAction(node)) return false;
-
-      const label = nodeLabel(node).trim();
-      if (/provider|model|gpt-|claude|gemini|codex|auto|standard|reason|thinking|high|medium|low|o[0-9]/i.test(label)) return true;
-      return /\S{2,}/.test(label) && Boolean(node.querySelector("button, [role='button'], [aria-haspopup], svg"));
-    };
-    const findProviderModelBefore = (toolbar) => {
-      const children = visibleDirectChildren(toolbar).sort(
+    const firstVisibleChild = (node) => visibleDirectChildren(node)[0] || null;
+    const classText = (node) => (typeof node?.className === "string" ? node.className : "");
+    const hasClassToken = (node, token) => classText(node).split(/\s+/).includes(token);
+    const sortByLeft = (nodes) =>
+      nodes.slice().sort(
         (left, right) => left.getBoundingClientRect().left - right.getBoundingClientRect().left
       );
-      return children.find(looksLikeProviderModelControl) || null;
+    const hasVisibleInteractiveControl = (node) =>
+      Array.from(
+        node.querySelectorAll(`button, [role='button'], [aria-haspopup], ${CODEX_INTELLIGENCE_TRIGGER_SELECTOR}`)
+      ).some((child) => child.id !== ROOT_ID && isVisibleElement(child));
+    const directChildOf = (parent, node) => {
+      let current = node;
+      while (current && current.parentElement && current.parentElement !== parent) {
+        current = current.parentElement;
+      }
+      return current && current.parentElement === parent ? current : null;
     };
     const isComposerArea = (node) => {
       const rect = node && node.getBoundingClientRect();
       if (!rect || rect.top < window.innerHeight * 0.45) return false;
       if (node.closest(CONVERSATION_CONTENT_SELECTOR)) return false;
-      if (node.closest("aside, nav, [data-app-action-sidebar-thread-id], [data-app-action-sidebar-thread-active], [class*='sidebar' i]")) return false;
-      if (node.closest("article, [data-message-author-role], [data-testid*='message' i], [data-testid*='conversation' i]")) return false;
-      if (!node.querySelector("textarea, input, [contenteditable='true'], [role='textbox']")) return false;
+      if (node.closest("aside, nav, [data-app-action-sidebar-thread-id], [data-app-action-sidebar-thread-active]")) return false;
+      if (node.closest("article, [data-message-author-role]")) return false;
+      if (!node.querySelector(`textarea, input, [contenteditable='true'], [role='textbox'], ${CODEX_COMPOSER_SELECTOR}`)) return false;
       return true;
     };
     const findComposerArea = (node) => {
@@ -913,121 +1127,107 @@
       }
       return null;
     };
-    const directChildOf = (parent, node) => {
-      let current = node;
-      while (current && current.parentElement && current.parentElement !== parent) {
-        current = current.parentElement;
-      }
-      return current && current.parentElement === parent ? current : null;
-    };
-    const findToolbarForButton = (button) => {
-      let current = button.parentElement;
-      while (current && current !== document.body) {
-        const rect = current.getBoundingClientRect();
-        if (rect.top < window.innerHeight * 0.45) break;
-        if (current.closest(CONVERSATION_CONTENT_SELECTOR)) break;
-        const children = visibleDirectChildren(current);
-        const hasModel = /gpt-|o[0-9]|auto|high|medium|low|standard|模型/i.test(current.textContent || "");
-        const hasSubmit = /send|提交|发送/i.test(current.textContent || "");
-        if (children.length >= 3 && buttonLikeCount(current) >= 2 && (hasModel || hasSubmit)) {
-          return current;
-        }
-        current = current.parentElement;
-      }
-      return button.parentElement || button;
-    };
-    const firstVisibleChild = (node) => visibleDirectChildren(node)[0] || null;
-    const classText = (node) => (typeof node?.className === "string" ? node.className : "");
     const findComposerFooterMount = () => {
       const footers = Array.from(document.querySelectorAll(".composer-footer"))
         .filter((footer) => isVisibleElement(footer) && footer.getBoundingClientRect().top > window.innerHeight * 0.45)
         .sort((left, right) => right.getBoundingClientRect().top - left.getBoundingClientRect().top);
 
       for (const footer of footers) {
-        const rightGroup = visibleDirectChildren(footer).find((child) => {
-          const className = classText(child);
-          if (!/justify-end/.test(className)) return false;
-          if (!child.querySelector("button, [role='button'], [aria-haspopup]")) return false;
-          return !/full access/i.test(nodeLabel(child));
-        });
-        if (!rightGroup) continue;
+        const footerChildren = sortByLeft(visibleDirectChildren(footer));
+        const toolbarRoot = footerChildren
+          .filter((child) => hasClassToken(child, "justify-end") && hasVisibleInteractiveControl(child))
+          .sort((left, right) => right.getBoundingClientRect().right - left.getBoundingClientRect().right)[0];
+        if (!toolbarRoot) continue;
 
-        const providerGroup =
-          visibleDirectChildren(rightGroup).find((child) => {
-            const className = classText(child);
-            if (!/justify-end/.test(className)) return false;
-            if (!child.querySelector("button, [role='button'], [aria-haspopup]")) return false;
-            return !isComposerAction(child);
-          }) || rightGroup;
+        const toolbarChildren = sortByLeft(visibleDirectChildren(toolbarRoot));
+        const providerGroup = toolbarChildren.find(
+          (child) =>
+            hasVisibleInteractiveControl(child) &&
+            !hasClassToken(child, "shrink-0") &&
+            (hasClassToken(child, "flex-1") || hasClassToken(child, "min-w-0"))
+        );
+        if (!providerGroup) continue;
+        const before = firstVisibleChild(providerGroup);
+        if (!before) continue;
+        const footerRect = footer.getBoundingClientRect();
+        const beforeRect = before.getBoundingClientRect();
+        if (beforeRect.left < footerRect.left + footerRect.width * 0.5) continue;
+
         return {
           parent: providerGroup,
-          before: firstVisibleChild(providerGroup),
+          before,
         };
       }
 
       return null;
     };
-    const findToolbarForProviderModel = (control) => {
+    const findStructuralMountForControl = (control) => {
+      const footer = control.closest(".composer-footer");
+      if (footer) {
+        const footerRect = footer.getBoundingClientRect();
+        const controlRect = control.getBoundingClientRect();
+        if (controlRect.left < footerRect.left + footerRect.width * 0.5) return null;
+      }
+
       let current = control.parentElement;
       while (current && current !== document.body) {
         const rect = current.getBoundingClientRect();
         if (rect.top < window.innerHeight * 0.45) break;
         if (current.closest(CONVERSATION_CONTENT_SELECTOR)) break;
-        const children = visibleDirectChildren(current);
-        if (children.length >= 2 && children.some(looksLikeProviderModelControl)) return current;
+        if (!current.closest(INVALID_INLINE_MOUNT_SELECTOR)) {
+          const before = directChildOf(current, control) || control;
+          if (before && before !== current && current.contains(before)) {
+            return {
+              parent: current,
+              before,
+            };
+          }
+        }
         current = current.parentElement;
       }
-      return control.parentElement || control;
+      return null;
+    };
+    const rememberMount = (mount) => {
+      if (
+        mount &&
+        mount.parent &&
+        mount.parent.isConnected &&
+        !mount.parent.closest(INVALID_INLINE_MOUNT_SELECTOR)
+      ) {
+        state.inlineMountCache = mount;
+        return mount;
+      }
+
+      state.inlineMountCache = null;
+      return null;
     };
 
     const footerMount = findComposerFooterMount();
-    if (footerMount) return footerMount;
+    if (footerMount) return rememberMount(footerMount);
 
-    const providerModelControls = Array.from(document.querySelectorAll("button, [role='button'], [aria-haspopup]"))
-      .filter(looksLikeProviderModelControl)
-      .sort((left, right) => {
-        const leftRect = left.getBoundingClientRect();
-        const rightRect = right.getBoundingClientRect();
-        return rightRect.top - leftRect.top || leftRect.left - rightRect.left;
-      });
-    for (const control of providerModelControls) {
-      const bar = findComposerArea(control);
-      if (!bar || !isVisibleElement(bar) || !isComposerArea(bar)) continue;
-      const toolbar = findToolbarForProviderModel(control);
-      const before = directChildOf(toolbar, control) || findProviderModelBefore(toolbar) || firstVisibleChild(toolbar);
-      return {
-        parent: toolbar,
-        before,
-      };
+    const codexModelTrigger = document.querySelector(CODEX_INTELLIGENCE_TRIGGER_SELECTOR);
+    if (codexModelTrigger && isVisibleElement(codexModelTrigger)) {
+      const bar = findComposerArea(codexModelTrigger);
+      if (bar && isVisibleElement(bar) && isComposerArea(bar)) {
+        const triggerMount = findStructuralMountForControl(codexModelTrigger);
+        if (triggerMount) return rememberMount(triggerMount);
+      }
     }
 
-    const sendButtons = Array.from(document.querySelectorAll("button, [role='button']"));
-    for (const button of sendButtons) {
-      if (!isVisibleElement(button) || button.closest(`#${ROOT_ID}`)) continue;
-      const text = `${button.textContent || ""} ${button.getAttribute("aria-label") || ""} ${button.getAttribute("title") || ""}`;
-      if (!/send|提交|发送/i.test(text)) continue;
-
-      const bar = findComposerArea(button);
-      if (!bar || !isVisibleElement(bar)) continue;
-      if (!isComposerArea(bar)) continue;
-      const toolbar = findToolbarForButton(button);
-      const providerModelBefore = findProviderModelBefore(toolbar);
-      return {
-        parent: toolbar,
-        before: providerModelBefore || firstVisibleChild(toolbar),
-      };
-    }
-
+    state.inlineMountCache = null;
     return null;
   }
 
   function mountRoot(root) {
     state.uiState = readUiState();
     if (state.uiState.mode === "floating") {
+      state.inlineMountCache = null;
+      state.inlineMountPending = false;
       if (root.parentNode !== document.body) document.body.appendChild(root);
       state.inlineHost = null;
       root.dataset.placement = "floating";
       applyFloatingUiState(root);
+      refreshOpenSpendHistory(root);
       return;
     }
 
@@ -1035,9 +1235,14 @@
     if (!mount || !mount.parent || root.contains(mount.parent)) {
       state.inlineHost = null;
       state.inlineBefore = null;
+      state.inlineMountCache = null;
+      state.inlineMountPending = true;
       if (root.parentNode !== document.body) document.body.appendChild(root);
-      root.dataset.placement = "floating";
+      root.dataset.placement = "inline";
+      root.hidden = true;
       applyFloatingUiState(root);
+      closeSpendHistory();
+      scheduleUpdate(SWITCH_RETRY_INTERVAL_MS);
       return;
     }
 
@@ -1047,7 +1252,11 @@
     }
     state.inlineHost = mount.parent;
     state.inlineBefore = before;
+    state.inlineMountCache = mount;
+    state.inlineMountPending = false;
     root.dataset.placement = "inline";
+    applyFloatingUiState(root);
+    refreshOpenSpendHistory(root);
   }
 
   function applyFloatingUiState(root) {
@@ -1056,6 +1265,8 @@
     root.style.setProperty("--ccm-float-y", `${Math.round(uiState.y)}px`);
     root.style.setProperty("--ccm-float-scale", String(uiState.scale));
     root.dataset.floatingLayout = uiState.floatingLayout === "vertical" ? "vertical" : "horizontal";
+    root.dataset.theme = uiState.theme === "light" ? "light" : "dark";
+    syncHistoryPortalTheme(root);
   }
 
   function setUiMode(mode) {
@@ -1065,8 +1276,20 @@
     };
     writeUiState();
     closeContextMenu();
+    state.inlineMountCache = null;
     const root = state.root || document.getElementById(ROOT_ID);
     if (root) mountRoot(root);
+  }
+
+  function setUiTheme(theme) {
+    state.uiState = {
+      ...readUiState(),
+      theme: theme === "light" ? "light" : "dark",
+    };
+    writeUiState();
+    closeContextMenu();
+    const root = state.root || document.getElementById(ROOT_ID);
+    if (root) applyFloatingUiState(root);
   }
 
   function setFloatingLayout(layout) {
@@ -1097,12 +1320,15 @@
     if (!root || !root.contains(event.target)) return;
     event.preventDefault();
     closeContextMenu();
+    state.uiState = readUiState();
 
     const currentMode = (state.uiState && state.uiState.mode) === "floating" ? "floating" : "inline";
     const currentFloatingLayout =
       (state.uiState && state.uiState.floatingLayout) === "vertical" ? "vertical" : "horizontal";
+    const currentTheme = (state.uiState && state.uiState.theme) === "light" ? "light" : "dark";
     const menu = document.createElement("div");
     menu.className = "ccm-context-menu";
+    menu.dataset.theme = currentTheme;
     menu.setAttribute("role", "menu");
     const createRadioItem = (group, value, label, checked) => {
       const item = document.createElement("button");
@@ -1123,9 +1349,14 @@
       return item;
     };
     const items = [
+      createRadioItem("theme", "dark", "Dark theme", currentTheme === "dark"),
+      createRadioItem("theme", "light", "Light theme", currentTheme === "light"),
+      document.createElement("div"),
       createRadioItem("mode", "inline", "Inline mode", currentMode === "inline"),
       createRadioItem("mode", "floating", "Floating mode", currentMode === "floating"),
     ];
+    items[2].className = "ccm-menu-separator";
+    items[2].setAttribute("role", "separator");
     if (currentMode === "floating") {
       const separator = document.createElement("div");
       separator.className = "ccm-menu-separator";
@@ -1141,10 +1372,8 @@
       );
     }
     menu.replaceChildren(...items);
-    const x = Math.min(event.clientX, window.innerWidth - 170);
-    const y = Math.min(event.clientY, window.innerHeight - 80);
-    menu.style.left = `${Math.max(6, x)}px`;
-    menu.style.top = `${Math.max(6, y)}px`;
+    menu.style.left = `${Math.max(6, event.clientX)}px`;
+    menu.style.top = `${Math.max(6, event.clientY)}px`;
     menu.addEventListener("pointerdown", (menuEvent) => {
       menuEvent.stopPropagation();
     });
@@ -1156,9 +1385,20 @@
       }
 
       const layoutButton = menuEvent.target && menuEvent.target.closest("button[data-floating-layout]");
-      if (layoutButton) setFloatingLayout(layoutButton.dataset.floatingLayout);
+      if (layoutButton) {
+        setFloatingLayout(layoutButton.dataset.floatingLayout);
+        return;
+      }
+
+      const themeButton = menuEvent.target && menuEvent.target.closest("button[data-theme]");
+      if (themeButton) setUiTheme(themeButton.dataset.theme);
     });
     document.body.appendChild(menu);
+    const menuRect = menu.getBoundingClientRect();
+    const x = clampNumber(event.clientX, 6, Math.max(6, window.innerWidth - menuRect.width - 6));
+    const y = clampNumber(event.clientY, 6, Math.max(6, window.innerHeight - menuRect.height - 6));
+    menu.style.left = `${Math.round(x)}px`;
+    menu.style.top = `${Math.round(y)}px`;
     state.contextMenu = menu;
     state.contextMenuCloseListener = (closeEvent) => {
       if (closeEvent.type === "keydown" && closeEvent.key !== "Escape") return;
@@ -1293,6 +1533,7 @@
       return {
         mode: input.mode === "floating" ? "floating" : "inline",
         floatingLayout: input.floatingLayout === "vertical" ? "vertical" : "horizontal",
+        theme: input.theme === "light" ? "light" : "dark",
         x: clampNumber(Number(input.x), 0, Math.max(0, window.innerWidth - 80)),
         y: clampNumber(Number(input.y), 0, Math.max(0, window.innerHeight - 40)),
         scale: clampNumber(Number(input.scale) || 1, FLOAT_SCALE_MIN, FLOAT_SCALE_MAX),
@@ -1482,6 +1723,45 @@
     return lines.join("\n");
   }
 
+  function currentContextHistorySnapshot(conversationId) {
+    const reading = state.lastReading;
+    if (!reading || !conversationIdsMatch(reading.conversationId, conversationId)) return null;
+    const used = Number(reading.used);
+    if (!Number.isFinite(used) || used <= 0) return null;
+
+    return {
+      time: Date.now(),
+      amount: used,
+      conversationId: normalizeConversationId(conversationId || reading.conversationId || "__unknown__") || "__unknown__",
+      meta: "Current used",
+    };
+  }
+
+  function currentProviderHistorySnapshot(conversationId) {
+    const provider = pickProviderSummary(readProviderSummary());
+    if (!provider) return null;
+
+    const remainingAmount = Number(provider.remainingAmount);
+    const totalAmount = Number(provider.totalAmount);
+    const usedAmount = Number.isFinite(Number(provider.usedAmount))
+      ? Number(provider.usedAmount)
+      : totalAmount - remainingAmount;
+    if (!Number.isFinite(usedAmount) || usedAmount <= 0) return null;
+
+    return {
+      time: Date.now(),
+      amount: usedAmount,
+      conversationId: normalizeConversationId(conversationId || "__unknown__") || "__unknown__",
+      meta: String(provider.displayName || provider.id || "Current used"),
+    };
+  }
+
+  function currentHistorySnapshot(kind, conversationId) {
+    return kind === "context"
+      ? currentContextHistorySnapshot(conversationId)
+      : currentProviderHistorySnapshot(conversationId);
+  }
+
   function svgPoint(value) {
     return Number.isFinite(value) ? value.toFixed(1) : "0.0";
   }
@@ -1663,14 +1943,21 @@
 
     pruneSpendHistory();
     const conversationId = metaConversationId();
-    const items = state.spendHistory[kind].filter((item) => {
+    let items = state.spendHistory[kind].filter((item) => {
       const itemConversationId = normalizeConversationId(item.conversationId || "__unknown__") || "__unknown__";
       return itemConversationId === conversationId;
     });
-    const total =
+    let total =
       kind === "context"
         ? contextSessionTotal(conversationId)
         : providerSessionTotal(conversationId);
+    if (!items.length) {
+      const snapshot = currentHistorySnapshot(kind, conversationId);
+      if (snapshot) {
+        items = [snapshot];
+        total = snapshot.amount;
+      }
+    }
     const totalNode = section.querySelector(".ccm-history-total");
     const chart = section.querySelector(".ccm-history-chart");
     if (totalNode) totalNode.textContent = total > 0 ? formatHistoryDelta(kind, total) : "--";
@@ -1702,6 +1989,55 @@
     renderHistorySection("provider");
   }
 
+  function clampHistoryPanelToViewport(root) {
+    const panel = state.historyPanel;
+    if (!root || !panel) return;
+
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    if (viewportWidth <= 0 || viewportHeight <= 0) return;
+
+    const maxWidth = Math.max(
+      HISTORY_PANEL_MIN_WIDTH,
+      viewportWidth - HISTORY_PANEL_VIEWPORT_PADDING * 2,
+    );
+    const maxHeight = Math.max(
+      HISTORY_PANEL_MIN_HEIGHT,
+      viewportHeight - HISTORY_PANEL_VIEWPORT_PADDING * 2,
+    );
+    panel.style.setProperty("--ccm-history-max-width", `${maxWidth}px`);
+    panel.style.setProperty("--ccm-history-max-height", `${maxHeight}px`);
+
+    const anchor = state.contextCard && !state.contextCard.hidden
+      ? state.contextCard
+      : state.providerCard && !state.providerCard.hidden
+        ? state.providerCard
+        : root;
+    const anchorRect = anchor.getBoundingClientRect();
+    const panelRect = panel.getBoundingClientRect();
+    const panelWidth = Math.min(
+      Math.max(panelRect.width || HISTORY_PANEL_MIN_WIDTH, HISTORY_PANEL_MIN_WIDTH),
+      maxWidth,
+    );
+    const panelHeight = Math.min(
+      Math.max(panelRect.height || HISTORY_PANEL_MIN_HEIGHT, HISTORY_PANEL_MIN_HEIGHT),
+      maxHeight,
+    );
+    const left = clampNumber(
+      anchorRect.left,
+      HISTORY_PANEL_VIEWPORT_PADDING,
+      Math.max(HISTORY_PANEL_VIEWPORT_PADDING, viewportWidth - panelWidth - HISTORY_PANEL_VIEWPORT_PADDING),
+    );
+    const belowTop = anchorRect.bottom + HISTORY_PANEL_GAP;
+    const aboveTop = anchorRect.top - panelHeight - HISTORY_PANEL_GAP;
+    const top = belowTop + panelHeight + HISTORY_PANEL_VIEWPORT_PADDING <= viewportHeight
+      ? belowTop
+      : Math.max(HISTORY_PANEL_VIEWPORT_PADDING, aboveTop);
+
+    panel.style.setProperty("--ccm-history-left", `${Math.round(left)}px`);
+    panel.style.setProperty("--ccm-history-top", `${Math.round(top)}px`);
+  }
+
   function openSpendHistory() {
     const root = state.root;
     if (!root) return;
@@ -1709,13 +2045,23 @@
       closeSpendHistory();
       return;
     }
+    ensureHistoryPortal(root);
     if (state.historyCloseTimer) {
       window.clearTimeout(state.historyCloseTimer);
       state.historyCloseTimer = 0;
     }
     renderSpendHistory();
+    clampHistoryPanelToViewport(root);
     if (root.dataset.historyOpen !== "true") root.dataset.historyOpen = "true";
+    if (state.historyPortal) state.historyPortal.dataset.historyOpen = "true";
     if (state.historyPanel) state.historyPanel.setAttribute("aria-hidden", "false");
+  }
+
+  function refreshOpenSpendHistory(root = state.root) {
+    if (!root || root.dataset.historyOpen !== "true") return;
+    ensureHistoryPortal(root);
+    renderSpendHistory();
+    clampHistoryPanelToViewport(root);
   }
 
   function closeSpendHistory() {
@@ -1726,7 +2072,10 @@
       state.historyCloseTimer = 0;
     }
     if (root.dataset.historyOpen !== "false") root.dataset.historyOpen = "false";
-    if (state.historyPanel) state.historyPanel.setAttribute("aria-hidden", "true");
+    if (state.historyPortal) state.historyPortal.dataset.historyOpen = "false";
+    if (state.historyPanel) {
+      state.historyPanel.setAttribute("aria-hidden", "true");
+    }
   }
 
   function scheduleCloseSpendHistory(event) {
@@ -1735,15 +2084,8 @@
     const relatedTarget = event && event.relatedTarget;
     if (relatedTarget && typeof relatedTarget.nodeType === "number" && root.contains(relatedTarget)) return;
     if (state.historyCloseTimer) window.clearTimeout(state.historyCloseTimer);
-    state.historyCloseTimer = window.setTimeout(() => {
-      state.historyCloseTimer = 0;
-      if (root.matches(":hover")) return;
-      closeSpendHistory();
-    }, HISTORY_PANEL_CLOSE_DELAY_MS);
-  }
-
-  function rectContainsPoint(rect, x, y) {
-    return !!rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    state.historyCloseTimer = 0;
+    closeSpendHistory();
   }
 
   function expandedRectContainsPoint(rect, x, y, expand) {
@@ -1761,20 +2103,6 @@
     const cards = [state.contextCard, state.providerCard].filter((card) => card && !card.hidden);
     if (cards.some((card) => expandedRectContainsPoint(card.getBoundingClientRect(), x, y, 6))) {
       return true;
-    }
-
-    if (state.historyPanel && root.dataset.historyOpen === "true") {
-      const panelRect = state.historyPanel.getBoundingClientRect();
-      if (expandedRectContainsPoint(panelRect, x, y, 6)) return true;
-
-      for (const card of cards) {
-        const cardRect = card.getBoundingClientRect();
-        const bridgeLeft = Math.min(cardRect.left, panelRect.left) - 6;
-        const bridgeRight = Math.max(cardRect.right, panelRect.right) + 6;
-        const bridgeTop = Math.min(cardRect.bottom, panelRect.top) - 2;
-        const bridgeBottom = Math.max(cardRect.bottom, panelRect.top) + 10;
-        if (x >= bridgeLeft && x <= bridgeRight && y >= bridgeTop && y <= bridgeBottom) return true;
-      }
     }
 
     return false;
@@ -1811,6 +2139,10 @@
     if (state.historyHoverCleanup) state.historyHoverCleanup();
     root.dataset.historyHoverInstalled = "true";
     if (root.dataset.historyOpen !== "true") root.dataset.historyOpen = "false";
+    ensureHistoryPortal(root);
+    if (state.historyPortal && state.historyPortal.dataset.historyOpen !== "true") {
+      state.historyPortal.dataset.historyOpen = "false";
+    }
     state.historyHoverCleanup = installHistoryPointerTracker(root);
   }
 
@@ -1941,6 +2273,7 @@
 
   function invalidateThreadContentCache() {
     state.threadContentLookupAt = 0;
+    state.inlineMountLookupAt = 0;
   }
 
   // Pet/头像层也运行在 app://-/index.html，需要额外按 route 排除非对话窗口。
@@ -1955,6 +2288,12 @@
   function updateDockVisibility(root) {
     const contextVisible = state.contextCard && !state.contextCard.hidden;
     const providerVisible = state.providerCard && !state.providerCard.hidden;
+    if (state.inlineMountPending && (state.uiState || readUiState()).mode !== "floating") {
+      root.hidden = true;
+      closeSpendHistory();
+      return;
+    }
+
     const hidden = !contextVisible && !providerVisible;
     const keepVisibleForSpend = hidden && hasPendingSpendEffects();
     root.hidden = hidden && !keepVisibleForSpend;
@@ -1975,7 +2314,8 @@
     if (card.title !== title) card.title = title;
     if (value.textContent !== "Context Left --") value.textContent = "Context Left --";
     if (fill.style.width !== "0%") fill.style.width = "0%";
-    const ring = card.querySelector(".ccm-ring");
+    const ring = state.contextRing || card.querySelector(".ccm-ring");
+    if (ring && !state.contextRing) state.contextRing = ring;
     if (ring) ring.style.setProperty("--ccm-ring-angle", "0deg");
     card.hidden = true;
     updateDockVisibility(root);
@@ -1988,7 +2328,8 @@
     if (card.dataset.level !== "normal") card.dataset.level = "normal";
     if (card.title !== reason) card.title = reason;
     if (state.providerFill && state.providerFill.style.width !== "0%") state.providerFill.style.width = "0%";
-    const ring = card.querySelector(".ccm-ring");
+    const ring = state.providerRing || card.querySelector(".ccm-ring");
+    if (ring && !state.providerRing) state.providerRing = ring;
     if (ring) ring.style.setProperty("--ccm-ring-angle", "0deg");
     card.hidden = true;
     updateDockVisibility(root);
@@ -2048,7 +2389,8 @@
     if (card.title !== title) card.title = title;
     if (state.providerValue.textContent !== text) state.providerValue.textContent = text;
     if (state.providerFill.style.width !== width) state.providerFill.style.width = width;
-    const providerRing = card.querySelector(".ccm-ring");
+    const providerRing = state.providerRing || card.querySelector(".ccm-ring");
+    if (providerRing && !state.providerRing) state.providerRing = providerRing;
     if (providerRing) providerRing.style.setProperty("--ccm-ring-angle", `${leftPercent * 3.6}deg`);
     if (card.hidden) card.hidden = false;
     updateDockVisibility(root);
@@ -2111,6 +2453,14 @@
     return text.replace(/^[a-z]+:/i, "").toLowerCase();
   }
 
+  function normalizeConversationUuid(value) {
+    if (value == null) return null;
+    if (typeof value !== "string" && typeof value !== "number") return null;
+
+    const match = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(String(value));
+    return match ? match[0].toLowerCase() : null;
+  }
+
   function conversationIdsMatch(left, right) {
     const normalizedLeft = normalizeConversationId(left);
     const normalizedRight = normalizeConversationId(right);
@@ -2171,11 +2521,6 @@
     return keys;
   }
 
-  // 只缓存对象 key 列表，不缓存属性值；React/store 对象的值会变，key 通常稳定。
-  function getContextValueKeys(value) {
-    return getFilteredReflectKeys(value, "contextValueText", VALUE_TEXT_KEY_RE, 100);
-  }
-
   // Codex 部分会话 ID 只存在于 React 写到 DOM 节点上的私有 props，普通 attribute 读不到。
   function getReactPropValue(node, propName) {
     if (!node) return null;
@@ -2214,6 +2559,142 @@
     return null;
   }
 
+  function getLikelyObjectConversationId(value, depth = 3, seen = new WeakSet()) {
+    if (!value || typeof value !== "object") return null;
+    if (depth < 0 || seen.has(value)) return null;
+    seen.add(value);
+
+    for (const key of CONVERSATION_ID_KEYS) {
+      let candidate;
+      try {
+        candidate = value[key];
+      } catch {
+        continue;
+      }
+
+      const normalized = normalizeConversationUuid(candidate);
+      if (normalized) return normalized;
+    }
+
+    const nested = [
+      value.params,
+      value.thread,
+      value.conversation,
+      value.props,
+    ];
+    for (const child of nested) {
+      if (!child || typeof child !== "object") continue;
+      const normalized = getLikelyObjectConversationId(child, depth - 1, seen);
+      if (normalized) return normalized;
+    }
+
+    return null;
+  }
+
+  function readReactConversationIdFromValue(value, depth, seen) {
+    if (!value || typeof value !== "object" || depth < 0) return null;
+    if (seen.has(value)) return null;
+    seen.add(value);
+
+    const direct = getLikelyObjectConversationId(value);
+    if (direct) return direct;
+
+    if (value.nodeType === Node.ELEMENT_NODE) {
+      const elementConversationId = getElementConversationId(value);
+      if (elementConversationId) return elementConversationId;
+
+      for (const key of getReactPrivateKeys(value)) {
+        let child;
+        try {
+          child = value[key];
+        } catch {
+          continue;
+        }
+
+        const childConversationId = readReactConversationIdFromValue(child, depth - 1, seen);
+        if (childConversationId) return childConversationId;
+      }
+    }
+
+    if (Array.isArray(value)) {
+      const limit = Math.min(value.length, 40);
+      for (let index = 0; index < limit; index += 1) {
+        const childConversationId = readReactConversationIdFromValue(value[index], depth - 1, seen);
+        if (childConversationId) return childConversationId;
+      }
+      return null;
+    }
+
+    if (value instanceof Map) {
+      let index = 0;
+      for (const [mapKey, mapValue] of value) {
+        if (index >= 40) break;
+
+        const keyConversationId = normalizeConversationUuid(mapKey);
+        if (keyConversationId) return keyConversationId;
+
+        const mapKeyConversationId = readReactConversationIdFromValue(mapKey, depth - 1, seen);
+        if (mapKeyConversationId) return mapKeyConversationId;
+
+        const mapValueConversationId = readReactConversationIdFromValue(mapValue, depth - 1, seen);
+        if (mapValueConversationId) return mapValueConversationId;
+
+        index += 1;
+      }
+      return null;
+    }
+
+    const keys = getFilteredReflectKeys(value, "reactConversationId", CONVERSATION_REACT_KEY_RE, 120);
+    for (const key of keys) {
+      let child;
+      try {
+        child = value[key];
+      } catch {
+        continue;
+      }
+
+      if (CONVERSATION_ID_KEY_SET.has(key)) {
+        const keyConversationId = normalizeConversationUuid(child);
+        if (keyConversationId) return keyConversationId;
+      }
+
+      const childConversationId = readReactConversationIdFromValue(child, depth - 1, seen);
+      if (childConversationId) return childConversationId;
+    }
+
+    return null;
+  }
+
+  function readActiveConversationIdFromReact() {
+    const anchors = [
+      document.querySelector("main"),
+      document.querySelector(`[data-thread-find-target="conversation"]`),
+      document.querySelector(THREAD_COMPOSER_SELECTOR),
+      document.querySelector(CODEX_COMPOSER_SELECTOR),
+      document.getElementById("root"),
+    ].filter(Boolean);
+    const seen = new WeakSet();
+
+    for (const anchor of anchors) {
+      const direct = getElementConversationId(anchor);
+      if (direct) return direct;
+
+      for (const key of getReactPrivateKeys(anchor)) {
+        let value;
+        try {
+          value = anchor[key];
+        } catch {
+          continue;
+        }
+
+        const conversationId = readReactConversationIdFromValue(value, REACT_CONVERSATION_SCAN_DEPTH, seen);
+        if (conversationId) return conversationId;
+      }
+    }
+
+    return null;
+  }
+
   function readActiveConversationId() {
     const now = Date.now();
     if (now - state.activeConversationIdLookupAt < ACTIVE_CONVERSATION_LOOKUP_CACHE_MS) {
@@ -2238,6 +2719,13 @@
         state.activeConversationIdLookupAt = now;
         return conversationId;
       }
+    }
+
+    const reactConversationId = readActiveConversationIdFromReact();
+    if (reactConversationId) {
+      state.cachedActiveConversationId = reactConversationId;
+      state.activeConversationIdLookupAt = now;
+      return reactConversationId;
     }
 
     state.cachedActiveConversationId = null;
@@ -2286,9 +2774,11 @@
       state.lastScannedConversationId = null;
       state.expensiveFallbackScannedAt = 0;
       state.expensiveFallbackConversationId = null;
+      state.inlineMountLookupAt = 0;
       state.navigationPendingUntil = options.pendingNavigation ? Date.now() + NAVIGATION_PENDING_MS : 0;
       state.switchRetryUntil = Date.now() + SWITCH_RETRY_WINDOW_MS;
       scheduleRetryUpdate();
+      refreshOpenSpendHistory();
       return true;
     }
 
@@ -2336,241 +2826,6 @@
     return state.activeConversationId;
   }
 
-  function parsePercentText(text, source) {
-    if (!text || !contextTerms.test(text)) return null;
-
-    const patterns = [
-      /(?:context|token|tokens|usage|window|budget|remaining|上下文|令牌|使用|窗口)[^%\n]{0,80}?(\d{1,3}(?:\.\d+)?)\s*%/i,
-      /(\d{1,3}(?:\.\d+)?)\s*%[^%\n]{0,80}?(?:context|token|tokens|usage|window|budget|remaining|上下文|令牌|使用|窗口)/i,
-    ];
-
-    for (const pattern of patterns) {
-      const match = pattern.exec(text);
-      if (!match) continue;
-
-      const percent = Number(match[1]);
-      if (Number.isFinite(percent) && percent >= 0 && percent <= 100) {
-        const raw = match[0];
-        const usedPercent = /left|remaining|remain|available|free|剩余|可用/i.test(raw)
-          ? 100 - percent
-          : percent;
-        return makeReading(usedPercent, source, raw);
-      }
-    }
-
-    return null;
-  }
-
-  // /status 输出格式的文本锚点；如果上游改了 Context 行文案，优先同步这里。
-  function parseStatusContextText(text, source) {
-    if (!text || !/\bContext\s*:/i.test(text)) return null;
-
-    const normalized = String(text).replace(/\s+/g, " ");
-    const statusPattern =
-      /\bContext\s*:\s*(\d{1,3}(?:\.\d+)?)\s*%\s*(left|remaining|used|full)?\s*\(\s*([\d,.]+)\s*([kKmM]?)\s*used\s*\/\s*([\d,.]+)\s*([kKmM]?)\s*\)/i;
-    const statusMatch = statusPattern.exec(normalized);
-
-    if (statusMatch) {
-      const reportedPercent = Number(statusMatch[1]);
-      const mode = String(statusMatch[2] || "left").toLowerCase();
-      const used = toNumber(statusMatch[3], statusMatch[4]);
-      const limit = toNumber(statusMatch[5], statusMatch[6]);
-
-      if (used != null && limit != null && limit > 0 && used >= 0 && used <= limit * 1.25) {
-        return makeReading((used / limit) * 100, source, statusMatch[0], used, limit);
-      }
-
-      if (Number.isFinite(reportedPercent)) {
-        const usedPercent = mode === "left" || mode === "remaining" ? 100 - reportedPercent : reportedPercent;
-        return makeReading(usedPercent, source, statusMatch[0]);
-      }
-    }
-
-    const leftPattern = /\bContext\s*:\s*(\d{1,3}(?:\.\d+)?)\s*%\s*(left|remaining)\b/i;
-    const leftMatch = leftPattern.exec(normalized);
-    if (leftMatch) {
-      const leftPercent = Number(leftMatch[1]);
-      if (Number.isFinite(leftPercent)) {
-        return makeReading(100 - leftPercent, source, leftMatch[0]);
-      }
-    }
-
-    return null;
-  }
-
-  function parseRatioText(text, source) {
-    if (!text || !ratioWords.test(text)) return null;
-
-    const patterns = [
-      /(?:context|token|tokens|usage|window|budget|上下文|令牌|使用|窗口)[^\n]{0,100}?([\d,.]+)\s*([kKmM]?)\s*(?:\/|of)\s*([\d,.]+)\s*([kKmM]?)/i,
-      /([\d,.]+)\s*([kKmM]?)\s*(?:\/|of)\s*([\d,.]+)\s*([kKmM]?)[^\n]{0,100}?(?:context|token|tokens|usage|window|budget|上下文|令牌|使用|窗口)/i,
-    ];
-
-    for (const pattern of patterns) {
-      const match = pattern.exec(text);
-      if (!match) continue;
-
-      const used = toNumber(match[1], match[2]);
-      const limit = toNumber(match[3], match[4]);
-      if (!used || !limit || used < 0 || limit <= 0 || used > limit * 1.25) {
-        continue;
-      }
-
-      return makeReading((used / limit) * 100, source, match[0], used, limit);
-    }
-
-    return null;
-  }
-
-  function parseStructuredText(text, source) {
-    if (!text || !contextTerms.test(text)) return null;
-
-    const percentFields = [
-      /["']?(?:context|token|usage|window)[A-Za-z0-9_$-]{0,36}(?:percent|percentage)["']?\s*[:=]\s*(\d{1,3}(?:\.\d+)?)/i,
-      /["']?(?:percent|percentage)[A-Za-z0-9_$-]{0,36}(?:context|token|usage|window)["']?\s*[:=]\s*(\d{1,3}(?:\.\d+)?)/i,
-      /["']?(?:context|token|usage|window)[A-Za-z0-9_$-]{0,36}(?:ratio)["']?\s*[:=]\s*(0?\.\d+|1(?:\.0+)?)/i,
-    ];
-
-    for (const pattern of percentFields) {
-      const match = pattern.exec(text);
-      if (!match) continue;
-
-      let percent = Number(match[1]);
-      if (pattern.source.includes("ratio")) percent *= 100;
-      if (Number.isFinite(percent) && percent >= 0 && percent <= 100) {
-        return makeReading(percent, source, match[0]);
-      }
-    }
-
-    const usedMatch =
-      /["']?(?:context|token|tokens)[A-Za-z0-9_$-]{0,36}(?:used|current|total|input)["']?\s*[:=]\s*(\d+(?:\.\d+)?)/i.exec(
-        text,
-      );
-    const limitMatch =
-      /["']?(?:context|token|tokens)[A-Za-z0-9_$-]{0,36}(?:limit|max|window|capacity|budget)["']?\s*[:=]\s*(\d+(?:\.\d+)?)/i.exec(
-        text,
-      );
-
-    if (usedMatch && limitMatch) {
-      const used = Number(usedMatch[1]);
-      const limit = Number(limitMatch[1]);
-      if (Number.isFinite(used) && Number.isFinite(limit) && limit > 0) {
-        return makeReading((used / limit) * 100, source, `${usedMatch[0]} ${limitMatch[0]}`, used, limit);
-      }
-    }
-
-    return null;
-  }
-
-  function lowerCompact(value) {
-    return String(value || "")
-      .toLowerCase()
-      .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "");
-  }
-
-  function collectNumericFields(value, path, depth, seen, fields) {
-    if (fields.length > 400 || depth < 0 || value == null) return;
-
-    const valueType = typeof value;
-    if (valueType === "number" && Number.isFinite(value)) {
-      const key = lowerCompact(path);
-      const relevant = /(context|token|usage|window|budget|上下文|令牌|使用|窗口)/i.test(path);
-      fields.push({ path, key, value, relevant });
-      return;
-    }
-
-    if (valueType === "string") {
-      const number = Number(value.replace(/,/g, ""));
-      if (Number.isFinite(number)) {
-        const key = lowerCompact(path);
-        const relevant = /(context|token|usage|window|budget|上下文|令牌|使用|窗口)/i.test(path);
-        fields.push({ path, key, value: number, relevant });
-      }
-      return;
-    }
-
-    if (valueType !== "object") return;
-    if (seen.has(value)) return;
-    seen.add(value);
-
-    let keys = [];
-    try {
-      keys = Object.keys(value).slice(0, 120);
-    } catch {
-      return;
-    }
-
-    for (const key of keys) {
-      let child;
-      try {
-        child = value[key];
-      } catch {
-        continue;
-      }
-
-      collectNumericFields(child, path ? `${path}.${key}` : key, depth - 1, seen, fields);
-    }
-  }
-
-  function findField(fields, pattern) {
-    return fields.find((field) => field.relevant && pattern.test(field.key));
-  }
-
-  // 面向未知 payload 的最后一层结构化解析：只根据字段路径语义配对数值，避免绑定单一接口形状。
-  function parseStructuredValue(value, source) {
-    const fields = [];
-    collectNumericFields(value, "", 8, new WeakSet(), fields);
-
-    const percentField = findField(fields, /(percent|percentage|pct|百分比)/);
-    if (percentField && percentField.value >= 0 && percentField.value <= 100) {
-      return makeReading(percentField.value, source, percentField.path);
-    }
-
-    const ratioField = findField(fields, /(ratio|fraction|比例)/);
-    if (ratioField && ratioField.value >= 0 && ratioField.value <= 1) {
-      return makeReading(ratioField.value * 100, source, ratioField.path);
-    }
-
-    const usedField = findField(fields, /(used|current|consumed|filled|total|input|prompt|已用|当前|消耗)/);
-    const limitField = findField(fields, /(limit|max|maximum|capacity|window|budget|contextwindow|上限|最大|容量|预算|窗口)/);
-    if (usedField && limitField && limitField.value > 0 && usedField.value >= 0 && usedField.value <= limitField.value * 1.25) {
-      return makeReading(
-        (usedField.value / limitField.value) * 100,
-        source,
-        `${usedField.path} / ${limitField.path}`,
-        usedField.value,
-        limitField.value,
-      );
-    }
-
-    const remainingField = findField(fields, /(remaining|remain|left|available|free|剩余|可用)/);
-    if (remainingField && limitField && limitField.value > 0 && remainingField.value >= 0 && remainingField.value <= limitField.value) {
-      const used = limitField.value - remainingField.value;
-      return makeReading(
-        (used / limitField.value) * 100,
-        source,
-        `${remainingField.path} / ${limitField.path}`,
-        used,
-        limitField.value,
-      );
-    }
-
-    if (usedField && remainingField && usedField.value >= 0 && remainingField.value >= 0) {
-      const limit = usedField.value + remainingField.value;
-      if (limit > 0) {
-        return makeReading(
-          (usedField.value / limit) * 100,
-          source,
-          `${usedField.path} / ${remainingField.path}`,
-          usedField.value,
-          limit,
-        );
-      }
-    }
-
-    return null;
-  }
-
   function parseStatusContextUsageObject(value, source, conversationId) {
     if (!value || typeof value !== "object") return null;
 
@@ -2612,88 +2867,29 @@
     return null;
   }
 
+  function looksLikeStatusContextUsageObject(value) {
+    if (!value || typeof value !== "object") return false;
+
+    const modelContextWindow = firstFiniteNumber(value.modelContextWindow, value.model_context_window);
+    const lastUsage = value.last || value.lastTokenUsage || value.last_token_usage;
+    const totalTokens = firstFiniteNumber(
+      lastUsage && lastUsage.totalTokens,
+      lastUsage && lastUsage.total_tokens,
+    );
+    if (Number.isFinite(modelContextWindow) && modelContextWindow > 0 && Number.isFinite(totalTokens) && totalTokens >= 0) {
+      return true;
+    }
+
+    const usedTokens = firstFiniteNumber(value.usedTokens, value.used_tokens);
+    const contextWindow = firstFiniteNumber(value.contextWindow, value.context_window);
+    return Number.isFinite(usedTokens) && usedTokens >= 0 && Number.isFinite(contextWindow) && contextWindow > 0;
+  }
+
   function firstFiniteNumber(...values) {
     for (const value of values) {
       const number = Number(value);
       if (Number.isFinite(number)) return number;
     }
-
-    return null;
-  }
-
-  function parseTokenCountInfoObject(value, source, conversationId) {
-    if (!value || typeof value !== "object") return null;
-
-    const modelContextWindow = firstFiniteNumber(value.model_context_window, value.modelContextWindow);
-    const lastUsage = value.last_token_usage || value.lastTokenUsage || value.last;
-    const totalTokens = firstFiniteNumber(
-      lastUsage && lastUsage.total_tokens,
-      lastUsage && lastUsage.totalTokens,
-    );
-
-    if (!Number.isFinite(modelContextWindow) || modelContextWindow <= 0) return null;
-    if (!Number.isFinite(totalTokens) || totalTokens < 0) return null;
-
-    const usedTokens = Math.min(totalTokens, modelContextWindow);
-    return withConversationId(makeReading(
-      (usedTokens / modelContextWindow) * 100,
-      source,
-      "token_count info",
-      usedTokens,
-      modelContextWindow,
-    ), conversationId);
-  }
-
-  // fetch / websocket / postMessage 捕获到的对象形状不一致，这里统一收敛到 reading 并过滤非当前会话。
-  function inspectCandidateValue(value, source, ownerConversationId) {
-    if (!value || typeof value !== "object") return null;
-
-    const activeConversationId = state.activeConversationId || readActiveConversationId();
-    const valueConversationId = getObjectConversationId(value) || normalizeConversationId(ownerConversationId);
-
-    if (activeConversationId && valueConversationId && !conversationIdsMatch(activeConversationId, valueConversationId)) {
-      return null;
-    }
-
-    const directReading = parseStatusContextUsageObject(value, source, valueConversationId);
-    if (directReading) return directReading;
-
-    if (
-      value.method === "thread/tokenUsage/updated" ||
-      value.type === "thread/tokenUsage/updated" ||
-      value.event === "thread/tokenUsage/updated"
-    ) {
-      const eventConversationId = getObjectConversationId(value.params || value) || valueConversationId;
-      if (activeConversationId && eventConversationId && !conversationIdsMatch(activeConversationId, eventConversationId)) {
-        return null;
-      }
-
-      const paramsReading =
-        parseStatusContextUsageObject(value.params && value.params.tokenUsage, source, eventConversationId) ||
-        parseStatusContextUsageObject(value.params, source, eventConversationId);
-      if (paramsReading) return paramsReading;
-    }
-
-    if (value.type === "token_count" || value.event === "token_count") {
-      const tokenCountReading = parseTokenCountInfoObject(value.info, source, valueConversationId || activeConversationId);
-      if (tokenCountReading) return tokenCountReading;
-    }
-
-    if (value.payload && value.payload.type === "token_count") {
-      const payloadConversationId = getObjectConversationId(value.payload) || valueConversationId || activeConversationId;
-      const tokenCountReading = parseTokenCountInfoObject(value.payload.info, source, payloadConversationId);
-      if (tokenCountReading) return tokenCountReading;
-    }
-
-    const nestedReading = parseStatusContextUsageObject(
-      value.contextUsage || value.tokenUsage || value.usage,
-      source,
-      valueConversationId,
-    );
-    if (nestedReading) return nestedReading;
-
-    const tokenCountInfoReading = parseTokenCountInfoObject(value.info, source, valueConversationId || activeConversationId);
-    if (tokenCountInfoReading) return tokenCountInfoReading;
 
     return null;
   }
@@ -2991,6 +3187,12 @@
       }
     }
 
+    const links = document.querySelectorAll(`link[rel="modulepreload"][href*="${fragment}"]`);
+    for (const link of links) {
+      const value = link && link.href;
+      if (value) return value;
+    }
+
     return new URL(fallbackPath, location.href).href;
   }
 
@@ -3002,11 +3204,11 @@
 
     const appServerUrl = findLoadedAssetUrl(
       "app-server-manager-signals",
-      "./assets/app-server-manager-signals-WXrD8bmC.js",
+      "./assets/app-server-manager-signals-7MlBpIlX.js",
     );
     const signalUrl = findLoadedAssetUrl(
       "setting-storage",
-      "./assets/setting-storage-DBp4-kRn.js",
+      "./assets/setting-storage-kJblH-wH.js",
     );
 
     state.appSignalModulesPromise = Promise.all([
@@ -3052,6 +3254,38 @@
     return null;
   }
 
+  function findTokenUsageSelector(scope, conversationId) {
+    if (!scope || !conversationId) return null;
+
+    if (state.appSignalTokenUsageSelector) return state.appSignalTokenUsageSelector;
+
+    const now = Date.now();
+    if (now - state.appSignalTokenUsageSelectorLookupAt < APP_SIGNAL_SELECTOR_SCAN_INTERVAL_MS) {
+      return null;
+    }
+    state.appSignalTokenUsageSelectorLookupAt = now;
+
+    const modules = state.appSignalModules;
+    const appServerSignals = modules && modules.appServerSignals;
+    if (!appServerSignals || typeof appServerSignals !== "object") return null;
+
+    let scanned = 0;
+    for (const [exportName, selector] of Object.entries(appServerSignals)) {
+      if (!selector || (typeof selector !== "object" && typeof selector !== "function")) continue;
+      scanned += 1;
+      if (scanned > APP_SIGNAL_SELECTOR_SCAN_LIMIT) break;
+
+      const value = readSignalValue(scope, selector, conversationId);
+      if (!looksLikeStatusContextUsageObject(value)) continue;
+
+      state.appSignalTokenUsageSelector = selector;
+      state.appSignalTokenUsageSelectorExport = exportName;
+      return selector;
+    }
+
+    return null;
+  }
+
   function scanAppSignalContextUsage(activeConversationId) {
     const now = Date.now();
     const requestedConversationId = normalizeConversationId(activeConversationId);
@@ -3079,18 +3313,81 @@
       normalizeConversationId(scope.value && scope.value.conversationId);
     if (!conversationId) return null;
 
-    // 当前版本里 appServerSignals.B 对应 latestTokenUsageInfo；上游重排导出时需要重新定位。
-    const latestTokenUsageSelector = modules.appServerSignals.B;
+    const latestTokenUsageSelector = findTokenUsageSelector(scope, conversationId);
     const tokenUsage = readSignalValue(scope, latestTokenUsageSelector, conversationId);
     const reading = parseStatusContextUsageObject(tokenUsage, "app-signal", conversationId);
     if (reading) {
       state.appSignalCachedReading = reading;
       state.appSignalCachedConversationId = conversationId;
       state.appSignalCachedAt = now;
+      state.appSignalLastSuccessAt = now;
       return reading;
     }
 
     return null;
+  }
+
+  function collectContextUsageSampleConversationIds(activeConversationId) {
+    const ids = [];
+    const add = (conversationId) => {
+      const normalizedConversationId = normalizeConversationId(conversationId);
+      if (!normalizedConversationId || ids.includes(normalizedConversationId)) return;
+      ids.push(normalizedConversationId);
+    };
+
+    add(activeConversationId);
+    for (const element of document.querySelectorAll("[data-app-action-sidebar-thread-id]")) {
+      add(getElementConversationId(element));
+      if (ids.length >= CONTEXT_USAGE_BACKGROUND_SAMPLE_MAX_CONVERSATIONS) return ids;
+    }
+    for (const conversationId of state.readingsByConversationId.keys()) add(conversationId);
+    for (const conversationId of state.lastAnimatedUsedByConversationId.keys()) add(conversationId);
+
+    return ids.slice(0, CONTEXT_USAGE_BACKGROUND_SAMPLE_MAX_CONVERSATIONS);
+  }
+
+  function rememberContextUsageReading(reading, fallbackConversationId) {
+    const conversationId = normalizeConversationId(reading && (reading.conversationId || fallbackConversationId));
+    if (!conversationId || !reading) return null;
+
+    reading.conversationId = conversationId;
+    state.readingsByConversationId.set(conversationId, reading);
+    return conversationId;
+  }
+
+  function recordContextUsageDelta(reading, fallbackConversationId, options = {}) {
+    const conversationId = rememberContextUsageReading(reading, fallbackConversationId);
+    if (!conversationId || !Number.isFinite(reading.used)) return null;
+
+    const previousUsed = state.lastAnimatedUsedByConversationId.get(conversationId);
+    if (Number.isFinite(previousUsed) && reading.used > previousUsed) {
+      const deltaTokens = reading.used - previousUsed;
+      if (shouldShowContextSpendEffect(conversationId, reading.used)) {
+        recordSpend("context", deltaTokens, conversationId);
+        if (options.showEffect !== false) showTokenSpendEffect(deltaTokens);
+      }
+    }
+    state.lastAnimatedUsedByConversationId.set(conversationId, reading.used);
+    return conversationId;
+  }
+
+  // 已知/侧栏可见会话的 app-signal 读数可按会话 ID 查询；每 5 秒顺手刷新一次，避免只记录当前可见会话。
+  function sampleKnownConversationContextUsage(activeConversationId) {
+    const now = Date.now();
+    if (now - state.contextUsageBackgroundSampleAt < CONTEXT_USAGE_BACKGROUND_SAMPLE_INTERVAL_MS) return;
+
+    const conversationIds = collectContextUsageSampleConversationIds(activeConversationId);
+    state.contextUsageBackgroundSampleAt = now;
+    state.contextUsageBackgroundSampleConversationIds = conversationIds;
+    if (!conversationIds.length) return;
+
+    for (const conversationId of conversationIds) {
+      if (conversationIdsMatch(conversationId, activeConversationId)) continue;
+
+      const reading = scanAppSignalContextUsage(conversationId);
+      if (!reading) continue;
+      recordContextUsageDelta(reading, conversationId, { showEffect: false });
+    }
   }
 
   function shouldWaitForAppSignalModules(now) {
@@ -3098,216 +3395,6 @@
       state.appSignalModulesPromise &&
       !state.appSignalModules &&
       now - state.appSignalModulesRequestedAt < APP_SIGNAL_IMPORT_GRACE_MS
-    );
-  }
-
-  // 流式响应可能是 JSONL，也可能是一整段 JSON；两种都按同一套 reading 规则落库。
-  function parsePayloadText(text, source, ownerConversationId) {
-    const clipped = String(text || "").slice(0, MAX_CAPTURE_TEXT_LENGTH);
-    const textReading = parseTextForReading(clipped, source);
-    if (textReading) return withConversationId(textReading, ownerConversationId);
-
-    if (!contextTerms.test(clipped)) return null;
-
-    const lines = clipped.split(/\r?\n/);
-    if (lines.length > 1) {
-      for (const line of lines) {
-        if (!line || !contextTerms.test(line)) continue;
-
-        try {
-          const parsedLine = JSON.parse(line);
-          const reading =
-            inspectCandidateValue(parsedLine, source, ownerConversationId) ||
-            parseStructuredValue(parsedLine, source);
-          if (reading) return withConversationId(reading, reading.conversationId || ownerConversationId);
-        } catch {
-          const lineReading = parseTextForReading(line, source);
-          if (lineReading) return withConversationId(lineReading, ownerConversationId);
-        }
-      }
-    }
-
-    try {
-      const parsed = JSON.parse(clipped);
-      const reading = inspectCandidateValue(parsed, source, ownerConversationId) || parseStructuredValue(parsed, source);
-      return withConversationId(reading, reading && reading.conversationId ? reading.conversationId : ownerConversationId);
-    } catch {
-      return null;
-    }
-  }
-
-  // 捕获层会先缓存非当前会话读数，只有会话匹配时才推动当前 UI 刷新。
-  function acceptReading(reading) {
-    if (!reading) return;
-
-    const activeConversationId = state.activeConversationId || readActiveConversationId();
-    if (reading.conversationId) {
-      state.readingsByConversationId.set(reading.conversationId, reading);
-    }
-
-    if (activeConversationId && reading.conversationId && !conversationIdsMatch(activeConversationId, reading.conversationId)) {
-      return;
-    }
-
-    state.lastReading = reading;
-    scheduleUpdate(CAPTURE_UPDATE_DELAY_MS);
-  }
-
-  function inspectCandidateText(text, source, ownerConversationId) {
-    if (!text || text.length > MAX_CAPTURE_TEXT_LENGTH) return;
-    if (!CAPTURE_TEXT_HINT_RE.test(text)) return;
-
-    acceptReading(parsePayloadText(text, source, ownerConversationId));
-  }
-
-  function hasCaptureHintText(text) {
-    if (typeof text !== "string" || text.length > MAX_CAPTURE_TEXT_LENGTH) return false;
-    return CAPTURE_TEXT_HINT_RE.test(text);
-  }
-
-  function getRequestConversationId(input) {
-    const direct = normalizeConversationId(input && (input.url || input.href || input));
-    if (direct) return direct;
-
-    return state.activeConversationId || readActiveConversationId();
-  }
-
-  function getNativeFetch(captureState) {
-    return captureState.nativeFetch || window.fetch;
-  }
-
-  function getNativeWebSocket(captureState) {
-    return captureState.NativeWebSocket || window.WebSocket;
-  }
-
-  // fetch 捕获只 clone 小体积文本响应，不消费原 response，避免影响 Codex 自己的请求链。
-  function installFetchCapture() {
-    const captureState = getCaptureState();
-    if (captureState.fetchVersion === SCRIPT_VERSION || typeof window.fetch !== "function") return;
-
-    const originalFetch = getNativeFetch(captureState);
-    captureState.nativeFetch = originalFetch;
-    window.fetch = function codexContextMeterFetch(...args) {
-      const requestConversationId = getRequestConversationId(args[0]);
-      return originalFetch.apply(this, args).then((response) => {
-        try {
-          const urlText = String(args[0] && (args[0].url || args[0].href || args[0]) || response.url || "");
-          if (urlText && !CAPTURE_TEXT_HINT_RE.test(urlText)) return response;
-
-          const contentType = response.headers && response.headers.get("content-type");
-          const contentLength = response.headers && Number(response.headers.get("content-length"));
-          const isTextLike = !contentType || /json|text|event-stream|x-ndjson/i.test(contentType);
-          if (isTextLike && (!Number.isFinite(contentLength) || contentLength <= MAX_CAPTURE_TEXT_LENGTH)) {
-            response
-              .clone()
-              .text()
-              .then((text) => {
-                const currentCaptureState = window[CAPTURE_STATE_KEY];
-                if (currentCaptureState && typeof currentCaptureState.inspectText === "function") {
-                  currentCaptureState.inspectText(text, "fetch", requestConversationId);
-                }
-              })
-              .catch(() => {});
-          }
-        } catch {
-          return response;
-        }
-
-        return response;
-      });
-    };
-
-    captureState.fetchVersion = SCRIPT_VERSION;
-    window.__codexContextMeterFetchPatched = true;
-  }
-
-  // WebSocket 构造器需要保留原型和 readyState 常量，减少对页面侧类型判断的影响。
-  function installWebSocketCapture() {
-    const captureState = getCaptureState();
-    if (captureState.webSocketVersion === SCRIPT_VERSION || typeof window.WebSocket !== "function") return;
-
-    const NativeWebSocket = getNativeWebSocket(captureState);
-    captureState.NativeWebSocket = NativeWebSocket;
-
-    function MeterWebSocket(...args) {
-      const socket = new NativeWebSocket(...args);
-      socket.addEventListener("message", (event) => {
-        try {
-          if (typeof event.data === "string") {
-            if (!hasCaptureHintText(event.data)) return;
-
-            const currentCaptureState = window[CAPTURE_STATE_KEY];
-            if (currentCaptureState && typeof currentCaptureState.inspectText === "function") {
-              currentCaptureState.inspectText(event.data, "websocket", state.activeConversationId || readActiveConversationId());
-            }
-          } else if (event.data instanceof Blob && event.data.size <= MAX_CAPTURE_TEXT_LENGTH) {
-            event.data
-              .text()
-              .then((text) => {
-                const currentCaptureState = window[CAPTURE_STATE_KEY];
-                if (currentCaptureState && typeof currentCaptureState.inspectText === "function") {
-                  currentCaptureState.inspectText(text, "websocket", state.activeConversationId || readActiveConversationId());
-                }
-              })
-              .catch(() => {});
-          }
-        } catch {
-          return;
-        }
-      });
-      return socket;
-    }
-
-    MeterWebSocket.prototype = NativeWebSocket.prototype;
-    MeterWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
-    MeterWebSocket.OPEN = NativeWebSocket.OPEN;
-    MeterWebSocket.CLOSING = NativeWebSocket.CLOSING;
-    MeterWebSocket.CLOSED = NativeWebSocket.CLOSED;
-    window.WebSocket = MeterWebSocket;
-    captureState.webSocketVersion = SCRIPT_VERSION;
-    window.__codexContextMeterWebSocketPatched = true;
-  }
-
-  // postMessage 监听器每次重装前先移除旧实例，支持 Codex++ 反复重新加载用户脚本。
-  function installPostMessageCapture() {
-    const captureState = getCaptureState();
-    if (captureState.messageListener) {
-      window.removeEventListener("message", captureState.messageListener, true);
-    }
-
-    captureState.messageListener = (event) => {
-      try {
-        const currentCaptureState = window[CAPTURE_STATE_KEY];
-        if (!currentCaptureState) return;
-
-        const reading =
-          (typeof currentCaptureState.inspectValue === "function"
-            ? currentCaptureState.inspectValue(event.data, "message", state.activeConversationId || readActiveConversationId())
-            : null) ||
-          (hasCaptureHintText(event.data) && typeof currentCaptureState.parsePayloadText === "function"
-            ? currentCaptureState.parsePayloadText(event.data, "message", state.activeConversationId || readActiveConversationId())
-            : null);
-
-        if (typeof currentCaptureState.acceptReading === "function") {
-          currentCaptureState.acceptReading(reading);
-        }
-      } catch {
-        return;
-      }
-    };
-
-    window.addEventListener("message", captureState.messageListener, true);
-    captureState.messageVersion = SCRIPT_VERSION;
-    window.__codexContextMeterPostMessagePatched = true;
-  }
-
-  function parseTextForReading(text, source) {
-    const clipped = String(text || "").slice(0, MAX_TEXT_LENGTH);
-    return (
-      parseStatusContextText(clipped, source) ||
-      parsePercentText(clipped, source) ||
-      parseRatioText(clipped, source) ||
-      parseStructuredText(clipped, source)
     );
   }
 
@@ -3328,190 +3415,8 @@
   function shouldIgnoreMutationTarget(element) {
     if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
     if (element.closest(`#${ROOT_ID}`)) return true;
+    if (element.closest(`#${HISTORY_PORTAL_ID}`)) return true;
     return !!element.closest(MESSAGE_MUTATION_SELECTOR);
-  }
-
-  // 兜底读取已渲染的 /status 输出；排除会话正文，避免把用户消息里的 Context 行当成状态。
-  function collectStatusCommandText() {
-    const chunks = [];
-    const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT);
-    let visited = 0;
-    let node = walker.nextNode();
-
-    while (node && visited < STATUS_TEXT_NODE_SCAN_LIMIT) {
-      visited += 1;
-      if (chunks.length >= 12) break;
-      const current = node;
-      node = walker.nextNode();
-
-      const text = (current.textContent || "").replace(/\s+/g, " ").trim();
-      if (text.length < 20 || text.length > 1800) continue;
-      if (!/\bStatus\b/i.test(text) || !/\bContext\s*:\s*\d{1,3}(?:\.\d+)?\s*%/i.test(text)) continue;
-      if (!/\bSession\s*:|\b5h limit\s*:|\b7d limit\s*:/i.test(text)) continue;
-      if (current.id === ROOT_ID || current.closest(`#${ROOT_ID}`)) continue;
-      if (isConversationContent(current)) continue;
-      if (!isVisibleElement(current)) continue;
-
-      chunks.push(text);
-    }
-
-    return chunks.join("\n");
-  }
-
-  function collectDomText() {
-    const parts = [];
-    let scanned = 0;
-
-    const attrNodes = document.querySelectorAll("[aria-label], [title], [data-testid], [data-test-id]");
-    for (const node of attrNodes) {
-      if (scanned >= DOM_ATTRIBUTE_SCAN_LIMIT || parts.length >= DOM_TEXT_PART_LIMIT) break;
-      scanned += 1;
-      if (node.closest(`#${ROOT_ID}`)) continue;
-
-      for (const attr of ["aria-label", "title", "data-testid", "data-test-id"]) {
-        const value = node.getAttribute(attr);
-        if (value && contextTerms.test(value)) parts.push(value);
-      }
-
-      const text = (node.textContent || "").trim();
-      if (text && text.length <= 500 && contextTerms.test(text)) {
-        parts.push(text);
-      }
-    }
-
-    return parts.join("\n").slice(0, MAX_TEXT_LENGTH);
-  }
-
-  function safeStorageText(storage) {
-    const parts = [];
-    for (let index = 0; index < storage.length && parts.length < 80; index += 1) {
-      const key = storage.key(index);
-      if (!key || !contextTerms.test(key)) continue;
-
-      let value = "";
-      try {
-        value = storage.getItem(key) || "";
-      } catch {
-        value = "";
-      }
-      parts.push(`${key}: ${value.slice(0, 4000)}`);
-    }
-    return parts.join("\n");
-  }
-
-  function collectValueText(value, depth, seen, parts) {
-    if (parts.length > 160 || depth < 0 || value == null) return;
-
-    const valueType = typeof value;
-    if (valueType === "string" || valueType === "number" || valueType === "boolean") {
-      const text = String(value);
-      if (contextTerms.test(text)) parts.push(text);
-      return;
-    }
-
-    if (valueType !== "object") return;
-    if (seen.has(value)) return;
-    seen.add(value);
-
-    if (Array.isArray(value)) {
-      const limit = Math.min(value.length, 80);
-      for (let index = 0; index < limit; index += 1) {
-        collectValueText(value[index], depth - 1, seen, parts);
-      }
-      return;
-    }
-
-    if (value instanceof Map) {
-      let index = 0;
-      for (const [mapKey, mapValue] of value) {
-        if (index >= 80) break;
-        collectValueText(mapKey, depth - 1, seen, parts);
-        collectValueText(mapValue, depth - 1, seen, parts);
-        index += 1;
-      }
-      return;
-    }
-
-    if (value instanceof Set) {
-      let index = 0;
-      for (const setValue of value) {
-        if (index >= 80) break;
-        collectValueText(setValue, depth - 1, seen, parts);
-        index += 1;
-      }
-      return;
-    }
-
-    const keys = getContextValueKeys(value);
-
-    for (const key of keys) {
-      let child;
-      try {
-        child = value[key];
-      } catch {
-        continue;
-      }
-
-      if (child == null || typeof child !== "object") {
-        parts.push(`${key}: ${String(child)}`);
-      } else {
-        parts.push(key);
-      }
-
-      if (typeof child === "object") {
-        collectValueText(child, depth - 1, seen, parts);
-      }
-    }
-  }
-
-  // window 全局对象很大，先缓存候选 key；只有主路径失败时才读取这些值。
-  function scanLikelyWindowState() {
-    const parts = [];
-    const seen = new WeakSet();
-    const now = Date.now();
-    if (!state.windowContextTextKeys || now - state.windowContextTextKeysAt > WINDOW_KEY_CACHE_MS) {
-      state.windowContextTextKeys = Object.keys(window).filter((key) => contextTerms.test(key));
-      state.windowContextTextKeysAt = now;
-    }
-
-    for (const key of state.windowContextTextKeys) {
-      let value;
-      try {
-        value = window[key];
-      } catch {
-        continue;
-      }
-
-      parts.push(key);
-      collectValueText(value, 3, seen, parts);
-    }
-
-    return parts.join("\n").slice(0, MAX_TEXT_LENGTH);
-  }
-
-  // React 兜底只检查可能承载线程/消息状态的宿主节点，避免遍历全部 body 元素。
-  function scanReactProps() {
-    const parts = [];
-    const seen = new WeakSet();
-    const root = document.getElementById("root");
-    const nodes = root ? root.querySelectorAll(REACT_STATE_HOST_SELECTOR) : [];
-    const limit = Math.min(nodes.length, REACT_HOST_SCAN_LIMIT);
-
-    for (let index = 0; index < limit && parts.length < 160; index += 1) {
-      const node = nodes[index];
-      const keys = getReactPrivateKeys(node);
-      for (const key of keys) {
-        let value;
-        try {
-          value = node[key];
-        } catch {
-          continue;
-        }
-        collectValueText(value, 4, seen, parts);
-      }
-    }
-
-    return parts.join("\n").slice(0, MAX_TEXT_LENGTH);
   }
 
   // 这里直接找结构化 usage 对象，比把 window 状态拼成文本再正则解析更便宜。
@@ -3540,12 +3445,10 @@
     return null;
   }
 
-  // 读取顺序按稳定性排列：app signal > React 状态 > window 缓存 > /status 文本 > storage/DOM 兜底。
+  // 读取顺序按稳定性排列：app signal > 结构化 React 状态 > window 缓存。
   function detectReading() {
     state.scanGeneration += 1;
     const activeConversationId = updateActiveConversationId();
-    const cachedReading = activeConversationId ? state.readingsByConversationId.get(activeConversationId) : null;
-    if (cachedReading) return cachedReading;
 
     if (!activeConversationId) {
       const appSignalReading = scanAppSignalContextUsage(null);
@@ -3559,16 +3462,35 @@
       return null;
     }
 
-    if (state.lastReading && state.lastReading.conversationId && conversationIdsMatch(activeConversationId, state.lastReading.conversationId)) {
-      return state.lastReading;
-    }
+    const cachedReading = state.readingsByConversationId.get(activeConversationId) || null;
+    const fallbackReading =
+      state.lastReading && state.lastReading.conversationId && conversationIdsMatch(activeConversationId, state.lastReading.conversationId)
+        ? state.lastReading
+        : cachedReading;
 
     const now = Date.now();
     const activeChangedSinceScan = activeConversationId !== state.lastScannedConversationId;
     const inSwitchRetryWindow = !!activeConversationId && now < state.switchRetryUntil;
-    if (!activeChangedSinceScan && !inSwitchRetryWindow && now - state.lastScanAt < SLOW_SCAN_INTERVAL_MS) {
-      return null;
+
+    const shouldRunStatusScan =
+      activeChangedSinceScan ||
+      inSwitchRetryWindow ||
+      now - state.lastScanAt >= SLOW_SCAN_INTERVAL_MS;
+    const appSignalReading = scanAppSignalContextUsage(activeConversationId);
+    if (appSignalReading && !shouldRunStatusScan) {
+      state.switchRetryUntil = 0;
+      clearRetryUpdate();
+      return appSignalReading;
     }
+
+    if (!shouldRunStatusScan) {
+      if (shouldWaitForAppSignalModules(now)) {
+        scheduleUpdate(APP_SIGNAL_IMPORT_GRACE_MS);
+        return state.lastReading;
+      }
+      return fallbackReading;
+    }
+
     // 会话切换初期允许快速兜底；同一会话内的昂贵扫描按窗口限频。
     const canRunExpensiveFallback =
       activeChangedSinceScan ||
@@ -3577,21 +3499,6 @@
 
     state.lastScannedConversationId = activeConversationId;
     state.lastScanAt = now;
-
-    const appSignalReading = scanAppSignalContextUsage(activeConversationId);
-    if (appSignalReading) {
-      if (!activeConversationId && appSignalReading.conversationId) {
-        retainConversationId(appSignalReading.conversationId);
-      }
-      state.switchRetryUntil = 0;
-      clearRetryUpdate();
-      return appSignalReading;
-    }
-
-    if (shouldWaitForAppSignalModules(now)) {
-      scheduleUpdate(APP_SIGNAL_IMPORT_GRACE_MS);
-      return state.lastReading;
-    }
 
     const statusReactReading = scanStatusReactContextUsage(activeConversationId);
     if (statusReactReading) {
@@ -3604,47 +3511,24 @@
       state.expensiveFallbackScannedAt = now;
       state.expensiveFallbackConversationId = activeConversationId;
 
-      // 以下 fallback 从“结构化且便宜”逐步降级到“文本化且昂贵”，顺序不要随意调换。
+      // fallback 只保留结构化对象，避免按页面文案猜测。
       const windowReading = scanWindowForContextUsage(activeConversationId);
       if (windowReading) {
         state.switchRetryUntil = 0;
         clearRetryUpdate();
         return windowReading;
       }
+    }
 
-      const statusReading = parseTextForReading(collectStatusCommandText(), "status");
-      if (statusReading) {
-        state.switchRetryUntil = 0;
-        clearRetryUpdate();
-        return statusReading;
-      }
+    if (appSignalReading) {
+      state.switchRetryUntil = 0;
+      clearRetryUpdate();
+      return appSignalReading;
+    }
 
-      const localReading = parseTextForReading(safeStorageText(localStorage), "localStorage");
-      if (localReading) {
-        state.switchRetryUntil = 0;
-        clearRetryUpdate();
-        return localReading;
-      }
-
-      const sessionReading = parseTextForReading(safeStorageText(sessionStorage), "sessionStorage");
-      if (sessionReading) {
-        state.switchRetryUntil = 0;
-        clearRetryUpdate();
-        return sessionReading;
-      }
-
-      const domReading = parseTextForReading(collectDomText(), "dom");
-      if (domReading) {
-        state.switchRetryUntil = 0;
-        clearRetryUpdate();
-        return domReading;
-      }
-
-      const slowWindowReading = parseTextForReading(scanLikelyWindowState(), "window");
-      if (slowWindowReading) return slowWindowReading;
-
-      const reactReading = parseTextForReading(scanReactProps(), "react");
-      if (reactReading) return reactReading;
+    if (shouldWaitForAppSignalModules(now)) {
+      scheduleUpdate(APP_SIGNAL_IMPORT_GRACE_MS);
+      return state.lastReading;
     }
 
     if (inSwitchRetryWindow) {
@@ -3653,15 +3537,16 @@
       clearRetryUpdate();
     }
 
-    if (
-      !state.lastReading ||
-      !state.lastReading.conversationId ||
-      conversationIdsMatch(activeConversationId, state.lastReading.conversationId)
-    ) {
-      return state.lastReading;
-    }
+    if (fallbackReading) return fallbackReading;
 
     return null;
+  }
+
+  function rememberReading(reading, fallbackConversationId) {
+    if (!reading) return;
+
+    rememberContextUsageReading(reading, fallbackConversationId);
+    state.lastReading = reading;
   }
 
   function updateMeter() {
@@ -3672,9 +3557,9 @@
     const root = ensureRoot();
     state.uiConfig = readUiConfig();
     const contextCard = state.contextCard;
-    const value = state.value || root.querySelector(".ccm-value");
-    const fill = state.fill || root.querySelector(".ccm-fill");
-    const compressionZone = root.querySelector(".ccm-context-card .ccm-compression-zone");
+    const value = state.value;
+    const fill = state.fill;
+    const compressionZone = state.compressionZone;
     const reading = detectReading();
     const activeConversationId = state.activeConversationId || readActiveConversationId();
 
@@ -3703,7 +3588,7 @@
       return;
     }
 
-    state.lastReading = reading;
+    rememberReading(reading, activeConversationId);
 
     const leftPercent = clampPercent(100 - reading.percent);
     const showUsedInsteadOfLeft = shouldShowUsedInsteadOfLeft(state.uiConfig);
@@ -3717,17 +3602,8 @@
       reading.conversationId || activeConversationId || "__unknown__"
     );
 
-    if (readingConversationId && Number.isFinite(reading.used)) {
-      const previousUsed = state.lastAnimatedUsedByConversationId.get(readingConversationId);
-      if (Number.isFinite(previousUsed) && reading.used > previousUsed) {
-        const deltaTokens = reading.used - previousUsed;
-        if (shouldShowContextSpendEffect(readingConversationId, reading.used)) {
-          recordSpend("context", deltaTokens, readingConversationId);
-          showTokenSpendEffect(deltaTokens);
-        }
-      }
-      state.lastAnimatedUsedByConversationId.set(readingConversationId, reading.used);
-    }
+    recordContextUsageDelta(reading, readingConversationId, { showEffect: true });
+    sampleKnownConversationContextUsage(readingConversationId);
 
     const level = levelForLeftPercent(leftPercent, "context");
     const compressionWarning = shouldShowCompressionWarning(leftPercent) ? "true" : "false";
@@ -3754,7 +3630,7 @@
     if (contextCard.title !== title) contextCard.title = title;
     if (value.textContent !== text) value.textContent = text;
     if (fill.style.width !== width) fill.style.width = width;
-    const contextRing = contextCard.querySelector(".ccm-ring");
+    const contextRing = state.contextRing;
     if (contextRing) contextRing.style.setProperty("--ccm-ring-angle", `${displayPercent * 3.6}deg`);
     if (compressionZone && compressionZone.style.width !== compressionZoneWidth) {
       compressionZone.style.width = compressionZoneWidth;
@@ -3785,7 +3661,7 @@
     if (!conversationId) return;
 
     activateConversationId(conversationId, { pendingNavigation: true });
-    scheduleUpdate(CAPTURE_UPDATE_DELAY_MS);
+    scheduleUpdate(NAVIGATION_UPDATE_DELAY_MS);
   }
 
   function clearRetryUpdate() {
@@ -3802,6 +3678,26 @@
     }, SWITCH_RETRY_INTERVAL_MS);
   }
 
+  function restoreLegacyCaptureHooks() {
+    const captureState = window.__codexContextMeterCaptureState;
+    if (!captureState || typeof captureState !== "object") return;
+
+    if (captureState.nativeFetch && window.fetch !== captureState.nativeFetch) {
+      window.fetch = captureState.nativeFetch;
+    }
+    if (captureState.NativeWebSocket && window.WebSocket !== captureState.NativeWebSocket) {
+      window.WebSocket = captureState.NativeWebSocket;
+    }
+    if (captureState.messageListener) {
+      window.removeEventListener("message", captureState.messageListener, true);
+    }
+
+    delete window.__codexContextMeterCaptureState;
+    delete window.__codexContextMeterFetchPatched;
+    delete window.__codexContextMeterWebSocketPatched;
+    delete window.__codexContextMeterPostMessagePatched;
+  }
+
   function installObserver() {
     if (state.observer) return;
 
@@ -3812,7 +3708,7 @@
 
     state.observer = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
-      const target = mutation.target && mutation.target.nodeType === Node.ELEMENT_NODE
+        const target = mutation.target && mutation.target.nodeType === Node.ELEMENT_NODE
           ? mutation.target
           : mutation.target && mutation.target.parentElement;
         if (shouldIgnoreMutationTarget(target)) continue;
@@ -3871,19 +3767,11 @@
       const root = document.getElementById(ROOT_ID);
       if (root) root.remove();
 
+      const portal = document.getElementById(HISTORY_PORTAL_ID);
+      if (portal) portal.remove();
+
       const style = document.getElementById(STYLE_ID);
       if (style) style.remove();
-
-      const captureState = window[CAPTURE_STATE_KEY];
-      if (captureState && captureState.messageListener) {
-        window.removeEventListener("message", captureState.messageListener, true);
-        delete captureState.messageListener;
-      }
-      if (captureState) {
-        delete captureState.fetchVersion;
-        delete captureState.webSocketVersion;
-        delete captureState.messageVersion;
-      }
 
       delete window[INSTALL_KEY];
       delete window[API_KEY];
@@ -3894,20 +3782,20 @@
         lastReading: state.lastReading,
         cachedConversationIds: Array.from(state.readingsByConversationId.keys()),
         animatedConversationIds: Array.from(state.lastAnimatedUsedByConversationId.keys()),
+        backgroundSampledConversationIds: state.contextUsageBackgroundSampleConversationIds.slice(),
+        backgroundSampledAt: state.contextUsageBackgroundSampleAt,
         hasAppSignalScope: isAppSignalScope(state.appSignalScope),
         hasAppSignalModules: !!state.appSignalModules,
+        appSignalTokenUsageSelectorExport: state.appSignalTokenUsageSelectorExport,
         providerSummary: state.providerSummary,
       };
     },
   };
 
+  restoreLegacyCaptureHooks();
   installStyle();
-  installFetchCapture();
-  installWebSocketCapture();
-  installPostMessageCapture();
   installProviderSummaryListener();
   updateMeter();
   installObserver();
   state.timer = window.setInterval(updateMeter, UPDATE_INTERVAL_MS);
 })();
-

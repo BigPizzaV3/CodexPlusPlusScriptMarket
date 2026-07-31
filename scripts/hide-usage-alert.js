@@ -1,8 +1,32 @@
 (() => {
+  if (window.top && window.self && window.top !== window.self) return;
+
   const API_KEY = "__codexPlusHideUsageAlert";
   const STYLE_ID = "codex-plus-hide-usage-alert-style";
   const HIDDEN_ATTR = "data-codex-plus-hidden-usage-alert";
-  const SCRIPT_VERSION = "0.1.3";
+  const HIDDEN_KIND_ATTR = `${HIDDEN_ATTR}-kind`;
+  const HIDDEN_MARKER_SELECTOR = `[${HIDDEN_ATTR}], [${HIDDEN_KIND_ATTR}]`;
+  const SCRIPT_VERSION = "0.1.4";
+  const PROTECTED_SURFACE_SELECTOR = [
+    "[data-codex-composer-root]",
+    "[data-codex-composer]",
+    "[contenteditable]",
+    "textarea",
+    "input",
+    "form",
+  ].join(",");
+  const MESSAGE_CONTENT_SELECTOR = [
+    "[data-message-author-role]",
+    "[data-testid*='message' i]",
+    "[data-test-id*='message' i]",
+    "[data-thread-find-target]",
+    "article",
+  ].join(",");
+  const CANDIDATE_SELECTOR_GROUPS = [
+    "aside",
+    '[role="alert"],[role="status"],[aria-live]',
+    "header,section,div",
+  ];
 
   const previous = window[API_KEY];
   if (previous && typeof previous.destroy === "function") {
@@ -12,13 +36,14 @@
   const state = {
     observer: null,
     timer: 0,
-    hidden: new Set(),
+    readyHandler: null,
+    pendingRoots: new Set(),
     scans: 0,
     matches: 0,
   };
 
   const quotaBannerRe =
-    /(你的\s*Codex\s*消息限额已用尽|Codex\s*消息限额已用尽|message\s+limit|usage\s+limit|you['’]?re\s+out\s+of\s+Codex\s+messages|out\s+of\s+Codex\s+messages|你的\s*Codex\s*已用完|你的\s*Codex\s*消息\s*额度|你的\s*速率限制|速率限制\s*(?:将于|重置))/i;
+    /(你的\s*Codex\s*和工作使用额度已用完|你的\s*Codex\s*消息限额已用尽|Codex\s*消息限额已用尽|message\s+limit|usage\s+limit|you['’]?re\s+out\s+of\s+Codex\s+messages|out\s+of\s+Codex\s+messages|你的\s*Codex\s*已用完|你的\s*Codex\s*消息\s*额度|你的\s*速率限制|速率限制\s*(?:将于|重置))/i;
   const quotaResetRe =
     /(额度将于|继续使用\s*Codex|升级至\s*Plus|quota\s+will\s+reset|limit\s+will\s+reset|rate\s+limit\s+resets|resets?\s+on|continue\s+using\s+Codex|start\s+your\s+free\s+trial\s+of\s+Plus|upgrade\s+to\s+plus|速率限制|将于\s*\d|重置)/i;
   const usageCardRe =
@@ -30,9 +55,20 @@
     return String(value || "").replace(/\s+/g, " ").trim();
   }
 
+  function isElement(node) {
+    return !!node && node.nodeType === Node.ELEMENT_NODE;
+  }
+
   function candidateText(node) {
-    if (!node || node.nodeType !== Node.ELEMENT_NODE) return "";
-    return normalizeText(node.innerText || node.textContent || "");
+    if (!isElement(node)) return "";
+    return normalizeText(node.textContent || node.innerText || "");
+  }
+
+  function isProtectedSurface(node) {
+    return isElement(node) && (
+      node.matches(PROTECTED_SURFACE_SELECTOR) ||
+      !!node.querySelector(PROTECTED_SURFACE_SELECTOR)
+    );
   }
 
   function visibleBox(node) {
@@ -58,22 +94,19 @@
     return true;
   }
 
-  function insideConversationContent(node) {
-    return !!node.closest(
-      [
-        "[data-message-author-role]",
-        "[data-testid*='message' i]",
-        "[data-test-id*='message' i]",
-        "[data-thread-find-target]",
-        "article",
-      ].join(",")
+  function intersectsConversationContent(node) {
+    return isElement(node) && (
+      !!node.closest(MESSAGE_CONTENT_SELECTOR) ||
+      !!node.querySelector(MESSAGE_CONTENT_SELECTOR)
     );
   }
 
   function hasAction(node, text) {
+    const actions = Array.from(node.querySelectorAll("button, a, [role='button']")).slice(0, 8);
+    if (!actions.length) return false;
+
     const actionableText = normalizeText(
-      Array.from(node.querySelectorAll("button, a, [role='button']"))
-        .slice(0, 8)
+      actions
         .map((item) => item.innerText || item.textContent || item.getAttribute("aria-label") || "")
         .join(" ")
     );
@@ -82,62 +115,52 @@
   }
 
   function looksLikeQuotaBanner(node) {
-    if (insideConversationContent(node)) return false;
-    if (!bannerBox(node)) return false;
+    if (isProtectedSurface(node)) return false;
+    if (intersectsConversationContent(node)) return false;
     const text = candidateText(node);
     if (text.length < 20 || text.length > 420) return false;
     if (!quotaBannerRe.test(text)) return false;
     if (!quotaResetRe.test(text)) return false;
+    if (!hasAction(node, text)) return false;
 
-    return hasAction(node, text);
+    return bannerBox(node);
   }
 
   function looksLikeUsageCard(node) {
-    if (insideConversationContent(node)) return false;
-    if (!usageCardBox(node)) return false;
+    if (isProtectedSurface(node)) return false;
+    if (intersectsConversationContent(node)) return false;
     const text = candidateText(node);
     if (text.length < 20 || text.length > 260) return false;
     if (!usageCardRe.test(text)) return false;
     if (!/剩余\s*\d+%\s*使用量|remaining\s+\d+%\s+usage|usage\s+remaining/i.test(text)) return false;
+    if (!hasAction(node, text)) return false;
 
-    return hasAction(node, text);
-  }
-
-  function quotaBannerRoot(node) {
-    const parent = node.parentElement;
-    if (!parent || parent === document.body) return node;
-
-    const text = candidateText(parent);
-    if (text.length <= 420 && quotaBannerRe.test(text) && quotaResetRe.test(text) && bannerBox(parent)) {
-      return parent;
-    }
-
-    return node;
-  }
-
-  function usageCardRoot(node) {
-    if (node.getAttribute("role") === "status" && looksLikeUsageCard(node)) return node;
-
-    const status = node.closest('[role="status"]');
-    if (status && looksLikeUsageCard(status)) return status;
-
-    const childStatus = node.querySelector('[role="status"]');
-    if (childStatus && looksLikeUsageCard(childStatus)) return childStatus;
-
-    return node;
+    return usageCardBox(node);
   }
 
   function hideNode(node, kind) {
-    const root = kind === "usage-card" ? usageCardRoot(node) : quotaBannerRoot(node);
-    if (!root || root === document.body || root === document.documentElement) return;
-    root.setAttribute(HIDDEN_ATTR, "true");
-    root.setAttribute(`${HIDDEN_ATTR}-kind`, kind);
-    state.hidden.add(root);
+    if (!isElement(node) || node === document.body || node === document.documentElement) return false;
+    if (node.getAttribute(HIDDEN_ATTR) === "true") return false;
+    if (isProtectedSurface(node) || intersectsConversationContent(node)) return false;
+    node.setAttribute(HIDDEN_ATTR, "true");
+    node.setAttribute(HIDDEN_KIND_ATTR, kind);
     state.matches += 1;
+    return true;
+  }
+
+  function clearHiddenMarkers(root) {
+    const clear = (node) => {
+      node.removeAttribute(HIDDEN_ATTR);
+      node.removeAttribute(HIDDEN_KIND_ATTR);
+    };
+
+    if (isElement(root) && root.matches(HIDDEN_MARKER_SELECTOR)) clear(root);
+    for (const node of root.querySelectorAll(HIDDEN_MARKER_SELECTOR)) clear(node);
   }
 
   function installStyle() {
-    if (document.getElementById(STYLE_ID)) return;
+    if (!document.documentElement) return false;
+    if (document.getElementById(STYLE_ID)) return true;
 
     const style = document.createElement("style");
     style.id = STYLE_ID;
@@ -149,48 +172,121 @@
       }
     `;
     document.documentElement.appendChild(style);
+    return true;
   }
 
-  function scan() {
-    state.timer = 0;
-    state.scans += 1;
-    installStyle();
+  function collectCandidates(root) {
+    if (!isElement(root)) return [];
 
-    const root = document.body || document.documentElement;
-    if (!root) return;
-
-    const selectors = [
-      '[role="alert"]',
-      '[role="status"]',
-      '[aria-live]',
-      "header",
-      "section",
-      "aside",
-      "div",
-    ].join(",");
-
-    for (const node of root.querySelectorAll(selectors)) {
-      if (node.getAttribute(HIDDEN_ATTR) === "true") continue;
-      if (looksLikeQuotaBanner(node)) {
-        hideNode(node, "quota-banner");
-        continue;
+    const candidates = [];
+    const seen = new Set();
+    const add = (node) => {
+      if (!seen.has(node)) {
+        seen.add(node);
+        candidates.push(node);
       }
-      if (looksLikeUsageCard(node)) hideNode(node, "usage-card");
+    };
+
+    for (const selector of CANDIDATE_SELECTOR_GROUPS) {
+      const matches = Array.from(root.querySelectorAll(selector));
+      if (root.matches(selector)) matches.unshift(root);
+      for (let index = matches.length - 1; index >= 0; index -= 1) add(matches[index]);
+    }
+    return candidates;
+  }
+
+  function classifyCandidate(node) {
+    if (!isElement(node)) return false;
+    if (node.closest(`[${HIDDEN_ATTR}="true"]`)) return false;
+    if (node.querySelector(`[${HIDDEN_ATTR}="true"]`)) return false;
+
+    if (looksLikeQuotaBanner(node)) return hideNode(node, "quota-banner");
+    if (looksLikeUsageCard(node)) return hideNode(node, "usage-card");
+    return false;
+  }
+
+  function scanSubtree(root) {
+    if (!isElement(root)) return false;
+    state.scans += 1;
+    for (const node of collectCandidates(root)) classifyCandidate(node);
+    return true;
+  }
+
+  function scan(root = document.body || document.documentElement) {
+    if (!isElement(root)) return false;
+    installStyle();
+    return scanSubtree(root);
+  }
+
+  function isCandidate(node) {
+    return isElement(node) && CANDIDATE_SELECTOR_GROUPS.some((selector) => node.matches(selector));
+  }
+
+  function isMutationBoundary(node) {
+    if (!isElement(node)) return true;
+    if (node === document.body || node === document.documentElement) return true;
+    if (node.matches("[data-codex-composer-root]")) return true;
+    return node.matches(MESSAGE_CONTENT_SELECTOR);
+  }
+
+  function markedMutationRoot(root) {
+    for (let node = root; node; node = node.parentElement) {
+      const boundary = isMutationBoundary(node);
+      if (node.matches(HIDDEN_MARKER_SELECTOR) && (node === root || !boundary)) return node;
+      if (boundary) break;
+    }
+    return root;
+  }
+
+  function scanMutationRoot(root) {
+    if (!isElement(root) || root === document.documentElement) return;
+    const scanRoot = markedMutationRoot(root);
+    clearHiddenMarkers(scanRoot);
+    scanSubtree(scanRoot);
+    if (scanRoot === document.body || scanRoot.matches(MESSAGE_CONTENT_SELECTOR)) return;
+
+    for (let ancestor = scanRoot.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      if (isMutationBoundary(ancestor)) break;
+      if (isCandidate(ancestor)) classifyCandidate(ancestor);
     }
   }
 
-  function scheduleScan(delay = 80) {
-    if (state.timer) return;
-    state.timer = window.setTimeout(scan, delay);
+  function flushPendingRoots() {
+    state.timer = 0;
+    const roots = new Set(state.pendingRoots);
+    state.pendingRoots.clear();
+    if (!roots.size) return;
+
+    for (const root of roots) {
+      if (!document.documentElement?.contains(root)) continue;
+      let parent = root.parentElement;
+      while (parent && !roots.has(parent)) parent = parent.parentElement;
+      if (!parent) scanMutationRoot(root);
+    }
+  }
+
+  function queueRoot(root) {
+    if (!isElement(root) || root === document.documentElement) return;
+    state.pendingRoots.add(root);
+    if (!state.timer) state.timer = window.setTimeout(flushPendingRoots, 80);
   }
 
   function installObserver() {
     const root = document.body || document.documentElement;
-    if (!root) return false;
+    if (!isElement(root)) return false;
+    if (state.observer) return true;
 
     state.observer = new MutationObserver((mutations) => {
-      if (!mutations.some((mutation) => mutation.addedNodes.length || mutation.type === "characterData")) return;
-      scheduleScan();
+      for (const mutation of mutations) {
+        if (mutation.type === "characterData") {
+          queueRoot(mutation.target?.parentElement);
+          continue;
+        }
+        if (mutation.type !== "childList") continue;
+        for (const added of mutation.addedNodes || []) {
+          queueRoot(isElement(added) ? added : added.parentElement);
+        }
+      }
     });
     state.observer.observe(root, {
       childList: true,
@@ -200,15 +296,29 @@
     return true;
   }
 
+  function start() {
+    const root = document.body || document.documentElement;
+    if (!document.documentElement || !isElement(root)) return false;
+
+    installStyle();
+    scanSubtree(root);
+    installObserver();
+    return true;
+  }
+
   function destroy() {
+    const ownsRuntime = window[API_KEY]?.state === state;
     if (state.timer) window.clearTimeout(state.timer);
     state.timer = 0;
+    state.pendingRoots.clear();
     state.observer?.disconnect();
     state.observer = null;
-    for (const node of state.hidden) {
-      node.removeAttribute(HIDDEN_ATTR);
+    if (state.readyHandler) {
+      document.removeEventListener("DOMContentLoaded", state.readyHandler);
+      state.readyHandler = null;
     }
-    state.hidden.clear();
+    if (!ownsRuntime) return;
+    clearHiddenMarkers(document);
     document.getElementById(STYLE_ID)?.remove();
     if (window[API_KEY]?.version === SCRIPT_VERSION) {
       delete window[API_KEY];
@@ -222,12 +332,13 @@
     destroy,
   };
 
-  installStyle();
-  if (!installObserver()) {
-    document.addEventListener("DOMContentLoaded", () => {
-      installObserver();
-      scheduleScan(0);
-    }, { once: true });
+  if (!start()) {
+    state.readyHandler = () => {
+      const handler = state.readyHandler;
+      state.readyHandler = null;
+      if (handler) document.removeEventListener("DOMContentLoaded", handler);
+      start();
+    };
+    document.addEventListener("DOMContentLoaded", state.readyHandler, { once: true });
   }
-  scheduleScan(0);
 })();

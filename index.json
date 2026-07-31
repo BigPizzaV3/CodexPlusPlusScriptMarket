@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "updated_at": "2026-07-06T08:45:38.039Z",
+  "updated_at": "2026-07-16T08:27:07Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
       "name": "Codex Context Used Meter",
-      "description": "显示上下文用量",
-      "version": "33",
+      "description": "在 Codex App 对话界面显示当前会话上下文余量，并支持可选 Provider 余额、消耗动画、悬停历史图、inline/floating 显示和主题切换。",
+      "version": "101",
       "author": "Minghou-Lei",
       "tags": [
         "context",
@@ -14,15 +14,15 @@
         "ui",
         "meter"
       ],
-      "homepage": "",
-      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/05fe34fee3e4dfa17a471a7b329a9a9313d844bb/scripts/codex-context-used-meter.js",
-      "sha256": "f13df61c833b58048ba3f88b9013440e729dc7bc016dc578b7c6a708853344c0"
+      "homepage": "https://github.com/Minghou-Lei/codex-context-used-meter",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-context-used-meter.js",
+      "sha256": "d2a5efe42d88d9b706b8ca8799947d2bc31c1b608b30c2673ac36fa0050911ab"
     },
     {
       "id": "hide-usage-alert",
       "name": "Hide Usage Alert",
       "description": "隐藏额度提醒",
-      "version": "0.1.3",
+      "version": "0.1.4",
       "author": "0xTotoroX",
       "tags": [
         "usage",
@@ -32,7 +32,25 @@
       ],
       "homepage": "https://github.com/0xTotoroX/codex-hide-usage-alert",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/hide-usage-alert.js",
-      "sha256": "a120c224c9c7e1de25a3c2f0614fbd144842d75aa4569f9a40074da7795f74e5"
+      "sha256": "29fb7eb5b44cda3281ddcaed5174746c02b0a8b9de461c49774bb3746a3cda7b"
+    },
+    {
+      "id": "model-deck",
+      "name": "Model Deck",
+      "description": "悬停官方模型按钮打开模型矩阵，提供 Fast 切换和全局预设",
+      "version": "0.1.0",
+      "author": "0xTotoroX",
+      "tags": [
+        "codex",
+        "models",
+        "reasoning",
+        "fast",
+        "presets",
+        "ui"
+      ],
+      "homepage": "https://github.com/0xTotoroX/model-deck",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/model-deck.js",
+      "sha256": "6a085811d626bbe9ded8e73baf9fbaf719f30297e0ce58c35259a083a056ad2d"
     },
     {
       "id": "codex-token-usage",
@@ -55,7 +73,7 @@
       "id": "codex-daily-token-usage",
       "name": "Codex Daily Token Usage",
       "description": "每日 Token 统计，近 5 日滚动存储，自动复用已有采集，支持 Model 价格、成本估算、趋势明细和分享图",
-      "version": "1.4.7",
+      "version": "1.4.13",
       "author": "kts-kris",
       "tags": [
         "codex",
@@ -67,7 +85,7 @@
       ],
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-daily-token-usage.js",
-      "sha256": "660499e55ac2f4b6cafd32403a584d9a8b0b6d761c5e68d27d793611df4af3b7"
+      "sha256": "80f5efb88d1e2e0da5c22f229b65d08710460a7c258bdaea7b82a84071fb7576"
     },
     {
       "id": "codex-list-pagebuster",
@@ -106,7 +124,7 @@
       "id": "tux-toolbar-buddy",
       "name": "Tux Toolbar Buddy",
       "description": "把菜单入口轻量化为Tux工具栏按钮，隐藏状态点和版本信息。",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": "0xTotoroX",
       "tags": [
         "menu",
@@ -116,7 +134,7 @@
       ],
       "homepage": "https://github.com/0xTotoroX/tux-toolbar-buddy",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tux-toolbar-buddy.js",
-      "sha256": "8f353ca2bb4e47e10be8ad70497330b0e7c25fd77aa69c2f40ad81b7cf449db1"
+      "sha256": "6570fba293c751958b6cf7077b51458e1b126cf99c9168c321729316a7f0262b"
     },
     {
       "id": "bennett-ui-improvements",

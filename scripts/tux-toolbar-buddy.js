@@ -2,12 +2,12 @@
 @codex-plus-script
 name: Tux Toolbar Buddy
 description: Replace the heavy menu trigger with a compact Tux toolbar button and hide status/version clutter.
-version: 0.1.0
+version: 0.1.1
 author: 0xTotoroX
 */
 
 (() => {
-  const SCRIPT_VERSION = "0.1.0";
+  const SCRIPT_VERSION = "0.1.1";
   const STYLE_ID = "tux-toolbar-buddy-style";
   const API_KEY = "__tuxToolbarBuddy";
   const LEGACY_API_KEYS = ["__codexPlusLiteMenuEntry", "__codexPlusMenuEntryLite", "__codexPlusPenguinToolbarButton"];
@@ -55,6 +55,8 @@ author: 0xTotoroX
 
   let observer = null;
   let frame = 0;
+  let stepwiseNudged = false;
+  let stepwiseNudgeTimer = 0;
   const touchedButtons = new Map();
   const touchedIndicators = new Map();
 
@@ -214,8 +216,6 @@ author: 0xTotoroX
     const state = rememberButton(button);
     removeLegacyArtifacts(button);
     button.dataset.tuxToolbarBuddy = "true";
-    button.title = LABEL;
-    button.setAttribute("aria-label", LABEL);
 
     button
       .querySelectorAll(".codex-plus-backend-indicator, [data-codex-backend-indicator]")
@@ -233,21 +233,28 @@ author: 0xTotoroX
       glyph.dataset.tuxToolbarBuddyIconVersion = SCRIPT_VERSION;
     }
 
-    const label = state.label || button.querySelector("[data-codex-plus-trigger-label]");
-    if (label) {
-      if (label.textContent !== LABEL) label.textContent = LABEL;
-      return;
-    }
-
-    const textNode = state.textNode || Array.from(button.childNodes).find(
-      (node) => node.nodeType === Node.TEXT_NODE && String(node.textContent || "").includes(LABEL),
-    );
-    if (textNode && textNode.textContent !== LABEL) textNode.textContent = LABEL;
+    // Keep the core label text intact; Codex++ uses it as a version/state anchor.
+    // The CSS above hides the label visually, so the compact button still works.
   }
 
   function normalize() {
     ensureStyle();
     codexPlusButtons().forEach(normalizeButton);
+    nudgeStepwiseOnce();
+  }
+
+  function nudgeStepwiseOnce() {
+    if (stepwiseNudged) return;
+    stepwiseNudged = true;
+
+    let attempts = 0;
+    const tick = () => {
+      attempts += 1;
+      stepwiseNudgeTimer = 0;
+      window.__codexStepwisePanel?.scan?.();
+      if (attempts < 8) stepwiseNudgeTimer = window.setTimeout(tick, 500);
+    };
+    stepwiseNudgeTimer = window.setTimeout(tick, 1200);
   }
 
   function scheduleNormalize() {
@@ -263,7 +270,6 @@ author: 0xTotoroX
   observer.observe(document.documentElement, {
     subtree: true,
     childList: true,
-    characterData: true,
   });
 
   window[API_KEY] = {
@@ -271,9 +277,12 @@ author: 0xTotoroX
     normalize,
     dispose() {
       if (frame) cancelAnimationFrame(frame);
+      if (stepwiseNudgeTimer) window.clearTimeout(stepwiseNudgeTimer);
       observer?.disconnect();
       frame = 0;
+      stepwiseNudgeTimer = 0;
       observer = null;
+      stepwiseNudged = false;
 
       document.getElementById(STYLE_ID)?.remove();
 

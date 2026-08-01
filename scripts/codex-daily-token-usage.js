@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.13
+// @version      1.4.14
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.13";
+  const VERSION = "1.4.14";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -19,7 +19,7 @@
   const PANEL_ID = "codex-daily-token-usage-panel";
   const STYLE_ID = "codex-daily-token-usage-style";
   const CODEX_PLUS_MENU_ID = "codex-plus-menu";
-  const APP_HEADER_SELECTOR = ".app-header-tint";
+  const APP_HEADER_SELECTOR = '[class*="ApplicationMenuTopBar"], .app-header-tint';
   const APP_HEADER_SURFACE_SELECTOR = '[data-testid="app-shell-header-context-menu-surface"]';
   const HEADER_TOOLBAR_CLUSTER_SELECTOR = ".ms-auto.flex.shrink-0.items-center";
   const HEADER_TOOLBAR_CLASS_SELECTOR = '[class*="ms-auto"][class*="shrink-0"][class*="items-center"]';
@@ -3829,8 +3829,7 @@
   function findAppHeaderElement() {
     return (
       document.querySelector(APP_HEADER_SELECTOR) ||
-      document.querySelector(APP_HEADER_SURFACE_SELECTOR) ||
-      document.querySelector("header")
+      document.querySelector(APP_HEADER_SURFACE_SELECTOR)
     );
   }
 

@@ -21,7 +21,11 @@
   "use strict";
 
   const INSTALL_KEY = "__bennettUiImprovementsBigPizza";
-  const VERSION = "1.0.23-bigpizza.9";
+  const VERSION = "1.0.24-bigpizza.4";
+  const HISTORY_TARGET_STORAGE_KEY = "__codexListPagebusterTarget";
+  const HISTORY_TARGET_DEFAULT = 500;
+  const HISTORY_TARGET_MIN = 1;
+  const HISTORY_TARGET_MAX = 2000;
   const previous = window[INSTALL_KEY];
   if (previous && typeof previous.stop === "function") {
     try {
@@ -10387,6 +10391,13 @@ function switchControl(initial, onChange) {
     panel.innerHTML = settingsPanelHtml();
     panel.addEventListener("click", (event) => {
       const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      const historyLoad = target?.closest("[data-bennett-ui-history-load]");
+      if (historyLoad) {
+        event.preventDefault();
+        event.stopPropagation();
+        void loadHistoryFromSettings(panel);
+        return;
+      }
       const toggle = target?.closest("[data-bennett-ui-feature]");
       if (!toggle) return;
       event.preventDefault();
@@ -10410,6 +10421,17 @@ function switchControl(initial, onChange) {
           <div class="bennett-ui-settings-note">切换会尽量立即生效。如果 Codex DOM 变动导致残留，可重新加载用户脚本或重启 Codex++。</div>
         </div>
       </div>
+      <div class="codex-plus-row bennett-ui-history-row" data-bennett-ui-history-row="true">
+        <div class="bennett-ui-history-copy">
+          <div class="codex-plus-row-title">会话历史加载</div>
+          <div class="codex-plus-row-description">设置 Codex 原生近期会话缓存的加载数量。插件只负责取回会话 ID，侧边栏由 Codex 自己渲染和虚拟滚动。范围 ${HISTORY_TARGET_MIN}–${HISTORY_TARGET_MAX} 条。</div>
+          <div class="bennett-ui-feature-status" data-bennett-ui-history-status="true">尚未手动加载</div>
+        </div>
+        <div class="bennett-ui-history-controls">
+          <input type="number" min="${HISTORY_TARGET_MIN}" max="${HISTORY_TARGET_MAX}" step="50" value="${readHistoryTarget()}" inputmode="numeric" aria-label="保留会话个数" data-bennett-ui-history-limit="true">
+          <button type="button" class="bennett-ui-history-load" data-bennett-ui-history-load="true">手动加载会话</button>
+        </div>
+      </div>
       ${featureInfo.map((item) => `
         <div class="codex-plus-row bennett-ui-feature-row" data-bennett-ui-row="${escapeAttr(item.id)}">
           <div>
@@ -10421,6 +10443,66 @@ function switchControl(initial, onChange) {
         </div>
       `).join("")}
     `;
+  }
+
+  function normalizeHistoryTarget(value) {
+    const parsed = Number.parseInt(String(value ?? ""), 10);
+    if (!Number.isFinite(parsed)) return HISTORY_TARGET_DEFAULT;
+    return Math.max(HISTORY_TARGET_MIN, Math.min(HISTORY_TARGET_MAX, parsed));
+  }
+
+  function readHistoryTarget() {
+    try {
+      return normalizeHistoryTarget(localStorage.getItem(HISTORY_TARGET_STORAGE_KEY));
+    } catch {
+      return HISTORY_TARGET_DEFAULT;
+    }
+  }
+
+  function writeHistoryTarget(value) {
+    const target = normalizeHistoryTarget(value);
+    try {
+      localStorage.setItem(HISTORY_TARGET_STORAGE_KEY, String(target));
+    } catch {}
+    return target;
+  }
+
+  async function loadHistoryFromSettings(panel) {
+    const input = panel.querySelector("[data-bennett-ui-history-limit]");
+    const button = panel.querySelector("[data-bennett-ui-history-load]");
+    const status = panel.querySelector("[data-bennett-ui-history-status]");
+    if (!(input instanceof HTMLInputElement) || !(button instanceof HTMLButtonElement)) return;
+
+    const limit = writeHistoryTarget(input.value);
+    input.value = String(limit);
+    button.disabled = true;
+    button.dataset.loading = "true";
+    if (status) status.textContent = `正在请求 Codex 原生加载，最多 ${limit} 条会话…`;
+
+    try {
+      const pagebuster = window.__codexListPagebuster;
+      if (!pagebuster || typeof pagebuster.refresh !== "function") {
+        throw new Error("Codex List Pagebuster 未加载，请先在脚本市场安装并启用");
+      }
+      pagebuster.setLimit?.(limit);
+      const count = await pagebuster.refresh(limit);
+      pagebuster.render?.();
+      const info = pagebuster.status?.() || {};
+      const loaded = Number.isFinite(count) ? count : Number(info.snapshotThreads || 0);
+      if (info.lastSnapshotError) throw new Error(info.lastSnapshotError);
+      if (status) {
+        const cached = Number(info.nativeCachedThreads || info.nativeIdsRequested || loaded);
+        const missing = Number(info.nativeMissingThreads || 0);
+        status.textContent = missing > 0
+          ? `Codex 原生缓存已加载 ${cached} 条，仍有 ${missing} 条未能读取；当前窗口由系统虚拟渲染 ${Number(info.nativeThreads || 0)} 个节点。`
+          : `Codex 原生缓存已完整加载 ${cached} 条；当前窗口由系统虚拟渲染 ${Number(info.nativeThreads || 0)} 个节点。`;
+      }
+    } catch (error) {
+      if (status) status.textContent = `加载失败：${error?.message || String(error)}`;
+    } finally {
+      button.disabled = false;
+      delete button.dataset.loading;
+    }
   }
 
   function refreshSettingsPanel() {
@@ -10435,19 +10517,24 @@ function switchControl(initial, onChange) {
   }
 
   function ensureSettingsStyle() {
-    if (document.getElementById("bennett-ui-settings-style")) return;
-    const style = document.createElement("style");
-    style.id = "bennett-ui-settings-style";
+    let style = document.getElementById("bennett-ui-settings-style");
+    if (!style) {
+      style = document.createElement("style");
+      style.id = "bennett-ui-settings-style";
+      document.head.appendChild(style);
+    }
     style.textContent = `
       .bennett-ui-settings-note,
       .bennett-ui-feature-status {
         margin-top: 6px;
-        color: var(--text-secondary, var(--color-token-text-secondary, #8b8b8b));
+        color: inherit;
+        opacity: .68;
         font-size: 12px;
         line-height: 1.35;
       }
       .bennett-ui-feature-row[data-enabled="true"] .bennett-ui-feature-status {
-        color: var(--text-primary, var(--color-token-text-primary, #f5f5f5));
+        color: inherit;
+        opacity: .9;
       }
       .bennett-ui-toggle[disabled] {
         cursor: not-allowed;
@@ -10456,8 +10543,58 @@ function switchControl(initial, onChange) {
       .bennett-ui-toggle[data-enabled="true"] span {
         transform: translateX(14px);
       }
+      .bennett-ui-history-row {
+        align-items: center;
+        gap: 16px;
+      }
+      .bennett-ui-history-copy {
+        min-width: 0;
+      }
+      .bennett-ui-history-controls {
+        display: flex;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 8px;
+      }
+      .bennett-ui-history-controls input {
+        width: 92px;
+        border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+        border-radius: 7px;
+        background: color-mix(in srgb, currentColor 9%, transparent);
+        color: inherit;
+        caret-color: currentColor;
+        color-scheme: dark;
+        padding: 6px 8px;
+        font: inherit;
+      }
+      .bennett-ui-history-load {
+        border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+        border-radius: 7px;
+        background: color-mix(in srgb, currentColor 12%, transparent);
+        color: inherit;
+        padding: 6px 10px;
+        font: inherit;
+        cursor: pointer;
+      }
+      .bennett-ui-history-load:hover:not(:disabled) {
+        background: color-mix(in srgb, currentColor 18%, transparent);
+      }
+      .bennett-ui-history-load:disabled {
+        cursor: wait;
+        opacity: .6;
+      }
+      @media (max-width: 720px) {
+        .bennett-ui-history-row,
+        .bennett-ui-history-controls {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        .bennett-ui-history-controls input {
+          width: 100%;
+          box-sizing: border-box;
+        }
+      }
     `;
-    document.head.appendChild(style);
   }
 
   function escapeHtmlLocal(value) {

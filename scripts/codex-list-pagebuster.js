@@ -1,23 +1,26 @@
 (() => {
-  const TARGET = 1000;
+  const DEFAULT_TARGET = 500;
+  const MIN_TARGET = 1;
+  const MAX_TARGET = 2000;
   const CLI_PAGE_SIZE = 100;
-  const CLI_MAX_PAGES = 20;
+  const CLI_MAX_PAGES = Math.ceil(MAX_TARGET / CLI_PAGE_SIZE);
+  const NATIVE_HYDRATE_BATCH_SIZE = 10;
+  const NATIVE_MANAGER_SCAN_LIMIT = 150000;
   const SCRIPT_KEY = "__codexListPagebuster";
   const STORAGE_KEY = "__codexListPagebusterThreads";
   const STORAGE_VERSION_KEY = "__codexListPagebusterStorageVersion";
   const STORAGE_VERSION = "2026-06-01-global-history-v4";
+  const TARGET_STORAGE_KEY = "__codexListPagebusterTarget";
   const PROJECT_LIST_SELECTOR = "[data-app-action-sidebar-project-list-id]";
   const THREAD_SELECTOR = "[data-app-action-sidebar-thread-id]";
   const SUPPLEMENT_SELECTOR = "[data-clpb-history-section]";
   const MANAGED_ROW_SELECTOR = "[data-clpb-managed-row]";
   const PROJECT_SUPPLEMENT_ITEM_SELECTOR = "[data-clpb-project-supplemental-item]";
   const EXPAND_TEXT = /^(?:\u5c55\u5f00\u663e\u793a|\u663e\u793a\u66f4\u591a|Show more|Show all)$/i;
-  const KEYWORDS = /(?:thread|threads|session|sessions|history|recent|conversation|project)/i;
-  const LIMIT_KEYS = ["limit", "pageSize", "page_size", "first", "take", "perPage", "per_page", "count", "max", "size", "n"];
   const ARCHIVED_IDS_KEY = "__codexListPagebusterArchivedIds";
   const HIDDEN_IDS_KEY = "__codexListPagebusterHiddenIds";
   const GLOBAL_EXTRA_HISTORY = true;
-  const SIGNALS_MODULE_RE = /(?:\.\/)?assets\/app-server-manager-signals-[A-Za-z0-9_-]+\.js/g;
+  const SIGNALS_MODULE_RE = /(?:\.\/)?(?:assets\/)?(?:app-server-manager-signals|app-initial)-[A-Za-z0-9_-]+\.js/g;
   const SIGNALS_MODULE_FALLBACKS = [
     "./assets/app-server-manager-signals-Csopz8aM.js",
     "./assets/app-server-manager-signals-zAr_ejg8.js"
@@ -28,8 +31,6 @@
   }
 
   const state = {
-    observer: null,
-    timers: new Set(),
     clicked: new WeakSet(),
     scheduled: false,
     autoExpandEnabled: true,
@@ -37,112 +38,49 @@
     projectClickListener: null,
     autoExpandDeadlineMs: Date.now() + 8000,
     lastProjectRoots: new Set(),
-    fetchPatched: false,
-    xhrPatched: false,
-    supplementIds: "",
-    promoteInFlight: false,
-    promotedKey: "",
     internalActionModulePromise: null,
     snapshotRefreshInFlight: false,
     lastSnapshotRefreshAt: 0,
-    originalFetch: window.fetch,
-    originalXhrOpen: XMLHttpRequest.prototype.open,
-    originalXhrSend: XMLHttpRequest.prototype.send
+    lastSnapshotError: "",
+    nativeIdsRequested: 0,
+    nativeCachedThreads: 0,
+    nativeSummaryThreads: 0,
+    nativeMissingThreads: 0,
+    nativeManager: null,
+    nativeManagerPromise: null,
+    nativeRuntimeSettings: null,
+    nativeOriginalHistoryLimit: null,
+    nativeHistoryLimitGetter: null,
+    nativeHistoryLimit: DEFAULT_TARGET,
+    lastNativeLoadError: ""
   };
+
+  function normalizeTarget(value, fallback = DEFAULT_TARGET) {
+    const parsed = Number.parseInt(String(value ?? ""), 10);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(MIN_TARGET, Math.min(MAX_TARGET, parsed));
+  }
+
+  function readTarget() {
+    try {
+      return normalizeTarget(localStorage.getItem(TARGET_STORAGE_KEY));
+    } catch {
+      return DEFAULT_TARGET;
+    }
+  }
+
+  function writeTarget(value) {
+    const target = normalizeTarget(value);
+    try {
+      localStorage.setItem(TARGET_STORAGE_KEY, String(target));
+    } catch {}
+    return target;
+  }
 
   function log(...args) {
     try {
       console.info("[clpb]", ...args);
     } catch {}
-  }
-
-  function setManagedTimeout(fn, ms) {
-    const timer = window.setTimeout(() => {
-      state.timers.delete(timer);
-      fn();
-    }, ms);
-    state.timers.add(timer);
-  }
-
-  function rewriteUrl(raw) {
-    try {
-      const url = new URL(raw, window.location.href);
-      let changed = false;
-      for (const key of LIMIT_KEYS) {
-        if (!url.searchParams.has(key)) continue;
-        const value = Number.parseInt(url.searchParams.get(key) || "", 10);
-        if (Number.isFinite(value) && value > 0 && value <= 50) {
-          url.searchParams.set(key, String(TARGET));
-          changed = true;
-        }
-      }
-      return changed ? url.toString() : raw;
-    } catch {
-      return raw;
-    }
-  }
-
-  function rewriteBody(body) {
-    if (typeof body !== "string" || !body) return body;
-    let next = body;
-    for (const key of LIMIT_KEYS) {
-      const re = new RegExp(`(["']?${key}["']?\\s*[:=]\\s*)(\\d+)`, "gi");
-      next = next.replace(re, (match, prefix, value) => {
-        const n = Number.parseInt(value, 10);
-        return Number.isFinite(n) && n > 0 && n <= 50 ? `${prefix}${TARGET}` : match;
-      });
-    }
-    return next;
-  }
-
-  function patchRequests() {
-    if (!state.fetchPatched && typeof window.fetch === "function") {
-      const originalFetch = state.originalFetch.bind(window);
-      window.fetch = function patchedFetch(input, init) {
-        try {
-          const url = typeof input === "string" ? input : input?.url;
-          if (typeof url === "string" && KEYWORDS.test(url)) {
-            const next = rewriteUrl(url);
-            if (next !== url) log("fetch url", url, "->", next);
-            if (typeof input === "string") {
-              input = next;
-            } else if (input instanceof Request && next !== url) {
-              input = new Request(next, input);
-            }
-            if (init && typeof init.body === "string") {
-              const nextBody = rewriteBody(init.body);
-              if (nextBody !== init.body) log("fetch body patched");
-              init = { ...init, body: nextBody };
-            }
-          }
-        } catch (error) {
-          log("fetch patch error", String(error));
-        }
-        return originalFetch(input, init);
-      };
-      state.fetchPatched = true;
-    }
-
-    if (!state.xhrPatched) {
-      XMLHttpRequest.prototype.open = function patchedOpen(method, url, ...rest) {
-        const next = KEYWORDS.test(String(url)) ? rewriteUrl(String(url)) : url;
-        if (next !== url) log("xhr url", url, "->", next);
-        return state.originalXhrOpen.call(this, method, next, ...rest);
-      };
-      XMLHttpRequest.prototype.send = function patchedSend(body) {
-        try {
-          if (typeof body === "string") {
-            const nextBody = rewriteBody(body);
-            if (nextBody !== body) log("xhr body patched");
-            body = nextBody;
-          }
-        } catch (error) {
-          log("xhr patch error", String(error));
-        }
-        return state.originalXhrSend.call(this, body);
-      };
-      state.xhrPatched = true;
-    }
   }
 
   function isExpandButton(button) {
@@ -276,7 +214,6 @@
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(HIDDEN_IDS_KEY);
       localStorage.setItem(STORAGE_VERSION_KEY, STORAGE_VERSION);
-      state.supplementIds = "";
       log("global history storage migrated", {
         previousVersion: version || "(none)",
         version: STORAGE_VERSION
@@ -293,7 +230,6 @@
     const next = threads.filter((thread) => !removeSet.has(threadRawId(thread)));
     if (next.length === threads.length) return 0;
     writeSnapshotThreads(next);
-    state.supplementIds = "";
     return threads.length - next.length;
   }
 
@@ -461,7 +397,7 @@
   }
 
   function findInternalRequestHelper(mod) {
-    const preferred = ["ts", "It", "ln"];
+    const preferred = ["oht", "ts", "It", "ln"];
     for (const key of preferred) {
       const value = mod?.[key];
       if (typeof value !== "function") continue;
@@ -487,7 +423,11 @@
     if (!path) return "";
     if (/^https?:|^app:|^file:/i.test(path)) return path;
     const relative = path.replace(/^\.\//, "");
-    return relative.startsWith("assets/") ? `./${relative}` : "";
+    if (relative.startsWith("assets/")) return `./${relative}`;
+    if (/^(?:app-server-manager-signals|app-initial)-[A-Za-z0-9_-]+\.js$/.test(relative)) {
+      return `./assets/${relative}`;
+    }
+    return "";
   }
 
   function collectSignalsModuleCandidatesFromText(text) {
@@ -516,7 +456,7 @@
     try {
       for (const entry of performance.getEntriesByType("resource")) {
         const name = String(entry.name || "");
-        if (name.includes("app-server-manager-signals-")) add(name);
+        if (/(?:app-server-manager-signals|app-initial)-/.test(name)) add(name);
       }
     } catch {}
 
@@ -627,26 +567,20 @@
     };
   }
 
-  function mergeSnapshotThreads(nextThreads) {
+  function mergeSnapshotThreads(nextThreads, limit = readTarget()) {
     const archivedIds = readArchivedIds();
     const hiddenIds = readHiddenIds();
     const byId = new Map();
-    for (const thread of readSnapshotThreads()) {
-      const rawId = threadRawId(thread);
-      if (!archivedIds.has(rawId) && !hiddenIds.has(rawId)) byId.set(rawId, thread);
-    }
     for (const thread of nextThreads) {
       const normalized = normalizeListedThread(thread);
       if (!normalized) continue;
       const rawId = threadRawId(normalized);
       if (archivedIds.has(rawId) || hiddenIds.has(rawId)) continue;
-      const existing = byId.get(normalized.id);
-      byId.set(normalized.id, {
-        ...existing,
-        ...normalized
-      });
+      byId.set(normalized.id, normalized);
     }
-    const merged = Array.from(byId.values()).filter((thread) => threadRawId(thread));
+    const merged = Array.from(byId.values())
+      .filter((thread) => threadRawId(thread))
+      .slice(0, normalizeTarget(limit));
     writeSnapshotThreads(merged);
     return merged.length;
   }
@@ -697,7 +631,7 @@
     return threads;
   }
 
-  async function listThreadsFromCli({ archived, limit = TARGET }) {
+  async function listThreadsFromCli({ archived, limit = readTarget() }) {
     if (!GLOBAL_EXTRA_HISTORY) {
       return listThreadsFromCliVariant({ archived, limit, global: false });
     }
@@ -709,33 +643,205 @@
     }
   }
 
-  async function refreshSnapshotFromCli(force = false) {
+  async function findNativeConversationManager() {
+    if (state.nativeManager) return state.nativeManager;
+    if (state.nativeManagerPromise) return state.nativeManagerPromise;
+
+    state.nativeManagerPromise = (async () => {
+      const root = document.getElementById("root");
+      const containerKey = root && Object.getOwnPropertyNames(root)
+        .find((key) => key.startsWith("__reactContainer$"));
+      if (!root || !containerKey) return null;
+
+      const queue = [root[containerKey]];
+      const seen = new WeakSet();
+      let index = 0;
+      let visited = 0;
+
+      while (index < queue.length && visited < NATIVE_MANAGER_SCAN_LIMIT) {
+        const value = queue[index++];
+        if (!value || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) continue;
+        seen.add(value);
+        visited += 1;
+
+        try {
+          if (
+            value.threadStore
+            && typeof value.refreshRecentConversations === "function"
+            && typeof value.getThreadSummaries === "function"
+            && typeof value.getConversation === "function"
+          ) {
+            state.nativeManager = value;
+            log("native conversation manager found", { visited, hostId: value.getHostId?.() || "local" });
+            return value;
+          }
+        } catch {}
+
+        let children = [];
+        try {
+          if (value instanceof Map) {
+            children = [...value.keys(), ...value.values()];
+          } else if (value instanceof Set) {
+            children = [...value.values()];
+          } else {
+            const keys = Object.getOwnPropertyNames(value);
+            if (keys.length <= 300) {
+              for (const key of keys) {
+                if (["ownerDocument", "parentNode", "parentElement", "previousSibling", "nextSibling", "defaultView", "window", "document"].includes(key)) continue;
+                let child;
+                try {
+                  child = value[key];
+                } catch {
+                  continue;
+                }
+                if (child && (typeof child === "object" || typeof child === "function")) children.push(child);
+              }
+            }
+          }
+        } catch {}
+
+        for (const child of children) {
+          if (!seen.has(child)) queue.push(child);
+        }
+        if (visited % 3000 === 0) {
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
+        }
+      }
+
+      log("native conversation manager not found", { visited });
+      return null;
+    })();
+
+    const manager = await state.nativeManagerPromise;
+    if (!manager) state.nativeManagerPromise = null;
+    return manager;
+  }
+
+  function configureNativeHistoryLimit(manager, limit) {
+    const runtimeSettings = manager?.runtimeSettings;
+    if (!runtimeSettings || typeof runtimeSettings.getRecentConversationDiscoveryLimit !== "function") return;
+    state.nativeHistoryLimit = normalizeTarget(limit);
+    if (!state.nativeRuntimeSettings) {
+      state.nativeRuntimeSettings = runtimeSettings;
+      state.nativeOriginalHistoryLimit = runtimeSettings.getRecentConversationDiscoveryLimit;
+      state.nativeHistoryLimitGetter = () => state.nativeHistoryLimit;
+    }
+    runtimeSettings.getRecentConversationDiscoveryLimit = state.nativeHistoryLimitGetter;
+  }
+
+  async function loadThroughNativeManager(manager, conversationIds, limit) {
+    configureNativeHistoryLimit(manager, limit);
+    try {
+      await manager.refreshRecentConversations({ mode: "expanded", sortKey: "updated_at" });
+    } catch (error) {
+      log("native expanded refresh failed; continuing with hydration", String(error));
+    }
+
+    const target = normalizeTarget(limit);
+    const summaryIds = (manager.getThreadSummaries?.() || [])
+      .map((thread) => String(thread?.conversationId || ""))
+      .filter(Boolean);
+    const desiredIds = [...new Set([...summaryIds, ...conversationIds])].slice(0, target);
+    state.nativeSummaryThreads = summaryIds.length;
+    state.nativeIdsRequested = desiredIds.length;
+
+    const missingBefore = desiredIds.filter((id) => manager.getConversation(id) == null);
+    const failedIds = new Set();
+    for (let index = 0; index < missingBefore.length; index += NATIVE_HYDRATE_BATCH_SIZE) {
+      const batch = missingBefore.slice(index, index + NATIVE_HYDRATE_BATCH_SIZE);
+      try {
+        await manager.hydrateBackgroundThreads(batch);
+      } catch {
+        for (const id of batch) {
+          try {
+            await manager.hydrateBackgroundThreads([id]);
+          } catch {
+            failedIds.add(id);
+          }
+        }
+      }
+    }
+
+    const availableIds = desiredIds.filter((id) => manager.getConversation(id) != null);
+    const threadStore = manager.threadStore;
+    threadStore.recentConversationIds = availableIds;
+    threadStore.notifyAnyConversationCallbacks?.({ forceAny: true, forceMeta: true });
+
+    state.nativeCachedThreads = availableIds.length;
+    state.nativeMissingThreads = desiredIds.length - availableIds.length;
+    if (state.nativeMissingThreads > 0) {
+      state.lastNativeLoadError = `${state.nativeMissingThreads} conversation(s) could not be hydrated`;
+      log("native hydration incomplete", {
+        desired: desiredIds.length,
+        available: availableIds.length,
+        failed: failedIds.size
+      });
+    }
+    return availableIds.length;
+  }
+
+  async function loadNativeRecentHistory(threads, limit) {
+    const conversationIds = threads
+      .map(threadRawId)
+      .filter(Boolean)
+      .slice(0, normalizeTarget(limit));
+    state.nativeIdsRequested = conversationIds.length;
+    state.lastNativeLoadError = "";
+    if (conversationIds.length === 0) return 0;
+
+    try {
+      const manager = await findNativeConversationManager();
+      if (manager) return await loadThroughNativeManager(manager, conversationIds, limit);
+
+      const loadedIds = await callInternalAction("load-recent-conversation-ids-for-host", {
+        hostId: "local",
+        conversationIds
+      });
+      state.nativeCachedThreads = Array.isArray(loadedIds) ? loadedIds.length : conversationIds.length;
+      state.nativeMissingThreads = Math.max(0, conversationIds.length - state.nativeCachedThreads);
+      return state.nativeCachedThreads;
+    } catch (error) {
+      state.lastNativeLoadError = String(error);
+      log("native recent id load failed", state.lastNativeLoadError);
+      throw error;
+    }
+  }
+
+  async function refreshSnapshotFromCli(force = false, requestedLimit = readTarget()) {
     const now = Date.now();
     if (state.snapshotRefreshInFlight) return;
     if (!force && now - state.lastSnapshotRefreshAt < 30000) return;
     state.snapshotRefreshInFlight = true;
     state.lastSnapshotRefreshAt = now;
+    state.lastSnapshotError = "";
+    const limit = normalizeTarget(requestedLimit);
     try {
       const [threads, archivedThreads] = await Promise.all([
-        listThreadsFromCli({ archived: false }),
-        listThreadsFromCli({ archived: true })
+        listThreadsFromCli({ archived: false, limit }),
+        listThreadsFromCli({ archived: true, limit })
       ]);
       const archivedIds = rememberArchivedIds(archivedThreads.map(threadRawId));
       const hiddenIds = rememberHiddenIds(threads.filter(shouldHideThread).map(threadRawId));
       const idsToRemove = new Set([...archivedIds, ...hiddenIds]);
       const removedArchived = pruneSnapshotThreads(idsToRemove);
-      const count = mergeSnapshotThreads(threads);
+      const count = mergeSnapshotThreads(threads, limit);
+      const nativeRequested = await loadNativeRecentHistory(threads, limit);
       log("snapshot refreshed", {
+        limit,
         fetched: threads.length,
         archived: archivedThreads.length,
         hidden: hiddenIds.size,
         removedArchived,
-        snapshot: count
+        snapshot: count,
+        nativeRequested
       });
-      state.supplementIds = "";
-      scheduleExpand("snapshot-refresh");
+      renderSupplementalHistory();
+      return count;
     } catch (error) {
-      log("snapshot refresh failed", String(error));
+      state.lastSnapshotError = String(error);
+      log("snapshot refresh failed", state.lastSnapshotError);
+      if (force) throw error;
+      return null;
     } finally {
       state.snapshotRefreshInFlight = false;
     }
@@ -766,49 +872,8 @@
       return false;
     }
     const thread = normalizeListedThread(rawThread);
-    if (thread) mergeSnapshotThreads([thread]);
+    if (thread) mergeSnapshotThreads([...readSnapshotThreads(), thread]);
     return true;
-  }
-
-  async function promoteMissingToNative(missing) {
-    const ids = Array.from(new Set(missing.map(threadRawId).filter(Boolean)));
-    if (ids.length === 0 || state.promoteInFlight) return;
-    const key = ids.join("|");
-    if (key === state.promotedKey) return;
-    state.promoteInFlight = true;
-    state.promotedKey = key;
-    try {
-      const results = await Promise.all(
-        ids.map(async (id) => {
-          try {
-            return (await loadThreadIntoNativeCache(id)) ? id : null;
-          } catch {
-            return null;
-          }
-        })
-      );
-      const foundSet = new Set(results.filter(Boolean));
-      const staleIds = ids.filter((id) => !foundSet.has(id));
-      if (staleIds.length > 0) {
-        const removed = pruneSnapshotThreads(staleIds);
-        if (removed > 0) {
-          log("stale snapshot pruned", {
-            removed,
-            stale: staleIds.length
-          });
-        }
-      }
-      log("thread metadata check", {
-        requested: ids.length,
-        found: foundSet.size
-      });
-      setManagedTimeout(() => scheduleExpand("metadata-check"), 250);
-    } catch (error) {
-      state.promotedKey = "";
-      log("thread metadata check failed", String(error));
-    } finally {
-      state.promoteInFlight = false;
-    }
   }
 
   function findNativeThreadRow(localId) {
@@ -923,171 +988,13 @@
     }
   }
 
-  function makeSupplementalRow(thread, options = {}) {
-    const threadId = threadDomId(thread);
-    const titleText = thread.title || "Untitled thread";
-
-    const item = document.createElement("div");
-    item.className = "after:block after:h-px after:content-[''] last:after:hidden";
-    item.setAttribute("role", "listitem");
-    item.setAttribute("data-clpb-supplemental-item", "");
-    if (options.project) item.setAttribute("data-clpb-project-supplemental-item", "");
-
-    const row = document.createElement("div");
-    row.className = "group relative min-h-token-nav-row cursor-interaction rounded-lg px-row-x py-row-y text-sm hover:bg-token-list-hover-background focus-visible:outline-offset-[-2px]";
-    row.setAttribute("data-app-action-sidebar-thread-host-id", "local");
-    row.setAttribute("data-app-action-sidebar-thread-id", threadId);
-    row.setAttribute("data-app-action-sidebar-thread-kind", "local");
-    row.setAttribute("data-app-action-sidebar-thread-pinned", "false");
-    row.setAttribute("data-app-action-sidebar-thread-row", "");
-    row.setAttribute("data-app-action-sidebar-thread-title", titleText);
-    row.setAttribute("data-clpb-supplemental-row", "true");
-    row.setAttribute("data-clpb-managed-row", "true");
-    row.setAttribute("role", "button");
-    row.setAttribute("tabindex", "0");
-    row.setAttribute("data-state", "closed");
-    row.title = `${titleText}\n${normalizeCwd(thread.cwd)}`;
-
-    const title = document.createElement("div");
-    title.className = "min-w-0 truncate text-token-text-primary";
-    title.textContent = titleText;
-
-    const project = document.createElement("div");
-    project.className = "min-w-0 truncate text-xs text-token-text-tertiary";
-    project.textContent = basename(thread.cwd);
-
-    row.append(title, project);
-    row.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openThread(thread);
-    });
-    row.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      event.stopPropagation();
-      openThread(thread);
-    });
-
-    item.appendChild(row);
-    return item;
-  }
-
-  function getProjectThreadList(projectList) {
-    return projectList.querySelector('[role="list"]') || projectList.querySelector(".flex.flex-col") || projectList;
-  }
-
-  function projectHasCollapsedThreads(projectList) {
-    return Array.from(projectList.querySelectorAll("button")).some(isExpandButton);
-  }
-
-  function renderProjectSupplementalHistory(threads, nativeIds) {
-    document.querySelectorAll(PROJECT_SUPPLEMENT_ITEM_SELECTOR).forEach((item) => item.remove());
-
-    const sidebarProjectIds = new Set();
-    for (const row of document.querySelectorAll("[data-app-action-sidebar-project-id]")) {
-      const value = normalizePathForCompare(row.getAttribute("data-app-action-sidebar-project-id"));
-      if (value) sidebarProjectIds.add(value);
-    }
-
-    let rendered = 0;
-    const seen = new Set();
-    for (const projectList of document.querySelectorAll(PROJECT_LIST_SELECTOR)) {
-      const root = normalizePathForCompare(projectList.getAttribute("data-app-action-sidebar-project-list-id"));
-      if (!root) continue;
-      if (projectHasCollapsedThreads(projectList)) continue;
-
-      const nestedProjects = [];
-      for (const pid of sidebarProjectIds) {
-        if (pid !== root && pid.startsWith(`${root}/`)) {
-          nestedProjects.push(pid);
-        }
-      }
-
-      const list = getProjectThreadList(projectList);
-      const matches = threads.filter((thread) => {
-        const id = threadDomId(thread);
-        if (nativeIds.has(id) || seen.has(id)) return false;
-        if (!threadHasVisibleProject(thread, new Set([root]))) return false;
-        const cwd = normalizePathForCompare(thread?.cwd);
-        for (const nested of nestedProjects) {
-          if (cwd === nested || cwd.startsWith(`${nested}/`)) return false;
-        }
-        return true;
-      });
-      for (const thread of matches) {
-        seen.add(threadDomId(thread));
-        list.appendChild(makeSupplementalRow(thread, { project: true }));
-        rendered += 1;
-      }
-    }
-
-    if (rendered > 0) {
-      log("project supplement rendered", { rendered });
-    }
-    return seen;
-  }
-
   function countExpandButtons() {
     return Array.from(document.querySelectorAll(`${PROJECT_LIST_SELECTOR} button`)).filter(isExpandButton).length;
   }
 
   function renderSupplementalHistory() {
-    const scroll = document.querySelector("[data-app-action-sidebar-scroll]");
-    if (!scroll) return;
-
-    const threads = readSnapshotThreads();
-    const nativeIds = collectNativeThreadIds();
-    const projectRoots = collectVisibleProjectRoots();
-    const missingNative = threads.filter((thread) => !nativeIds.has(threadDomId(thread)));
-    const projectSupplementIds = renderProjectSupplementalHistory(missingNative, nativeIds);
-    const sidebarBasenames = collectSidebarProjectBasenames();
-    const missing = missingNative.filter((thread) => {
-      if (projectSupplementIds.has(threadDomId(thread))) return false;
-      if (threadHasVisibleProject(thread, projectRoots)) return false;
-      if (sidebarBasenames.size > 0) {
-        const cwdParts = normalizePathForCompare(thread.cwd).split("/").filter(Boolean);
-        if (cwdParts.some((part) => sidebarBasenames.has(part))) return false;
-      }
-      return true;
-    });
-    const nextIds = missing.map((thread) => threadDomId(thread)).join("|");
-    const existing = document.querySelector(SUPPLEMENT_SELECTOR);
-
-    promoteMissingToNative(missingNative);
-
-    if (missing.length === 0) {
-      existing?.remove();
-      state.supplementIds = "";
-      return;
-    }
-    if (existing && state.supplementIds === nextIds) return;
-
-    existing?.remove();
-    state.supplementIds = nextIds;
-
-    const section = document.createElement("div");
-    section.className = "px-row-x";
-    section.setAttribute("data-app-action-sidebar-section", "");
-    section.setAttribute("data-clpb-history-section", "");
-
-    const heading = document.createElement("div");
-    heading.className = "flex h-8 items-center px-2 text-xs font-semibold uppercase text-token-text-tertiary";
-    heading.textContent = `Extra history (${missing.length})`;
-
-    const list = document.createElement("div");
-    list.className = "flex flex-col gap-px";
-    list.setAttribute("role", "list");
-    list.setAttribute("aria-label", "Extra history");
-    missing.forEach((thread) => list.appendChild(makeSupplementalRow(thread)));
-
-    section.append(heading, list);
-    scroll.appendChild(section);
-    log("supplement rendered", {
-      missing: missing.length,
-      snapshot: threads.length,
-      native: nativeIds.size
-    });
+    document.querySelectorAll(SUPPLEMENT_SELECTOR).forEach((section) => section.remove());
+    document.querySelectorAll(PROJECT_SUPPLEMENT_ITEM_SELECTOR).forEach((item) => item.remove());
   }
 
   function expandNativeProjectLists(reason = "scan") {
@@ -1128,55 +1035,18 @@
     return expandNativeProjectLists(reason);
   }
 
-  function scheduleExpand(reason) {
-    if (state.scheduled) return;
-    state.scheduled = true;
-    requestAnimationFrame(() => {
-      state.scheduled = false;
-      if (reason !== "manual") {
-        const withinAutoWindow = Date.now() <= state.autoExpandDeadlineMs;
-        if (state.autoExpandEnabled && withinAutoWindow) {
-          autoExpandNativeProjectLists(reason);
-          return;
-        }
-      }
-      renderSupplementalHistory();
-    });
-  }
-
-  function installObserver() {
-    state.projectClickListener = (event) => {
-      if (state.programmaticExpand) return;
-      const target = event.target;
-      const button = target instanceof Element ? target.closest(`${PROJECT_LIST_SELECTOR} button`) : null;
-      if (button) {
-        state.autoExpandEnabled = false;
-      }
-    };
-    document.addEventListener(
-      "click",
-      state.projectClickListener,
-      true
-    );
-
-    state.observer = new MutationObserver(() => scheduleExpand("mutation"));
-    state.observer.observe(document.documentElement, {
-      childList: true,
-      subtree: true
-    });
+  function scheduleExpand() {
+    renderSupplementalHistory();
   }
 
   function stop() {
-    if (state.observer) state.observer.disconnect();
-    if (state.projectClickListener) {
-      document.removeEventListener("click", state.projectClickListener, true);
-    }
-    for (const timer of state.timers) window.clearTimeout(timer);
-    state.timers.clear();
-    if (state.fetchPatched) window.fetch = state.originalFetch;
-    if (state.xhrPatched) {
-      XMLHttpRequest.prototype.open = state.originalXhrOpen;
-      XMLHttpRequest.prototype.send = state.originalXhrSend;
+    renderSupplementalHistory();
+    if (
+      state.nativeRuntimeSettings
+      && state.nativeHistoryLimitGetter
+      && state.nativeRuntimeSettings.getRecentConversationDiscoveryLimit === state.nativeHistoryLimitGetter
+    ) {
+      state.nativeRuntimeSettings.getRecentConversationDiscoveryLimit = state.nativeOriginalHistoryLimit;
     }
     log("stopped");
   }
@@ -1184,13 +1054,14 @@
   window[SCRIPT_KEY] = {
     expand: () => expandNativeProjectLists("manual"),
     open: openThread,
-    refresh: () => refreshSnapshotFromCli(true),
+    refresh: (limit = readTarget()) => refreshSnapshotFromCli(true, writeTarget(limit)),
+    getLimit: readTarget,
+    setLimit: writeTarget,
     resetHistory: () => {
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(HIDDEN_IDS_KEY);
       localStorage.setItem(STORAGE_VERSION_KEY, STORAGE_VERSION);
-      state.supplementIds = "";
-      refreshSnapshotFromCli(true);
+      void refreshSnapshotFromCli(true).catch((error) => log("history reset refresh failed", String(error)));
       scheduleExpand("reset-history");
     },
     render: renderSupplementalHistory,
@@ -1201,26 +1072,28 @@
       supplementThreads: document.querySelectorAll("[data-clpb-supplemental-row]").length,
       projectSupplementItems: document.querySelectorAll(PROJECT_SUPPLEMENT_ITEM_SELECTOR).length,
       snapshotThreads: readSnapshotThreads().length,
-      missingNativeThreads: readSnapshotThreads().filter((thread) => !collectNativeThreadIds().has(threadDomId(thread))).length,
       snapshotProjects: snapshotProjectCounts(20),
-      historySectionText: document.querySelector(SUPPLEMENT_SELECTOR)?.innerText || "",
       lastSnapshotRefreshAt: state.lastSnapshotRefreshAt,
       snapshotRefreshInFlight: state.snapshotRefreshInFlight,
+      lastSnapshotError: state.lastSnapshotError,
+      nativeIdsRequested: state.nativeIdsRequested,
+      nativeCachedThreads: state.nativeCachedThreads,
+      nativeSummaryThreads: state.nativeSummaryThreads,
+      nativeMissingThreads: state.nativeMissingThreads,
+      nativeManagerFound: Boolean(state.nativeManager),
+      lastNativeLoadError: state.lastNativeLoadError,
+      configuredLimit: readTarget(),
       globalExtraHistory: GLOBAL_EXTRA_HISTORY,
+      renderer: "codex-native",
+      observerScope: "none",
+      requestInterceptionEnabled: false,
       expandButtons: countExpandButtons(),
       href: location.href
     }),
     stop
   };
 
-  patchRequests();
-  installObserver();
+  renderSupplementalHistory();
   migrateStorageForGlobalHistory();
   log("loaded", window[SCRIPT_KEY].status());
-  refreshSnapshotFromCli(true);
-  scheduleExpand("load");
-  renderSupplementalHistory();
-  [250, 750, 1500, 3000].forEach((ms) => {
-    setManagedTimeout(() => autoExpandNativeProjectLists(`timer:${ms}`), ms);
-  });
 })();

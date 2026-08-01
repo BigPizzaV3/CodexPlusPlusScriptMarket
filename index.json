@@ -90,8 +90,8 @@
     {
       "id": "codex-list-pagebuster",
       "name": "Codex List Pagebuster",
-      "description": "补强会话列表",
-      "version": "0.1.1",
+      "description": "按需扩展 Codex 原生近期会话缓存，可自定义加载 1–2000 条历史会话；由 Codex 原生侧栏渲染和虚拟滚动。",
+      "version": "0.2.2",
       "author": "puppnn",
       "tags": [
         "codex",
@@ -102,7 +102,7 @@
       ],
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-list-pagebuster.js",
-      "sha256": "756ee2e2a91df449738192ae500de1ab75cbbc7129968982ca37f6f5a9aad78e"
+      "sha256": "056faa3b6a4147536416c510394193ab795c1cbeb8cdcfce30af28db80ea4df2"
     },
     {
       "id": "codex-zhcn-translate",
@@ -139,8 +139,8 @@
     {
       "id": "bennett-ui-improvements",
       "name": "Bennett UI Improvements",
-      "description": "彩色项目管理界面、5 小时/Weekly/Credit 额度显示、稳定的额度耗尽提示隐藏，以及右侧 Markdown 预览中的 LaTeX 公式显示；由 b-nnett/codex-plusplus-bennett-ui 迁移适配至 BigPizzaV3 Codex++。",
-      "version": "1.0.23-bigpizza.9",
+      "description": "彩色项目管理界面、额度显示与提示隐藏、Markdown 预览增强，以及配合 Codex List Pagebuster 的原生会话历史手动加载；由 b-nnett/codex-plusplus-bennett-ui 迁移适配至 BigPizzaV3 Codex++。",
+      "version": "1.0.24-bigpizza.4",
       "author": "bennett; JHees",
       "tags": [
         "codex",
@@ -154,7 +154,7 @@
       ],
       "homepage": "https://github.com/JHees/bennett-ui-improvements-for-codexplusplus",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
-      "sha256": "7c30e0d84a264c51af6e71d9cc2663113f5f53031cdc4820250f91931c71a7d4"
+      "sha256": "3049c5621021f29e8ef575e3e8674be662a249ee6f6cd20d5a045656ace6fb33"
     }
   ]
 }

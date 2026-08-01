@@ -139,8 +139,8 @@
     {
       "id": "bennett-ui-improvements",
       "name": "Bennett UI Improvements",
-      "description": "彩色项目管理界面、额度显示与提示隐藏、Markdown 预览增强，以及配合 Codex List Pagebuster 的原生会话历史手动加载；由 b-nnett/codex-plusplus-bennett-ui 迁移适配至 BigPizzaV3 Codex++。",
-      "version": "1.0.24-bigpizza.4",
+      "description": "彩色项目管理界面、额度显示与提示隐藏、Markdown 预览增强，以及内置的原生会话历史手动加载；由 b-nnett/codex-plusplus-bennett-ui 迁移适配至 BigPizzaV3 Codex++，无需额外安装 Pagebuster。",
+      "version": "1.2.0",
       "author": "bennett; JHees",
       "tags": [
         "codex",
@@ -154,7 +154,7 @@
       ],
       "homepage": "https://github.com/JHees/bennett-ui-improvements-for-codexplusplus",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
-      "sha256": "3049c5621021f29e8ef575e3e8674be662a249ee6f6cd20d5a045656ace6fb33"
+      "sha256": "725f6ea107862642bd38fbe184d06d70021ff12da011353f11ebe813ec23d84e"
     }
   ]
 }

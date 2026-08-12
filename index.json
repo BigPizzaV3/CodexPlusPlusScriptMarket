@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-28T03:17:39Z",
+  "updated_at": "2026-08-12T12:30:00Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -241,6 +241,24 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/Codex%20Model%20Matrix.js",
       "sha256": "0a25838a887699f8c8b72efc67f64d9df045697f6e1555b856fb10a9baa8f075"
+    },
+    {
+      "id": "ai-input-im-status-auto-switch",
+      "name": "AI.INPUT.IM Status Auto Switch",
+      "description": "监控 status.input.im，按优先级选择健康模型，并通过 Codex 原生模型回调自动切换当前会话；支持连续确认、API 恢复重试和折叠状态控件。",
+      "version": "0.2.0",
+      "author": "AI.INPUT.IM Status Monitor",
+      "tags": [
+        "codex",
+        "models",
+        "status",
+        "auto-switch",
+        "monitor",
+        "ui"
+      ],
+      "homepage": "",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/ai-input-im-status-auto-switch.js",
+      "sha256": "1c88591d9ac35e302bbdaa7e34df54b98fc4ecf2ea2fe5c5a13b67cd863da4ee"
     }
   ]
 }

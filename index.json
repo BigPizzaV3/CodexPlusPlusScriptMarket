@@ -241,6 +241,24 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/Codex%20Model%20Matrix.js",
       "sha256": "0a25838a887699f8c8b72efc67f64d9df045697f6e1555b856fb10a9baa8f075"
+    },
+    {
+      "id": "model-panel",
+      "name": "Model Panel",
+      "description": "Model Deck 的维护分支：适配新版 Codex++ 的 Effort 菜单命名，悬停官方模型按钮打开模型矩阵，支持用户置顶与全局预设。",
+      "version": "0.1.0",
+      "author": "MyJackCat",
+      "tags": [
+        "codex",
+        "models",
+        "reasoning",
+        "fast",
+        "presets",
+        "ui"
+      ],
+      "homepage": "https://github.com/MyJackCat/model-panel",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/model-panel.js",
+      "sha256": "e7596b7f3b1a0e2739b0ef8bb6a609a0f5e27862e360cb0c4f62e7251f9d8a28"
     }
   ]
 }

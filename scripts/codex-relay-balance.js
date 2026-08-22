@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Relay Balance
 // @namespace    codex-plus-plus
-// @version      0.3.2
+// @version      0.3.3
 // @description  通用中转站余额与模型用量监控，支持手动配置接口、日期范围、Token 明细和实际扣费倍率。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.3.2";
+  const VERSION = "0.3.3";
   const API_KEY = "__codexRelayBalanceScript";
   const ROOT_ID = "codex-relay-balance-script";
   const PANEL_ID = "codex-relay-balance-panel";
@@ -1074,6 +1074,42 @@
       .sort((left, right) => right.actualCost - left.actualCost || right.totalTokens - left.totalTokens);
   }
 
+  function formatRemoteError(data, url, status) {
+    let payload = null;
+    const rawBody = safeText(data?.bodyJsonString).trim();
+    if (rawBody) {
+      try {
+        payload = JSON.parse(rawBody);
+      } catch (_) {
+        payload = null;
+      }
+    }
+    const nestedError = payload?.error && typeof payload.error === "object" ? payload.error : null;
+    const detail = safeText(
+      nestedError?.message
+      || payload?.message
+      || payload?.detail
+      || nestedError?.code
+      || payload?.code
+      || (typeof payload?.error === "string" ? payload.error : "")
+      || data?.error,
+    ).replace(/\s+/g, " ").trim();
+    const fallbackBody = !detail && rawBody && !rawBody.startsWith("{")
+      ? rawBody.replace(/\s+/g, " ").trim()
+      : "";
+    const summary = (detail || fallbackBody).slice(0, 240);
+    let path = "";
+    try {
+      const parsedUrl = new URL(url);
+      path = `${parsedUrl.pathname}${parsedUrl.search}`;
+    } catch (_) {
+      path = "";
+    }
+    const suffix = summary ? `：${summary}` : "";
+    const pathHint = path ? `（请求 ${path}）` : "";
+    return new Error(`余额接口请求失败：HTTP ${status || "error"}${suffix}${pathHint}`);
+  }
+
   function fetchViaElectronBridge(url, headers, timeoutMs = 15000) {
     const bridge = window.electronBridge;
     if (!bridge || typeof bridge.sendMessageFromView !== "function") {
@@ -1093,7 +1129,7 @@
         if (!data || data.type !== "fetch-response" || data.requestId !== requestId) return false;
         const status = Number(data.status || 0);
         if (data.responseType === "error" || status < 200 || status >= 300) {
-          finish(reject, new Error(`余额接口请求失败：HTTP ${status || "error"}`));
+          finish(reject, formatRemoteError(data, url, status));
           return true;
         }
         try {

@@ -241,6 +241,23 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/Codex%20Model%20Matrix.js",
       "sha256": "0a25838a887699f8c8b72efc67f64d9df045697f6e1555b856fb10a9baa8f075"
+    },
+    {
+      "id": "codex-plugin-translator",
+      "name": "Codex 插件翻译器",
+      "description": "为 Codex 插件页面提供中英双语翻译，支持 Google 免费翻译与可选 DeepSeek 重译。",
+      "version": "1.0.0-rc2",
+      "author": "cocoxia123",
+      "tags": [
+        "codex",
+        "translation",
+        "chinese",
+        "plugins",
+        "ui"
+      ],
+      "homepage": "https://github.com/cocoxia123/CodexPluginTranslator",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-plugin-translator.js",
+      "sha256": "7baf09e43e1e0d7a2db7790b9a9bee9c186a3796869baa73eee04aaa9fbfb4b4"
     }
   ]
 }

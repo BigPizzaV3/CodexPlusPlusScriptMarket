@@ -73,7 +73,7 @@
       "id": "codex-daily-token-usage",
       "name": "Codex Daily Token Usage",
       "description": "每日 Token 统计，近 5 日滚动存储，自动复用已有采集，支持 Model 价格、成本估算、趋势明细和分享图",
-      "version": "1.4.15",
+      "version": "1.4.16",
       "author": "kts-kris",
       "tags": [
         "codex",
@@ -85,7 +85,7 @@
       ],
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-daily-token-usage.js",
-      "sha256": "5c74b7051e5617a0d7d8e2f15d70870c131260990c3f98e1e5a0c665e39ae37d"
+      "sha256": "f0544c2ee0f4efd8cbb1a978e2466b6cebca92246509852ff00a9f0936af1845"
     },
     {
       "id": "codex-list-pagebuster",

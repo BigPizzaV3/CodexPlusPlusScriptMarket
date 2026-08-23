@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.15
+// @version      1.4.16
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.15";
+  const VERSION = "1.4.16";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -19,7 +19,7 @@
   const PANEL_ID = "codex-daily-token-usage-panel";
   const STYLE_ID = "codex-daily-token-usage-style";
   const CODEX_PLUS_MENU_ID = "codex-plus-menu";
-  const APP_HEADER_SELECTOR = ".app-header-tint";
+  const APP_HEADER_SELECTOR = '[class*="ApplicationMenuTopBar"], .app-header-tint';
   const APP_HEADER_SURFACE_SELECTOR = '[data-testid="app-shell-header-context-menu-surface"]';
   const HEADER_TOOLBAR_CLUSTER_SELECTOR = ".ms-auto.flex.shrink-0.items-center";
   const HEADER_TOOLBAR_CLASS_SELECTOR = '[class*="ms-auto"][class*="shrink-0"][class*="items-center"]';
@@ -108,7 +108,8 @@
     "computer-use-preview": { input: 3, output: 12 },
   });
   const FLOATING_TOP = 2;
-  const FLOATING_DEFAULT_RIGHT = 280;
+  const WINDOW_BUTTON_SAFE_RIGHT = 132;
+  const FLOATING_DEFAULT_RIGHT = WINDOW_BUTTON_SAFE_RIGHT;
   const FLOATING_SAFE_GAP = 8;
   const FLOATING_SCAN_TOP = 96;
   const FLOATING_MIN_WIDTH = 94;
@@ -116,7 +117,6 @@
   const FLOATING_HEIGHT = 31;
   const PANEL_GAP = 8;
   const PANEL_MARGIN = 12;
-  const WINDOW_BUTTON_SAFE_RIGHT = 132;
   const DOM_TOOL_DESCRIPTORS = [
     { selector: '[data-testid="exec-shell-body"]', testId: "exec-shell-body", kind: "plugin", name: "exec_command" },
   ];
@@ -4031,11 +4031,12 @@
   }
 
   function findAppHeaderElement() {
-    return (
-      document.querySelector(APP_HEADER_SELECTOR) ||
-      document.querySelector(APP_HEADER_SURFACE_SELECTOR) ||
-      document.querySelector("header")
-    );
+    const appHeader = document.querySelector(APP_HEADER_SELECTOR);
+    if (visibleTopRect(appHeader)) return appHeader;
+
+    const menuBar = document.querySelector('[role="menubar"]');
+    const menuTopBar = menuBar?.closest?.('[class*="ApplicationMenuTopBar"]');
+    return visibleTopRect(menuTopBar) ? menuTopBar : null;
   }
 
   function isTopChromeObstacleNode(node, style) {

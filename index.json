@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "updated_at": "2026-08-22T15:50:28Z",
+  "updated_at": "2026-08-31T13:52:10Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
       "name": "Codex Relay Balance",
       "description": "通用中转站余额与模型用量监控，支持自动读取或手动填写接口、日期范围、Token 明细和实际扣费倍率。",
-      "version": "0.3.3",
+      "version": "0.3.7",
       "author": "Codex++ Community",
       "tags": [
         "codex",
@@ -17,7 +17,7 @@
       ],
       "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-relay-balance.js",
-      "sha256": "6E42581ADC963E9093E3E6ED16B96C785320D2BBFBFF3A9F0BF9C922F47736F7",
+      "sha256": "DA8103FE920EE487A0ADB82BDC5CD74169B536EF12330F0A651F2A93B6B85237",
       "requirements": [
         "Codex++ 用户脚本环境",
         "中转站需提供余额和模型用量查询接口"

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Relay Balance
 // @namespace    codex-plus-plus
-// @version      0.3.3
+// @version      0.3.7
 // @description  通用中转站余额与模型用量监控，支持手动配置接口、日期范围、Token 明细和实际扣费倍率。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,13 +10,24 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.3.3";
+  const VERSION = "0.3.7";
   const API_KEY = "__codexRelayBalanceScript";
   const ROOT_ID = "codex-relay-balance-script";
   const PANEL_ID = "codex-relay-balance-panel";
   const STYLE_ID = "codex-relay-balance-script-style";
   const POSITION_GAP_PX = 8;
-  const FALLBACK_RIGHT_PX = 12;
+  const APP_MENU_TOP_BAR_SELECTOR = '[class*="ApplicationMenuTopBar"]';
+  const LEGACY_APP_HEADER_SELECTOR = ".app-header-tint";
+  const NATIVE_APP_HEADER_SELECTOR = "header.draggable";
+  const APP_HEADER_SURFACE_SELECTOR = '[data-testid="app-shell-header-context-menu-surface"]';
+  const HEADER_TOOLBAR_CLUSTER_SELECTOR = ".ms-auto.flex.shrink-0.items-center";
+  const HEADER_TOOLBAR_CLASS_SELECTOR = '[class*="ms-auto"][class*="shrink-0"][class*="items-center"]';
+  const TOP_OBSTACLE_SELECTOR = "button,[role='button'],input,select,textarea,a[href],[data-testid]";
+  const FLOATING_TOP_PX = 2;
+  const FLOATING_SAFE_GAP_PX = 8;
+  const FLOATING_SCAN_TOP_PX = 96;
+  const FLOATING_COMPACT_WIDTH_PX = 32;
+  const WINDOW_BUTTON_SAFE_RIGHT_PX = 132;
   const PANEL_GAP_PX = 8;
   const PANEL_MARGIN_PX = 12;
   const CONFIG_STORAGE_KEY = "codex-relay-balance-config-v1";
@@ -100,6 +111,9 @@
   let refreshTimer = null;
   let positionTimer = null;
   let observer = null;
+  let resizeObserver = null;
+  let layoutRaf = 0;
+  let observedLayoutNodes = new WeakSet();
   let destroyed = false;
   let requestPromise = null;
   let modelRequestPromise = null;
@@ -131,6 +145,40 @@
   function visibleRect(node) {
     const rect = node?.getBoundingClientRect?.();
     return rect && rect.width > 0 && rect.height > 0 ? rect : null;
+  }
+
+  function normalizeRect(rect) {
+    if (!rect) return null;
+    const left = Number(rect.left);
+    const top = Number(rect.top);
+    const right = Number(rect.right);
+    const bottom = Number(rect.bottom);
+    if (![left, top, right, bottom].every(Number.isFinite)) return null;
+    const width = Math.max(0, right - left);
+    const height = Math.max(0, bottom - top);
+    if (!width || !height) return null;
+    return { left, top, right, bottom, width, height };
+  }
+
+  function rectsOverlap(first, second, gap = 0) {
+    return (
+      first.left < second.right + gap &&
+      first.right > second.left - gap &&
+      first.top < second.bottom + gap &&
+      first.bottom > second.top - gap
+    );
+  }
+
+  function visibleTopRect(node) {
+    const rect = normalizeRect(node?.getBoundingClientRect?.());
+    if (!rect) return null;
+    try {
+      const style = window.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return null;
+    } catch (_) {
+      // 受限 WebView 无法读取样式时，保留几何位置作为降级判断。
+    }
+    return rect;
   }
 
   function dateString(date) {
@@ -213,6 +261,7 @@
         align-items: center;
         justify-content: center;
         box-sizing: border-box;
+        width: var(--codex-relay-balance-width, auto);
         height: var(--codex-relay-balance-height, 28px);
         max-width: 170px;
         padding: 0 8px;
@@ -488,37 +537,322 @@
     updatePosition();
   }
 
+  function findAppHeaderElement() {
+    const applicationMenuTopBar = document.querySelector(APP_MENU_TOP_BAR_SELECTOR);
+    if (visibleTopRect(applicationMenuTopBar)) return applicationMenuTopBar;
+
+    const menuBar = document.querySelector('[role="menubar"]');
+    const menuTopBar = menuBar?.closest?.(APP_MENU_TOP_BAR_SELECTOR);
+    if (visibleTopRect(menuTopBar)) return menuTopBar;
+
+    const legacyHeader = document.querySelector(LEGACY_APP_HEADER_SELECTOR);
+    if (visibleTopRect(legacyHeader)) return legacyHeader;
+
+    const nativeHeaders = Array.from(document.querySelectorAll?.(NATIVE_APP_HEADER_SELECTOR) || [])
+      .map((node) => ({ node, rect: normalizeRect(node.getBoundingClientRect?.()) }))
+      .filter(({ rect }) => rect && rect.top <= FLOATING_TOP_PX + 2 && rect.width >= window.innerWidth * 0.75)
+      .sort((left, right) => right.rect.width - left.rect.width);
+    if (nativeHeaders[0]?.node) return nativeHeaders[0].node;
+
+    const headerSurface = document.querySelector(APP_HEADER_SURFACE_SELECTOR);
+    return visibleTopRect(headerSurface) ? headerSurface : null;
+  }
+
   function findHelpButton() {
-    const header = document.querySelector('[class*="ApplicationMenuTopBar"], .app-header-tint');
-    const candidates = Array.from(header?.querySelectorAll?.("button, [role='button'], a") || []);
+    const header = findAppHeaderElement();
+    const scope = header || document;
+    const candidates = Array.from(scope.querySelectorAll?.("button, [role='button'], a") || []);
     return candidates.find((button) => {
-      const rect = visibleRect(button);
-      if (!rect) return false;
+      const rect = visibleTopRect(button);
+      if (!rect || rect.top >= FLOATING_SCAN_TOP_PX) return false;
       const text = safeText(button.textContent).replace(/\s+/g, "");
       const label = safeText(button.getAttribute?.("aria-label")).replace(/\s+/g, "");
-      return /^(帮助|Help)$/i.test(text) || /^(帮助|Help)$/i.test(label);
+      const title = safeText(button.getAttribute?.("title")).replace(/\s+/g, "");
+      return [text, label, title].some((value) => /^(帮助|Help)$/i.test(value));
     });
+  }
+
+  function isPrimaryTopObstacleNode(node) {
+    return !!node?.matches?.(
+      `button,[role='button'],input,select,textarea,a[href],#${ROOT_ID},#${PANEL_ID}`,
+    );
+  }
+
+  function isTopChromeObstacleNode(node, rect, header) {
+    if (!node || node === root || node === panel || root?.contains(node) || panel?.contains(node)) {
+      return false;
+    }
+    if (!rect || rect.bottom <= 0 || rect.top >= FLOATING_SCAN_TOP_PX || rect.right <= 0 || rect.left >= window.innerWidth) {
+      return false;
+    }
+
+    let style = null;
+    try {
+      style = window.getComputedStyle(node);
+    } catch (_) {
+      style = null;
+    }
+    if (style?.display === "none" || style?.visibility === "hidden" || style?.opacity === "0") return false;
+
+    const inKnownHeader = !!(
+      header?.contains?.(node) ||
+      node.closest?.(
+        `${APP_MENU_TOP_BAR_SELECTOR}, ${LEGACY_APP_HEADER_SELECTOR}, ${NATIVE_APP_HEADER_SELECTOR}, ${APP_HEADER_SURFACE_SELECTOR}`,
+      )
+    );
+    const isTopRight = rect.right > window.innerWidth / 2;
+    const isFixedPlugin = style?.position === "fixed" && rect.height <= 72 && rect.width <= 360 && isTopRight;
+    return isPrimaryTopObstacleNode(node) && (inKnownHeader || isTopRight) || isFixedPlugin;
+  }
+
+  function collectTopObstacleEntries(header) {
+    if (!document.body?.querySelectorAll) return [];
+    const entries = Array.from(document.body.querySelectorAll(TOP_OBSTACLE_SELECTOR))
+      .map((node) => ({ node, rect: normalizeRect(node.getBoundingClientRect?.()) }))
+      .filter(({ node, rect }) => isTopChromeObstacleNode(node, rect, header));
+
+    return entries.filter((entry, index) => {
+      if (isPrimaryTopObstacleNode(entry.node)) return true;
+      return !entries.some((other, otherIndex) => {
+        if (otherIndex === index || !entry.node.contains?.(other.node)) return false;
+        if (!rectsOverlap(entry.rect, other.rect)) return false;
+        return other.rect.width <= entry.rect.width && other.rect.height <= entry.rect.height;
+      });
+    });
+  }
+
+  function findHeaderToolbarAnchor(header) {
+    if (!header) return null;
+    const buttons = Array.from(header.querySelectorAll?.("button") || [])
+      .map((button) => ({ button, rect: normalizeRect(button.getBoundingClientRect?.()) }))
+      .filter(({ button, rect }) => {
+        if (!rect || rect.left <= window.innerWidth / 2) return false;
+        if (button.closest?.(`#${ROOT_ID}, #${PANEL_ID}`)) return false;
+        const cluster = button.closest?.(HEADER_TOOLBAR_CLUSTER_SELECTOR);
+        return !!(
+          (cluster && header.contains(cluster)) ||
+          button.closest?.(HEADER_TOOLBAR_CLASS_SELECTOR) ||
+          header.contains(button)
+        );
+      })
+      .sort((left, right) => left.rect.left - right.rect.left);
+    const first = buttons[0];
+    if (!first) return null;
+    const measuredGap = buttons[1] ? buttons[1].rect.left - first.rect.right : 0;
+    let gap = 0;
+    try {
+      const styles = first.button.parentElement ? window.getComputedStyle(first.button.parentElement) : null;
+      gap = Math.max(
+        FLOATING_SAFE_GAP_PX,
+        Number.parseFloat(styles?.columnGap || styles?.gap || "0") || 0,
+        measuredGap,
+      );
+    } catch (_) {
+      gap = Math.max(FLOATING_SAFE_GAP_PX, measuredGap);
+    }
+    return { rect: first.rect, gap };
+  }
+
+  function candidateRectFromLeft(left, top, width, height) {
+    return { left, right: left + width, top, bottom: top + height, width, height };
+  }
+
+  function resolveFloatingLayout(width, height, viewportWidth, viewportHeight, obstacleRects, anchors) {
+    const safeWidth = Math.min(
+      Math.max(1, Number(width) || 94),
+      Math.max(1, viewportWidth - PANEL_MARGIN_PX * 2),
+    );
+    const compactWidth = Math.min(FLOATING_COMPACT_WIDTH_PX, safeWidth);
+    const safeHeight = Math.max(1, Number(height) || 28);
+    const maxTop = Math.max(FLOATING_TOP_PX, viewportHeight - safeHeight - PANEL_MARGIN_PX);
+    const topObstacles = (obstacleRects || [])
+      .map(normalizeRect)
+      .filter(
+        (rect) =>
+          rect &&
+          rect.bottom > 0 &&
+          rect.top < FLOATING_SCAN_TOP_PX &&
+          rect.right > 0 &&
+          rect.left < viewportWidth,
+      );
+
+    const candidateFits = (candidate) =>
+      candidate.left >= PANEL_MARGIN_PX &&
+      candidate.right <= viewportWidth - PANEL_MARGIN_PX &&
+      candidate.top >= 0 &&
+      candidate.bottom <= viewportHeight;
+    const candidateIsClear = (candidate) =>
+      candidateFits(candidate) &&
+      !topObstacles.some((obstacle) => rectsOverlap(candidate, obstacle, FLOATING_SAFE_GAP_PX));
+
+    const rowGaps = (layoutTop, rightLimit) => {
+      const safeRightLimit = Math.min(
+        Math.max(PANEL_MARGIN_PX, rightLimit),
+        viewportWidth - PANEL_MARGIN_PX,
+      );
+      if (safeRightLimit <= PANEL_MARGIN_PX) return [];
+      const scanRect = candidateRectFromLeft(
+        PANEL_MARGIN_PX,
+        layoutTop,
+        safeRightLimit - PANEL_MARGIN_PX,
+        safeHeight,
+      );
+      const blocked = topObstacles
+        .filter((obstacle) => rectsOverlap(scanRect, obstacle, FLOATING_SAFE_GAP_PX))
+        .map((obstacle) => ({
+          left: Math.max(PANEL_MARGIN_PX, obstacle.left - FLOATING_SAFE_GAP_PX),
+          right: Math.min(safeRightLimit, obstacle.right + FLOATING_SAFE_GAP_PX),
+        }))
+        .filter((obstacle) => obstacle.right > obstacle.left)
+        .sort((left, right) => left.left - right.left);
+
+      const gaps = [];
+      let cursor = PANEL_MARGIN_PX;
+      for (const obstacle of blocked) {
+        if (obstacle.left > cursor) gaps.push({ left: cursor, right: obstacle.left });
+        cursor = Math.max(cursor, obstacle.right);
+      }
+      if (cursor < safeRightLimit) gaps.push({ left: cursor, right: safeRightLimit });
+      return gaps;
+    };
+
+    const findRightmostClearLayout = (layoutTop, rightLimit) => {
+      const gaps = rowGaps(layoutTop, rightLimit).sort((left, right) => right.right - left.right);
+      for (const gap of gaps) {
+        if (gap.right - gap.left >= safeWidth) {
+          const candidate = candidateRectFromLeft(gap.right - safeWidth, layoutTop, safeWidth, safeHeight);
+          if (candidateIsClear(candidate)) {
+            return { top: layoutTop, left: candidate.left, width: safeWidth, compact: false };
+          }
+        }
+        if (gap.right - gap.left >= compactWidth) {
+          const candidate = candidateRectFromLeft(gap.right - compactWidth, layoutTop, compactWidth, safeHeight);
+          if (candidateIsClear(candidate)) {
+            return { top: layoutTop, left: candidate.left, width: compactWidth, compact: true };
+          }
+        }
+      }
+      return null;
+    };
+
+    const normalizedAnchors = (anchors || [])
+      .map((anchor) => ({
+        rect: normalizeRect(anchor?.rect || anchor),
+        gap: Math.max(FLOATING_SAFE_GAP_PX, Number(anchor?.gap) || 0),
+      }))
+      .filter(({ rect }) => rect);
+    for (const anchor of normalizedAnchors) {
+      const layoutTop = Math.min(
+        maxTop,
+        Math.max(FLOATING_TOP_PX, anchor.rect.top + (anchor.rect.height - safeHeight) / 2),
+      );
+      const rightLimit = Math.min(
+        viewportWidth - PANEL_MARGIN_PX,
+        Math.max(PANEL_MARGIN_PX, anchor.rect.left - anchor.gap),
+      );
+      const candidate = candidateRectFromLeft(rightLimit - safeWidth, layoutTop, safeWidth, safeHeight);
+      if (candidateIsClear(candidate)) {
+        return { top: layoutTop, left: candidate.left, width: safeWidth, compact: false };
+      }
+      const compactCandidate = candidateRectFromLeft(rightLimit - compactWidth, layoutTop, compactWidth, safeHeight);
+      if (candidateIsClear(compactCandidate)) {
+        return { top: layoutTop, left: compactCandidate.left, width: compactWidth, compact: true };
+      }
+      const anchoredGap = findRightmostClearLayout(layoutTop, rightLimit);
+      if (anchoredGap) return anchoredGap;
+    }
+
+    const defaultTop = normalizedAnchors[0]
+      ? Math.min(
+          maxTop,
+          Math.max(
+            FLOATING_TOP_PX,
+            normalizedAnchors[0].rect.top + (normalizedAnchors[0].rect.height - safeHeight) / 2,
+          ),
+        )
+      : FLOATING_TOP_PX;
+    const safeRightLimit = Math.max(PANEL_MARGIN_PX, viewportWidth - WINDOW_BUTTON_SAFE_RIGHT_PX);
+    const defaultRight = Math.min(
+      safeRightLimit,
+      Math.max(PANEL_MARGIN_PX, viewportWidth - PANEL_MARGIN_PX - safeWidth),
+    );
+    const defaultCandidate = candidateRectFromLeft(
+      defaultRight - safeWidth,
+      defaultTop,
+      safeWidth,
+      safeHeight,
+    );
+    if (candidateIsClear(defaultCandidate)) {
+      return { top: defaultTop, left: defaultCandidate.left, width: safeWidth, compact: false };
+    }
+
+    const clearGap = findRightmostClearLayout(defaultTop, safeRightLimit);
+    if (clearGap) return clearGap;
+
+    const fallbackCandidate = candidateRectFromLeft(
+      Math.max(PANEL_MARGIN_PX, defaultRight - compactWidth),
+      defaultTop,
+      compactWidth,
+      safeHeight,
+    );
+    return { top: defaultTop, left: fallbackCandidate.left, width: compactWidth, compact: true };
+  }
+
+  function updateLayoutResizeObservers(header, entries) {
+    if (!resizeObserver) return;
+    const nodes = [header, document.body, ...(entries || []).map((entry) => entry.node)];
+    for (const node of nodes) {
+      if (!node || observedLayoutNodes.has(node) || root?.contains(node) || panel?.contains(node)) continue;
+      try {
+        resizeObserver.observe(node);
+        observedLayoutNodes.add(node);
+      } catch (_) {
+        // 个别动态节点不可观察时，继续依赖 MutationObserver 和定时器。
+      }
+    }
+  }
+
+  function schedulePositionUpdate() {
+    if (!root || destroyed || layoutRaf) return;
+    const run = () => {
+      layoutRaf = 0;
+      updatePosition();
+    };
+    layoutRaf = typeof window.requestAnimationFrame === "function"
+      ? window.requestAnimationFrame(run)
+      : window.setTimeout(run, 16);
   }
 
   function updatePosition() {
     if (!root) return;
+    const header = findAppHeaderElement();
     const help = findHelpButton();
-    const helpRect = visibleRect(help);
-    if (helpRect) {
-      root.style.setProperty("--codex-relay-balance-top", `${Math.max(4, helpRect.top)}px`);
-      root.style.setProperty("--codex-relay-balance-height", `${Math.max(28, helpRect.height)}px`);
-      root.style.setProperty("--codex-relay-balance-left", `${helpRect.right + POSITION_GAP_PX}px`);
-      root.style.removeProperty("--codex-relay-balance-right");
-    } else {
-      const header = document.querySelector('[class*="ApplicationMenuTopBar"], .app-header-tint');
-      const headerRect = visibleRect(header);
-      if (headerRect) {
-        root.style.setProperty("--codex-relay-balance-top", `${headerRect.bottom + PANEL_GAP_PX}px`);
-        root.style.setProperty("--codex-relay-balance-height", "30px");
-      }
-      root.style.removeProperty("--codex-relay-balance-left");
-      root.style.setProperty("--codex-relay-balance-right", `${FALLBACK_RIGHT_PX}px`);
-    }
+    const toolbarAnchor = findHeaderToolbarAnchor(header);
+    const helpRect = normalizeRect(help?.getBoundingClientRect?.());
+    const anchor = helpRect
+      ? { rect: helpRect, gap: POSITION_GAP_PX }
+      : toolbarAnchor || null;
+    const entries = collectTopObstacleEntries(header);
+
+    root.style.setProperty("--codex-relay-balance-width", "auto");
+    const rootRect = normalizeRect(root.getBoundingClientRect?.());
+    const height = Math.max(28, helpRect?.height || rootRect?.height || 30);
+    const layout = resolveFloatingLayout(
+      rootRect?.width || 94,
+      height,
+      Math.max(1, window.innerWidth || document.documentElement?.clientWidth || 1),
+      Math.max(1, window.innerHeight || document.documentElement?.clientHeight || 1),
+      entries.map((entry) => entry.rect),
+      anchor ? [anchor] : [],
+    );
+
+    root.style.setProperty("--codex-relay-balance-top", `${Math.round(layout.top)}px`);
+    root.style.setProperty("--codex-relay-balance-left", `${Math.round(layout.left)}px`);
+    root.style.removeProperty("--codex-relay-balance-right");
+    root.style.setProperty("--codex-relay-balance-height", `${Math.round(height)}px`);
+    root.style.setProperty("--codex-relay-balance-width", layout.compact ? `${layout.width}px` : "auto");
+    root.dataset.layout = layout.compact ? "compact" : "top-toolbar";
+    updateLayoutResizeObservers(header, entries);
 
     if (!panel || !state.panelOpen) return;
     panel.hidden = false;
@@ -1074,6 +1408,38 @@
       .sort((left, right) => right.actualCost - left.actualCost || right.totalTokens - left.totalTokens);
   }
 
+  function friendlyTransportMessage(value) {
+    const text = safeText(value).toLowerCase();
+    if (/(err_connection_refused|econnrefused|connection refused|连接被拒绝)/i.test(text)) {
+      return "目标地址拒绝连接。请检查代理是否开启、代理端口是否运行，或确认中转站地址不是 localhost/127.0.0.1。";
+    }
+    if (/(err_proxy_connection_failed|proxy connection failed|代理连接失败)/i.test(text)) {
+      return "代理连接失败。请检查代理软件是否运行，以及代理地址和端口是否正确。";
+    }
+    if (/(connection_error|failed to connect to upstream|all connection attempts failed|upstream api)/i.test(text)) {
+      return "上游 API 连接失败。请检查网络代理、中转站地址和上游服务状态。";
+    }
+    if (/(err_connection_timed_out|etimedout|timed out|timeout|超时)/i.test(text)) {
+      return "连接超时。请检查网络、代理线路和中转站地址。";
+    }
+    if (/(err_name_not_resolved|enotfound|dns|name not resolved|无法解析)/i.test(text)) {
+      return "无法解析中转站域名。请检查地址或 DNS 设置。";
+    }
+    if (/(err_internet_disconnected|network changed|network error|网络不可用|断开)/i.test(text)) {
+      return "当前网络不可用。请检查网络连接后重试。";
+    }
+    return "";
+  }
+
+  function requestPathHint(url) {
+    try {
+      const parsedUrl = new URL(url);
+      return `（请求 ${parsedUrl.pathname}${parsedUrl.search}）`;
+    } catch (_) {
+      return "";
+    }
+  }
+
   function formatRemoteError(data, url, status) {
     let payload = null;
     const rawBody = safeText(data?.bodyJsonString).trim();
@@ -1098,58 +1464,287 @@
       ? rawBody.replace(/\s+/g, " ").trim()
       : "";
     const summary = (detail || fallbackBody).slice(0, 240);
-    let path = "";
-    try {
-      const parsedUrl = new URL(url);
-      path = `${parsedUrl.pathname}${parsedUrl.search}`;
-    } catch (_) {
-      path = "";
+    const transportHint = friendlyTransportMessage(
+      [data?.errorCode, data?.code, data?.error, detail].filter(Boolean).join(" "),
+    );
+    const pathHint = requestPathHint(url);
+    if (transportHint) {
+      return new Error(`余额接口连接失败：${transportHint}${pathHint}`);
     }
     const suffix = summary ? `：${summary}` : "";
-    const pathHint = path ? `（请求 ${path}）` : "";
     return new Error(`余额接口请求失败：HTTP ${status || "error"}${suffix}${pathHint}`);
   }
 
-  function fetchViaElectronBridge(url, headers, timeoutMs = 15000) {
-    const bridge = window.electronBridge;
-    if (!bridge || typeof bridge.sendMessageFromView !== "function") {
-      return Promise.reject(new Error("Codex++ network bridge unavailable"));
-    }
-    const requestId = `codex-relay-balance-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const finish = (callback, value) => {
-        if (settled) return;
-        settled = true;
-        window.clearTimeout(timer);
-        window.removeEventListener("message", onMessage, true);
-        callback(value);
-      };
-      const consume = (data) => {
-        if (!data || data.type !== "fetch-response" || data.requestId !== requestId) return false;
-        const status = Number(data.status || 0);
-        if (data.responseType === "error" || status < 200 || status >= 300) {
-          finish(reject, formatRemoteError(data, url, status));
-          return true;
-        }
-        try {
-          finish(resolve, JSON.parse(data.bodyJsonString || "{}"));
-        } catch (_) {
-          finish(reject, new Error("余额接口返回了无法解析的 JSON"));
-        }
-        return true;
-      };
-      const onMessage = (event) => consume(event?.data);
-      const timer = window.setTimeout(() => finish(reject, new Error("余额请求超时")), timeoutMs);
-      window.addEventListener("message", onMessage, true);
-      try {
-        Promise.resolve(bridge.sendMessageFromView({ type: "fetch", requestId, method: "GET", url, headers }))
-          .then(consume)
-          .catch((error) => finish(reject, error));
-      } catch (error) {
-        finish(reject, error);
+  function decodeRpcValue(value) {
+    if (Array.isArray(value) && value[0] === "undefined") return undefined;
+    if (Array.isArray(value) && value[0] === "bytes") {
+      const source = value[1];
+      if (source instanceof Uint8Array) return source;
+      if (source instanceof ArrayBuffer) return new Uint8Array(source);
+      if (Array.isArray(source)) return Uint8Array.from(source);
+      if (source && typeof source === "object") {
+        return Uint8Array.from(
+          Object.keys(source)
+            .sort((left, right) => Number(left) - Number(right))
+            .map((key) => Number(source[key]) || 0),
+        );
       }
-    });
+      return new Uint8Array();
+    }
+    if (Array.isArray(value) && value[0] === "error") {
+      return new Error(safeText(value[2] || value[1] || "RPC 请求失败"));
+    }
+    return value;
+  }
+
+  function encodeRpcValue(value, registerExport) {
+    if (value === undefined) return ["undefined"];
+    if (value === null || typeof value !== "object" && typeof value !== "function") return value;
+    return typeof registerExport === "function" ? ["export", registerExport(value)] : value;
+  }
+
+  function createAppHostRpc(timeoutMs) {
+    if (typeof MessageChannel !== "function" || typeof window.postMessage !== "function") {
+      throw new Error("Codex++ HTTP 服务不可用，请重启 Codex++ 后重试");
+    }
+
+    const channel = new MessageChannel();
+    const port = channel.port1;
+    const localRoot = {
+      services: {
+        appUpdates: { stateChanged() {} },
+        downloads: { stateChanged() {}, lifecycleChanged() {} },
+      },
+    };
+    const localExports = [localRoot];
+    const pending = new Map();
+    const pipeQueue = [];
+    const pipeTargets = new Map();
+    let nextImportId = 1;
+    let closed = false;
+
+    function send(message) {
+      if (!closed) port.postMessage(message);
+    }
+
+    function addExport(value) {
+      localExports.push(value);
+      return localExports.length - 1;
+    }
+
+    function getLocalBase(importId) {
+      if (importId === 0) return localRoot;
+      return pipeTargets.get(importId) || localExports[importId] || pipeQueue[0]?.pipe;
+    }
+
+    function finishPipe(pipe, error = null) {
+      if (pipe.closed) return;
+      pipe.closed = true;
+      pipe.error = error;
+      for (const waiter of pipe.waiters.splice(0)) {
+        if (error) waiter.reject(error);
+        else waiter.resolve();
+      }
+    }
+
+    function createPipe() {
+      const pipe = {
+        chunks: [],
+        waiters: [],
+        closed: false,
+        error: null,
+        write(chunk) {
+          const value = decodeRpcValue(chunk);
+          if (value instanceof Uint8Array) pipe.chunks.push(value);
+        },
+        close() {
+          finishPipe(pipe);
+        },
+        abort(error) {
+          finishPipe(pipe, error instanceof Error ? error : new Error(String(error || "RPC 流已中止")));
+        },
+      };
+      pipeQueue.push({ pipe, exportId: addExport(pipe) });
+      return pipe;
+    }
+
+    async function evaluateLocalPipeline(pipeline) {
+      const [kind, importId, path, encodedArgs] = pipeline || [];
+      if (kind !== "pipeline") throw new Error("Codex++ RPC 请求格式无效");
+      let owner = null;
+      let value = getLocalBase(importId);
+      for (const key of path || []) {
+        owner = value;
+        value = value == null ? undefined : value[key];
+      }
+      if (encodedArgs !== undefined) {
+        const args = (Array.isArray(encodedArgs) ? encodedArgs : [encodedArgs]).map(decodeRpcValue);
+        if (typeof value !== "function") {
+          throw new TypeError(`'${(path || []).join(".")}' 不是可调用方法`);
+        }
+        value = value.apply(owner, args);
+      }
+      return await value;
+    }
+
+    async function handleInbound(message) {
+      if (!Array.isArray(message)) return;
+      if (message[0] === "pipe") {
+        createPipe();
+        return;
+      }
+      if (message[0] === "push" || message[0] === "stream") {
+        const value = await evaluateLocalPipeline(message[1]);
+        const exportId = addExport(value);
+        if (message[0] === "stream") send(["resolve", exportId, encodeRpcValue(value, addExport)]);
+        return;
+      }
+      if (message[0] === "pull") {
+        const exportId = Number(message[1]);
+        const value = await localExports[exportId];
+        send(["resolve", exportId, encodeRpcValue(value, addExport)]);
+        return;
+      }
+      if (message[0] === "resolve" || message[0] === "reject") {
+        const importId = Number(message[1]);
+        const entry = pending.get(importId);
+        if (!entry) return;
+        pending.delete(importId);
+        if (message[0] === "resolve") entry.resolve(message[2]);
+        else entry.reject(decodeRpcValue(message[2]));
+        return;
+      }
+      if (message[0] === "abort") {
+        const error = decodeRpcValue(message[1]) || new Error("Codex++ RPC 连接已中止");
+        for (const entry of pending.values()) entry.reject(error);
+        pending.clear();
+      }
+    }
+
+    function onMessage(event) {
+      Promise.resolve(handleInbound(event?.data)).catch((error) => {
+        for (const entry of pending.values()) entry.reject(error);
+        pending.clear();
+      });
+    }
+
+    function onMessageError() {
+      const error = new Error("Codex++ HTTP 服务通信失败，请重启 Codex++ 后重试");
+      for (const entry of pending.values()) entry.reject(error);
+      pending.clear();
+    }
+
+    port.addEventListener("message", onMessage);
+    port.addEventListener("messageerror", onMessageError);
+    port.start?.();
+    window.postMessage(
+      { type: "connect-app-host", port: channel.port2 },
+      window.location.origin,
+      [channel.port2],
+    );
+
+    function call(path, args) {
+      const importId = nextImportId++;
+      return new Promise((resolve, reject) => {
+        const timer = window.setTimeout(() => {
+          pending.delete(importId);
+          reject(new Error("余额接口连接失败：连接超时。请检查网络、代理线路和中转站地址。"));
+        }, timeoutMs);
+        pending.set(importId, {
+          resolve(value) {
+            window.clearTimeout(timer);
+            resolve(value);
+          },
+          reject(error) {
+            window.clearTimeout(timer);
+            reject(error);
+          },
+        });
+        try {
+          send(["push", ["pipeline", 0, path, args]]);
+          send(["pull", importId]);
+        } catch (error) {
+          window.clearTimeout(timer);
+          pending.delete(importId);
+          reject(error);
+        }
+      });
+    }
+
+    function readPipe(pipe) {
+      if (pipe.closed) return pipe.error ? Promise.reject(pipe.error) : Promise.resolve();
+      return new Promise((resolve, reject) => pipe.waiters.push({ resolve, reject }));
+    }
+
+    async function readResponseBody(payload) {
+      const encodedResponse = payload?.response;
+      if (!Array.isArray(encodedResponse) || encodedResponse[0] !== "response") {
+        throw new Error("余额接口返回了无效的 HTTP 响应");
+      }
+      const body = encodedResponse[1];
+      if (Array.isArray(body) && body[0] === "readable") {
+        const pipeId = Number(body[1]);
+        const pipe = pipeTargets.get(pipeId) || pipeQueue.shift()?.pipe;
+        if (!pipe) throw new Error("余额接口响应流不可用");
+        pipeTargets.set(pipeId, pipe);
+        await readPipe(pipe);
+        const total = pipe.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+        const bytes = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of pipe.chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return new TextDecoder().decode(bytes);
+      }
+      const decoded = decodeRpcValue(body);
+      return decoded instanceof Uint8Array ? new TextDecoder().decode(decoded) : safeText(decoded);
+    }
+
+    function close() {
+      if (closed) return;
+      closed = true;
+      for (const entry of pending.values()) entry.reject(new Error("Codex++ RPC 连接已关闭"));
+      pending.clear();
+      port.removeEventListener("message", onMessage);
+      port.removeEventListener("messageerror", onMessageError);
+      port.close();
+    }
+
+    return { call, readResponseBody, close };
+  }
+
+  async function fetchViaAppHost(url, headers, timeoutMs = 15000) {
+    let rpc;
+    try {
+      rpc = createAppHostRpc(timeoutMs);
+      const requestId = `codex-relay-balance-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const payload = await rpc.call(["services", "httpFetch", "fetch"], [
+        requestId,
+        { url, method: "GET", headers },
+        null,
+      ]);
+      const status = Number(payload?.status || 0);
+      if (payload?.responseType === "error" || !payload?.response) {
+        throw formatRemoteError(payload, url, status);
+      }
+      const bodyText = await rpc.readResponseBody(payload);
+      try {
+        return JSON.parse(bodyText || "{}");
+      } catch (_) {
+        throw new Error("余额接口返回了无法解析的 JSON");
+      }
+    } catch (error) {
+      if (error instanceof Error && /^余额接口/.test(error.message)) throw error;
+      const transportHint = friendlyTransportMessage(error?.message || error);
+      throw new Error(
+        transportHint
+          ? `余额接口连接失败：${transportHint}${requestPathHint(url)}`
+          : `余额接口连接失败：${safeText(error?.message || error) || "Codex++ HTTP 服务不可用，请重启 Codex++ 后重试"}${requestPathHint(url)}`,
+      );
+    } finally {
+      rpc?.close?.();
+    }
   }
 
   async function fetchUsagePayload(range = null) {
@@ -1161,7 +1756,7 @@
     if (!relayConfig.endpoint || !relayConfig.apiKey) {
       return { disabled: true, payload: null, reason: config.manualEnabled ? "请先在设置中填写中转站地址和 API Key" : "未读取到可用的中转站 API 配置" };
     }
-    const payload = await fetchViaElectronBridge(usageUrl(relayConfig.endpoint, config.usagePath, range), {
+    const payload = await fetchViaAppHost(usageUrl(relayConfig.endpoint, config.usagePath, range), {
       Accept: "application/json",
       Authorization: `Bearer ${relayConfig.apiKey}`,
       "x-api-key": relayConfig.apiKey,
@@ -1239,8 +1834,14 @@
     destroyed = true;
     if (refreshTimer) window.clearInterval(refreshTimer);
     if (positionTimer) window.clearInterval(positionTimer);
+    if (layoutRaf) {
+      if (typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(layoutRaf);
+      else window.clearTimeout(layoutRaf);
+      layoutRaf = 0;
+    }
     observer?.disconnect?.();
-    window.removeEventListener("resize", updatePosition);
+    resizeObserver?.disconnect?.();
+    window.removeEventListener("resize", schedulePositionUpdate);
     window.removeEventListener("focus", onFocus);
     document.removeEventListener("visibilitychange", onVisibilityChange);
     document.removeEventListener("click", onDocumentClick, true);
@@ -1266,12 +1867,27 @@
   installRoot();
   document.addEventListener("click", onDocumentClick, true);
   document.addEventListener("keydown", onDocumentKeydown, true);
-  observer = new MutationObserver(updatePosition);
-  observer.observe(document.documentElement, { childList: true, subtree: true });
-  window.addEventListener("resize", updatePosition);
+  if (typeof ResizeObserver === "function") {
+    resizeObserver = new ResizeObserver(schedulePositionUpdate);
+  }
+  observer = new MutationObserver((mutations) => {
+    const hasExternalMutation = mutations.some((mutation) => {
+      const target = mutation.target;
+      return !(target === root || root?.contains(target) || target === panel || panel?.contains(target));
+    });
+    if (hasExternalMutation) schedulePositionUpdate();
+  });
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["class", "style", "aria-label", "data-testid"],
+  });
+  window.addEventListener("resize", schedulePositionUpdate);
   window.addEventListener("focus", onFocus);
   document.addEventListener("visibilitychange", onVisibilityChange);
   positionTimer = window.setInterval(updatePosition, 2000);
+  schedulePositionUpdate();
   resetRefreshTimer();
   window[API_KEY] = { version: VERSION, ensure: installRoot, refresh, loadModelUsage, destroy };
   void refresh(true);

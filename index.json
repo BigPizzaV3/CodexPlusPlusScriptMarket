@@ -1,7 +1,36 @@
 {
   "version": 1,
-  "updated_at": "2026-08-22T15:50:28Z",
+  "updated_at": "2026-09-04T13:32:38Z",
   "scripts": [
+    {
+      "id": "codex-environment-injector",
+      "name": "Codex Environment Injector",
+      "description": "React 19 会话环境管理器：为新对话选择模型、Provider、提示词、权限与 Memory 策略，并查看当前线程绑定和脱敏注入证明。",
+      "version": "0.3.2",
+      "author": "FlyCatdev",
+      "tags": [
+        "codex",
+        "environment",
+        "profile",
+        "react",
+        "memories",
+        "agents",
+        "rpc",
+        "ui"
+      ],
+      "homepage": "https://github.com/FlyCatdev/codex-environment-injector",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-environment-injector.js",
+      "sha256": "6AB7A55BAFC58869841DE7AACDC076D15465392F2DC45B6B309C728A8F1CC998",
+      "requirements": [
+        "Codex++ 用户脚本环境",
+        "Codex Desktop"
+      ],
+      "limitations": [
+        "市场版不包含任何本机 *.config.toml、Memories 或 AGENTS 快照；请在 React Studio 中手动创建本地环境",
+        "全局 AGENTS / Memory 磁盘写入需要可选的原生 Bridge；没有 Bridge 时仍可查看、保存草案和导出",
+        "依赖 Codex 当前的 React composer 与 app-server 结构，Codex 大版本更新后可能需要兼容性更新"
+      ]
+    },
     {
       "id": "codex-relay-balance",
       "name": "Codex Relay Balance",

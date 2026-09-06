@@ -284,6 +284,22 @@
       "homepage": "https://github.com/cocoxia123/CodexPluginTranslator",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-plugin-translator.js",
       "sha256": "7baf09e43e1e0d7a2db7790b9a9bee9c186a3796869baa73eee04aaa9fbfb4b4"
+    },
+    {
+      "id": "window-model-isolation",
+      "name": "Window Model Isolation",
+      "description": "codex在某个版本之后模型配置快照不再是窗口级，而是全局。回复时一个不注意就会发生在逆向任务的窗口用自己的官key，这非常可怕！这份脚本可以维护对话级别的模型配置快照。",
+      "version": "1.0.0",
+      "author": "tohsakarat",
+      "tags": [
+        "codex",
+        "models",
+        "sessions",
+        "safety"
+      ],
+      "homepage": "",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/window-model-isolation.js",
+      "sha256": "741ed246901c1c304b029d6e14ad3955214fab2b3323d5dcb19bb4d42f094baf"
     }
   ]
 }

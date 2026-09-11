@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-08-22T15:50:28Z",
+  "updated_at": "2026-09-11T02:00:16Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -284,6 +284,34 @@
       "homepage": "https://github.com/cocoxia123/CodexPluginTranslator",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-plugin-translator.js",
       "sha256": "7baf09e43e1e0d7a2db7790b9a9bee9c186a3796869baa73eee04aaa9fbfb4b4"
+    },
+    {
+      "id": "deepseek-token-usage",
+      "name": "DeepSeek Token Usage",
+      "description": "按 DeepSeek 官方费率逐条请求统计 token 用量与费用，支持按天/按月的图表、峰谷时段计价、缓存命中拆分，面板可拖动缩放并可收成 mini 条。",
+      "version": "1.13.0",
+      "author": "Saydness",
+      "tags": [
+        "codex",
+        "deepseek",
+        "tokens",
+        "cost",
+        "usage",
+        "chart",
+        "ui"
+      ],
+      "homepage": "https://github.com/Saydness/codexpp-deepseek-token-usage",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/deepseek-token-usage.js",
+      "sha256": "9c39e6392651f41463e43258c2598d44b9134cd67d8f27bbb71fe81574db0a8d",
+      "requirements": [
+        "Codex++ 用户脚本环境",
+        "Codex 会话中使用 DeepSeek 模型"
+      ],
+      "limitations": [
+        "只在 Codex 页面内运行时采集，其他客户端的 DeepSeek 调用不计入",
+        "费用按内置官方费率表估算，与账号实际账单可能有小额差异",
+        "历史数据保存在本机 localStorage，清理站点数据后会丢失"
+      ]
     }
   ]
 }

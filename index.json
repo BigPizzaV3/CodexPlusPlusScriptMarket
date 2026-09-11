@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-08-22T15:50:28Z",
+  "updated_at": "2026-09-11T02:41:22Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -284,6 +284,34 @@
       "homepage": "https://github.com/cocoxia123/CodexPluginTranslator",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-plugin-translator.js",
       "sha256": "7baf09e43e1e0d7a2db7790b9a9bee9c186a3796869baa73eee04aaa9fbfb4b4"
+    },
+    {
+      "id": "codex-remote-control-windows",
+      "name": "Codex Remote Control Windows",
+      "description": "为尚未显示远程控制入口的 Windows 版 Codex 打开“设置 → 连接 → 控制其他设备”。通过 Codex++ 注入，启用客户端已有功能。",
+      "version": "0.1.0",
+      "author": "xsxustc",
+      "tags": [
+        "codex",
+        "windows",
+        "remote",
+        "connections",
+        "ui"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket/blob/main/docs/codex-remote-control-windows.md",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-remote-control-windows.js",
+      "sha256": "0d3eba82db502c1240ccc77c922fdb1f4a087b44cf8214a328502b53e93d4e8d",
+      "requirements": [
+        "Windows 版 Codex，且客户端包含远程控制原生功能",
+        "通过 Codex++ 启动 Codex，并启用用户脚本",
+        "渲染页面提供兼容的 Statsig 客户端及对应功能开关"
+      ],
+      "limitations": [
+        "仅打开客户端已有的远程控制入口；配对和连接仍由 Codex 处理",
+        "账号、服务端和网络条件仍需满足 Codex 远程连接要求",
+        "Codex 更新可能改变内部功能开关，需要重新适配",
+        "禁用后需重启 Codex，或调用脚本 stop() 恢复方法"
+      ]
     }
   ]
 }

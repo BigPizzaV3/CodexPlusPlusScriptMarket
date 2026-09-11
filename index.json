@@ -254,9 +254,9 @@
     },
     {
       "id": "codex-native-matrix-selector",
-      "name": "Codex Native Matrix Selector",
-      "description": "A theme-aware model and reasoning matrix backed by Codex's native selector data and handlers.",
-      "version": "0.8.0",
+      "name": "Codex Model Matrix",
+      "description": "A compact theme-aware Codex model selector with a snap-drag reasoning slider.",
+      "version": "1.0.0",
       "author": "Codex",
       "tags": [
         "codex",
@@ -266,7 +266,7 @@
       ],
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/Codex%20Model%20Matrix.js",
-      "sha256": "0a25838a887699f8c8b72efc67f64d9df045697f6e1555b856fb10a9baa8f075"
+      "sha256": "01e05efec088df6c3eb7e6c1538fe2a685d402515130a854fb457532529b9d9d"
     },
     {
       "id": "codex-plugin-translator",

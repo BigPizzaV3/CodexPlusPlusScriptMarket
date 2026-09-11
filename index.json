@@ -29,6 +29,22 @@
       ]
     },
     {
+      "id": "codex-native-matrix-selector",
+      "name": "Codex Model Matrix",
+      "description": "A compact theme-aware Codex model selector with a snap-drag reasoning slider.",
+      "version": "1.0.0",
+      "author": "lx",
+      "tags": [
+        "codex",
+        "models",
+        "reasoning",
+        "ui"
+      ],
+      "homepage": "https://github.com/Xiazhixuan119748/Codex-Model-Matrix",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/Codex%20Model%20Matrix.js",
+      "sha256": "01e05efec088df6c3eb7e6c1538fe2a685d402515130a854fb457532529b9d9d"
+    },
+    {
       "id": "codex-context-used-meter",
       "name": "Codex Context Used Meter",
       "description": "在 Codex App 对话界面显示当前会话上下文余量，并支持可选 Provider 余额、消耗动画、悬停历史图、inline/floating 显示和主题切换。",
@@ -251,22 +267,6 @@
       "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/prompt-optimize.js",
       "sha256": "f7cf6b6f69e1c7d5dfc0f3f401b970fc26130c96283b43bf425991db4a8205c9"
-    },
-    {
-      "id": "codex-native-matrix-selector",
-      "name": "Codex Model Matrix",
-      "description": "A compact theme-aware Codex model selector with a snap-drag reasoning slider.",
-      "version": "1.0.0",
-      "author": "Codex",
-      "tags": [
-        "codex",
-        "models",
-        "reasoning",
-        "ui"
-      ],
-      "homepage": "",
-      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/Codex%20Model%20Matrix.js",
-      "sha256": "01e05efec088df6c3eb7e6c1538fe2a685d402515130a854fb457532529b9d9d"
     },
     {
       "id": "codex-plugin-translator",

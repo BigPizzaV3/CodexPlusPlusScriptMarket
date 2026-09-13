@@ -220,9 +220,9 @@ test("same-version reinjection reuses an idle optimizer without rebuilding it", 
 test("release revision isolates its DOM ownership from legacy selectors", () => {
   const source = fs.readFileSync(scriptPath, "utf8");
 
-  assert.match(source, /version:\s*1\.0\.3/);
-  assert.match(source, /const SCRIPT_VERSION = "1\.0\.3"/);
-  assert.match(source, /const OWNER_TOKEN = "v1-0-3-anchor"/);
+  assert.match(source, /version:\s*1\.0\.4/);
+  assert.match(source, /const SCRIPT_VERSION = "1\.0\.4"/);
+  assert.match(source, /const OWNER_TOKEN = "v1-0-4-bridge-first"/);
   assert.match(source, /const BUTTON_ATTR = `data-codex-prompt-optimize-\$\{OWNER_TOKEN\}`/);
   assert.match(source, /const STYLE_ID = `codex-plus-prompt-optimize-style-\$\{OWNER_TOKEN\}`/);
   assert.doesNotMatch(source, /Node\.prototype/);
@@ -262,7 +262,7 @@ test("right-click stays local and opens the settings panel without optimizing", 
   assert.deepEqual(calls, { preventDefault: 1, stopPropagation: 1, openSettings: 1 });
 });
 
-test("native Electron fetch is preferred over the optional LLM bridge", async () => {
+test("LLM Bridge is preferred over the legacy native fetch envelope", async () => {
   const source = fs.readFileSync(scriptPath, "utf8");
   const functionSource = extractAsyncFunction(source, "requestJson");
   const calls = { native: 0, bridge: 0 };
@@ -271,33 +271,6 @@ test("native Electron fetch is preferred over the optional LLM bridge", async ()
     electronFetchJson: async (options) => {
       calls.native += 1;
       return { transport: "native", options };
-    },
-    hasCodexPlusBridge: () => {
-      calls.bridge += 1;
-      return true;
-    },
-    requestJsonViaCodexBridge: async () => {
-      calls.bridge += 1;
-      return { transport: "bridge" };
-    },
-  });
-
-  const result = await requestJson({ upstreamUrl: "https://example.invalid/v1/chat/completions" });
-
-  assert.equal(result.transport, "native");
-  assert.equal(calls.native, 1);
-  assert.equal(calls.bridge, 0);
-});
-
-test("LLM bridge remains a compatibility fallback when native fetch is absent", async () => {
-  const source = fs.readFileSync(scriptPath, "utf8");
-  const functionSource = extractAsyncFunction(source, "requestJson");
-  const calls = { native: 0, bridge: 0 };
-  const requestJson = vm.runInNewContext(`(${functionSource})`, {
-    hasElectronFetchBridge: () => false,
-    electronFetchJson: async () => {
-      calls.native += 1;
-      return { transport: "native" };
     },
     hasCodexPlusBridge: () => true,
     requestJsonViaCodexBridge: async () => {
@@ -311,6 +284,57 @@ test("LLM bridge remains a compatibility fallback when native fetch is absent", 
   assert.equal(result.transport, "bridge");
   assert.equal(calls.native, 0);
   assert.equal(calls.bridge, 1);
+});
+
+test("native fetch remains a fallback when the LLM Bridge route is unsupported", async () => {
+  const source = fs.readFileSync(scriptPath, "utf8");
+  const functionSource = extractAsyncFunction(source, "requestJson");
+  const calls = { native: 0, bridge: 0 };
+  const requestJson = vm.runInNewContext(`(${functionSource})`, {
+    hasElectronFetchBridge: () => true,
+    electronFetchJson: async () => {
+      calls.native += 1;
+      return { transport: "native" };
+    },
+    hasCodexPlusBridge: () => true,
+    isBridgeUnsupportedError(error) {
+      return error?.code === "CPO_BRIDGE_UNSUPPORTED";
+    },
+    debugLog() {},
+    requestJsonViaCodexBridge: async () => {
+      calls.bridge += 1;
+      const error = new Error("当前 Codex++ 的 LLM Bridge 路由不可用");
+      error.code = "CPO_BRIDGE_UNSUPPORTED";
+      throw error;
+    },
+  });
+
+  const result = await requestJson({ upstreamUrl: "https://example.invalid/v1/chat/completions" });
+
+  assert.equal(result.transport, "native");
+  assert.equal(calls.native, 1);
+  assert.equal(calls.bridge, 1);
+});
+
+test("native fetch service rejection is surfaced when no bridge is available", async () => {
+  const source = fs.readFileSync(scriptPath, "utf8");
+  const functionSource = extractAsyncFunction(source, "requestJson");
+  const calls = { native: 0, bridge: 0 };
+  const requestJson = vm.runInNewContext(`(${functionSource})`, {
+    hasElectronFetchBridge: () => true,
+    electronFetchJson: async () => {
+      calls.native += 1;
+      throw new Error("Error invoking remote method: HTTP requests must use the HTTP fetch service.");
+    },
+    hasCodexPlusBridge: () => false,
+  });
+
+  await assert.rejects(
+    requestJson({ upstreamUrl: "https://example.invalid/v1/chat/completions" }),
+    /HTTP requests must use the HTTP fetch service/,
+  );
+  assert.equal(calls.native, 1);
+  assert.equal(calls.bridge, 0);
 });
 
 test("LLM bridge errors redact bearer tokens before display", async () => {
@@ -359,4 +383,25 @@ test("upstream error messages redact bearer tokens before display", () => {
   assert.match(message, /Authorization=\[REDACTED\]|Bearer \[REDACTED\]/i);
   assert.match(message, /token=\[REDACTED\]/i);
   assert.doesNotMatch(message, /secret-value|also-secret/);
+});
+
+test("optimization uses a bounded timeout and gives immediate plus slow-request feedback", () => {
+  const source = fs.readFileSync(scriptPath, "utf8");
+
+  assert.match(source, /const REQUEST_TIMEOUT_MS = 120000/);
+  assert.match(source, /const SLOW_REQUEST_NOTICE_MS = 15000/);
+  assert.match(source, /const VERY_SLOW_REQUEST_NOTICE_MS = 45000/);
+  assert.match(source, /const LONG_REQUEST_NOTICE_MS = 90000/);
+  assert.match(source, /runtime\.loading = true;\s+refreshButtonAppearance\(\);\s+showToast\("正在优化，可再次点击取消", "info"\);/);
+  assert.match(source, /仍在等待 gpt-5\.5 响应，可再次点击取消/);
+  assert.match(source, /gpt-5\.5 响应较慢，仍可再次点击取消/);
+});
+
+test("write verification rechecks the current composer after ProseMirror replaces the node", () => {
+  const source = fs.readFileSync(scriptPath, "utf8");
+
+  assert.match(source, /const verificationInput =/);
+  assert.match(source, /result\.input\.isConnected/);
+  assert.match(source, /findComposerInput\(\)/);
+  assert.match(source, /inputReplaced: verificationInput !== result\.input/);
 });

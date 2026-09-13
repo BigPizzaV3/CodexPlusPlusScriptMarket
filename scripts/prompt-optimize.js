@@ -2,17 +2,17 @@
 @codex-plus-script
 name: Prompt Optimize
 description: Optimize the composer prompt with an external LLM; click ✨ to optimize, click again to restore.
-version: 1.0.3
+version: 1.0.4
 author: Codex++ Community
 */
 
 (() => {
-  const SCRIPT_VERSION = "1.0.3";
+  const SCRIPT_VERSION = "1.0.4";
   // Keep the published script version separate from the locally loaded DOM
   // owner. A cached legacy instance must not be able to remove this revision's
   // button or its styles during a later reinjection.
-  const INSTANCE_REVISION = "v1-0-3-anchor";
-  const OWNER_TOKEN = "v1-0-3-anchor";
+  const INSTANCE_REVISION = "v1-0-4-bridge-first";
+  const OWNER_TOKEN = "v1-0-4-bridge-first";
   const API_KEY = "__codexPlusPromptOptimize";
   const MARKET_ID = "prompt-optimize";
   const BRIDGE_KEY = "__codexSessionDeleteBridge";
@@ -27,7 +27,10 @@ author: Codex++ Community
   const POLL_MS = 1500;
   const MUTATION_DEBOUNCE_MS = 120;
   const TOAST_MS = 2200;
-  const REQUEST_TIMEOUT_MS = 60000;
+  const REQUEST_TIMEOUT_MS = 120000;
+  const SLOW_REQUEST_NOTICE_MS = 15000;
+  const VERY_SLOW_REQUEST_NOTICE_MS = 45000;
+  const LONG_REQUEST_NOTICE_MS = 90000;
   const TEMPERATURE = 0.3;
   const MAX_TOKENS = 4096;
   const DEBUG_PREFIX = "[prompt-optimize]";
@@ -1252,11 +1255,20 @@ author: Codex++ Community
     const result = writeComposerText(text, input);
     if (result.ok) {
       await afterEditorPaint();
-      if (result.token === runtime.writeToken && result.input.isConnected) {
-        const verified = normalizeText(readComposerText(result.input));
+      // ProseMirror may replace the editor node after dispatching input. Keep
+      // verifying the active composer instead of treating that reconciliation
+      // as a failed write.
+      const verificationInput =
+        result.token === runtime.writeToken && result.input.isConnected
+          ? result.input
+          : result.token === runtime.writeToken
+            ? findComposerInput()
+            : null;
+      if (verificationInput instanceof HTMLElement && verificationInput.isConnected) {
+        const verified = normalizeText(readComposerText(verificationInput));
         if (verified === result.next || verified.trimEnd() === result.next.trimEnd()) {
           runtime.lastWrittenText = verified;
-          return { ok: true, verified: true, normalized: verified !== result.next };
+          return { ok: true, verified: true, normalized: verified !== result.next, inputReplaced: verificationInput !== result.input };
         }
         result.reason = "write-mismatch";
         result.verified = verified;
@@ -1892,13 +1904,19 @@ author: Codex++ Community
   }
 
   async function requestJson(options) {
-    // Codex Desktop's native fetch channel returns a concrete HTTP response on
-    // current builds. The optional /llm-proxy bridge can remain pending until
-    // the outer 60s timeout, which turns upstream failures into a misleading
-    // generic "优化超时". Use the native channel first and never retry the same
-    // prompt through another transport after an upstream response/error.
+    // Prefer the current LLM Bridge: newer hosts reject the renderer's legacy
+    // `sendMessageFromView({type:"fetch"})` envelope before it reaches HTTP.
+    if (hasCodexPlusBridge()) {
+      try {
+        return await requestJsonViaCodexBridge(options);
+      } catch (error) {
+        if (!isBridgeUnsupportedError(error)) {
+          throw error;
+        }
+        debugLog("LLM Bridge route unsupported; falling back to native fetch service");
+      }
+    }
     if (hasElectronFetchBridge()) return electronFetchJson(options);
-    if (hasCodexPlusBridge()) return requestJsonViaCodexBridge(options);
     throw new Error("当前 Codex++ 不提供可用的 LLM 请求通道");
   }
 
@@ -2045,6 +2063,16 @@ author: Codex++ Community
     };
     runtime.loading = true;
     refreshButtonAppearance();
+    showToast("正在优化，可再次点击取消", "info");
+    const slowNoticeTimer = window.setTimeout(() => {
+      if (runtime.loading) showToast("仍在等待 gpt-5.5 响应，可再次点击取消", "info");
+    }, SLOW_REQUEST_NOTICE_MS);
+    const verySlowNoticeTimer = window.setTimeout(() => {
+      if (runtime.loading) showToast("gpt-5.5 响应较慢，仍可再次点击取消", "info");
+    }, VERY_SLOW_REQUEST_NOTICE_MS);
+    const longRequestNoticeTimer = window.setTimeout(() => {
+      if (runtime.loading) showToast("请求仍未完成，正在等待上游返回", "info");
+    }, LONG_REQUEST_NOTICE_MS);
 
     try {
       const optimized = await optimizePrompt(original, settings, timeout.signal);
@@ -2079,6 +2107,9 @@ author: Codex++ Community
         showToast(message.slice(0, 160) || "优化失败", "error");
       }
     } finally {
+      window.clearTimeout(slowNoticeTimer);
+      window.clearTimeout(verySlowNoticeTimer);
+      window.clearTimeout(longRequestNoticeTimer);
       timeout.cleanup();
       runtime.loading = false;
       runtime.abort = null;
@@ -2440,7 +2471,7 @@ author: Codex++ Community
       bridgePathUnsupported: runtime.bridgePathUnsupported,
       bridgePath: BRIDGE_PATH,
       electronFetchBridge: hasElectronFetchBridge(),
-      requestTransportPreference: hasElectronFetchBridge() ? "electron-fetch" : hasCodexPlusBridge() ? "llm-bridge" : "none",
+      requestTransportPreference: hasCodexPlusBridge() ? "llm-bridge" : hasElectronFetchBridge() ? "electron-fetch" : "none",
       requestTransportAvailable: hasRequestTransport(),
       settings: (() => {
         const s = loadSettings();

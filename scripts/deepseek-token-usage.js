@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.13.0
+// @version      1.16.1
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.13.0";
+  const VERSION = "1.16.1";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -23,6 +23,22 @@
   const MAX_RECORDS = 50000;
   const DEDUPE_WINDOW_MS = 10 * 60 * 1000;
   const SAVE_DELAY_MS = 300;
+
+  /*
+   * 余额：Codex 的页面被 CSP 禁止联网（default-src 'none'，面板里任何 fetch
+   * 都会被拦下），所以面板自己不去请求余额接口：由随 Codex 一起启动的本机
+   * 助手在页面外读取余额，再回填进来。助手读余额的来源，面板里可以切换：
+   *   自动 → 本机代理 → 环境变量 → Codex 的 auth.json → 本机加密保存的 Key
+   * 用户在面板里填的 Key 只停在页面内存里，交给助手用 DPAPI 加密后存在本机；
+   * 面板自己的 localStorage 不保存任何密钥。不需要余额也可以整套关掉。
+   */
+  const BALANCE_HELPER_TIMEOUT_MS = 3 * 60 * 1000;
+  /* 状态行只当短提示：助手失联那类消息在恢复后不该一直挂在面板上。 */
+  const BALANCE_STATUS_TTL_MS = 45 * 1000;
+  const BALANCE_BAR_DAYS = 14;
+  const MAX_BALANCE_SNAPSHOTS = 5000;
+  /* 用户刚填、还没交给助手保存的 Key：只存在于页面内存，从不进 localStorage。 */
+  let pendingBalanceKey = "";
 
   const MODEL_OPTIONS = [
     ["deepseek-flash", "DeepSeek Flash (V4.1)"],
@@ -55,6 +71,7 @@
 
   const state = {
     records: [],
+    balances: [],
     settings: {
       model: DEFAULT_MODEL,
       mode: "day",
@@ -66,6 +83,21 @@
       panelHeight: null,
       panelMinimized: false,
       hasOpened: false,
+      balanceCurrency: "CNY",
+      balanceSettingsOpen: false,
+      balanceRequestAt: 0,
+      balanceHandledAt: 0,
+      balanceSyncAt: 0,
+      balancePushedAt: 0,
+      balanceProxyAuth: null,
+      balanceSyncNote: "",
+      balanceEnabled: true,
+      balanceSource: "auto",
+      balanceKeyRequestAt: 0,
+      balanceKeyClearAt: 0,
+      balanceKeySaved: false,
+      balanceKeyPresent: null,
+      balanceSourceUsed: "",
     },
     activeModel: DEFAULT_MODEL,
     turnTotals: Object.create(null),
@@ -79,10 +111,76 @@
     dragState: null,
     resizeState: null,
     resizeObserver: null,
+    observer: null,
     chartHitboxes: [],
+    balanceStatus: "",
+    balanceStatusTone: "",
+    balanceStatusAt: 0,
   };
 
-  if (window[PANEL_API]?.version === VERSION) return;
+  /* 版本号当三位数字比大小，用来判断页面里那份是不是更新。 */
+  function versionRank(text) {
+    return String(text || "0")
+      .split(".")
+      .map((part) => Number(part) || 0);
+  }
+
+  function isOlderThan(other) {
+    const mine = versionRank(VERSION);
+    const theirs = versionRank(other);
+    for (let index = 0; index < 3; index += 1) {
+      const left = mine[index] || 0;
+      const right = theirs[index] || 0;
+      if (left !== right) return left < right;
+    }
+    return false;
+  }
+
+  const existingPanelApi = window[PANEL_API];
+  if (existingPanelApi?.version === VERSION) return;
+  if (existingPanelApi?.version && isOlderThan(existingPanelApi.version)) {
+    return;
+  }
+
+  /*
+   * 同一页面里常常同时存在两份脚本（Codex++ 热重载会注入新版本，旧版本的回调
+   * 仍在跑）。旧版本如果继续按自己的版本重写面板内容，两份就会互相覆盖，面板
+   * 看起来像「按钮全失效」。所以只有接管了 window.__deepseekUsagePanel 的那一份
+   * 才准动面板，另一份发现名字被抢走后就安静退休。
+   */
+  const instance = { api: null, retired: false };
+
+  function ownsPanel() {
+    if (instance.retired) return false;
+    /* start() 是同步跑在最后那行登记之前的，那时先当自己是主人。 */
+    if (!instance.api) return true;
+    return window[PANEL_API] === instance.api;
+  }
+
+  function retirePanel() {
+    if (instance.retired) return;
+    instance.retired = true;
+    try {
+      state.observer?.disconnect?.();
+    } catch (_) {
+      /* 退不掉也不影响，下面的守卫已经不会再动面板。 */
+    }
+    state.observer = null;
+    /* 退休以后不许再往 localStorage 写：否则会把接班那份的状态盖回旧的。 */
+    if (state.saveTimer) {
+      window.clearTimeout(state.saveTimer);
+      state.saveTimer = 0;
+    }
+    for (const key of ["ensureTimer", "renderTimer"]) {
+      if (!state[key]) continue;
+      try {
+        window.cancelAnimationFrame(state[key]);
+      } catch (_) {
+        /* 忽略 */
+      }
+      state[key] = 0;
+    }
+  }
 
   function count(value) {
     const number = Number(value);
@@ -301,12 +399,26 @@
           state.records.map((record) => recordFingerprint(record)).filter(Boolean)
         );
       }
+      if (Array.isArray(stored?.balances)) {
+        const usable = stored.balances.filter(isValidBalance);
+        state.balances = usable;
+        /* 旧版本可能存下 0 元脏快照，清理后立刻写回，避免每次刷新都重算。 */
+        if (usable.length !== stored.balances.length) scheduleSave();
+      }
       if (stored?.settings && typeof stored.settings === "object") {
         state.settings = {
           ...state.settings,
           ...stored.settings,
         };
       }
+      /*
+       * Codex 每次启动后先看当天的用量：不沿用上次选的日期/月份，
+       * 免得一打开看到的是别的日子或上个月。
+       */
+      state.settings.mode = "day";
+      state.settings.day = todayKey();
+      state.settings.month = state.settings.day.slice(0, 7);
+      scheduleSave();
       state.settings.model = normalizeModel(
         state.settings.model || DEFAULT_MODEL
       );
@@ -318,6 +430,7 @@
       state.records = [];
     }
     pruneRecords();
+    pruneBalances();
   }
 
   function isValidRecord(record) {
@@ -359,19 +472,51 @@
     return `${record.m}|${signature}|${Math.floor(Number(record.t) / 300000)}`;
   }
 
+  function isValidBalance(snapshot) {
+    return (
+      snapshot &&
+      typeof snapshot === "object" &&
+      Number.isFinite(Number(snapshot.t)) &&
+      typeof snapshot.d === "string" &&
+      Number.isFinite(Number(snapshot.v)) &&
+      /* 手动入口的空输入会变成 0，那不是真实余额，直接丢弃。 */
+      !(Number(snapshot.v) <= 0 && snapshot.s !== "api")
+    );
+  }
+
+  function pruneBalances() {
+    const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    const snapshots = state.balances
+      .filter(isValidBalance)
+      .filter((snapshot) => Number(snapshot.t) >= cutoff)
+      .sort((a, b) => Number(a.t) - Number(b.t));
+    if (snapshots.length > MAX_BALANCE_SNAPSHOTS) {
+      snapshots.splice(0, snapshots.length - MAX_BALANCE_SNAPSHOTS);
+    }
+    state.balances = snapshots;
+    balanceCache = null;
+  }
+
+  function serializedState() {
+    return {
+      version: VERSION,
+      settings: state.settings,
+      records: state.records,
+      balances: state.balances,
+    };
+  }
+
   function scheduleSave() {
+    if (instance.retired) return;
     if (state.saveTimer) return;
     state.saveTimer = window.setTimeout(() => {
       state.saveTimer = 0;
       pruneRecords();
+      pruneBalances();
       try {
         localStorage.setItem(
           STORAGE_KEY,
-          JSON.stringify({
-            version: VERSION,
-            settings: state.settings,
-            records: state.records,
-          })
+          JSON.stringify(serializedState())
         );
       } catch (_) {
         state.records = state.records.slice(
@@ -380,11 +525,7 @@
         try {
           localStorage.setItem(
             STORAGE_KEY,
-            JSON.stringify({
-              version: VERSION,
-              settings: state.settings,
-              records: state.records,
-            })
+            JSON.stringify(serializedState())
           );
         } catch (_) {
           // Keep running even if localStorage is unavailable.
@@ -452,6 +593,356 @@
     updateLauncherBadge();
     scheduleRender();
     return true;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Account balance                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  function balanceSymbol(currency) {
+    return String(currency || "CNY").toUpperCase() === "CNY" ? "¥" : "$";
+  }
+
+  function formatBalance(value, currency) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return `${balanceSymbol(currency)}${number.toFixed(2)}`;
+  }
+
+  /* 余额下降记为正数消耗，余额上升（充值）显示为带 + 的负数。 */
+  function formatBalanceSpend(value, currency) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    const prefix = number < 0 ? "+" : "";
+    return `${prefix}${balanceSymbol(currency)}${Math.abs(number).toFixed(2)}`;
+  }
+
+  /* 快照来源：api=助手自动读取，log=历史文件导入，其它=手动记录。 */
+  function balanceSourceLabel(source) {
+    if (source === "api") return "自动获取";
+    if (source === "log") return "历史导入";
+    return "手动记录";
+  }
+
+  /* 助手最后一次成功读到余额用的是哪条路。 */
+  function balanceReadSourceLabel(source) {
+    if (source === "proxy") return "本机代理";
+    if (source === "env") return "环境变量 Key";
+    if (source === "auth") return "Codex auth.json";
+    if (source === "store") return "本机保存的 Key";
+    return "";
+  }
+
+  function balanceEnabled() {
+    return state.settings.balanceEnabled !== false;
+  }
+
+  function balanceSourceChoice() {
+    const value = String(state.settings.balanceSource || "auto");
+    return value === "proxy" || value === "key" ? value : "auto";
+  }
+
+  function latestBalance() {
+    let latest = null;
+    for (const snapshot of state.balances) {
+      if (!latest || Number(snapshot.t) >= Number(latest.t)) latest = snapshot;
+    }
+    return latest;
+  }
+
+  function recordBalance(
+    value,
+    { source = "manual", currency = "CNY", timestamp = Date.now() } = {}
+  ) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return null;
+    /* 0 元快照不能记账：会被当日消耗算成一次充值。官方接口回传的 0 元仍然保留。 */
+    if (number === 0 && source !== "api") return null;
+    const rounded = Number(number.toFixed(6));
+    const day = todayKey(timestamp);
+    const latest = latestBalance();
+    if (latest && latest.v === rounded && latest.d === day) {
+      latest.t = Number(timestamp);
+      latest.s = source;
+    } else {
+      state.balances.push({
+        t: Number(timestamp),
+        d: day,
+        v: rounded,
+        c: String(currency || "CNY").toUpperCase(),
+        s: source,
+      });
+    }
+    pruneBalances();
+    scheduleSave();
+    render();
+    updateLauncherBadge();
+    return latestBalance();
+  }
+
+  /*
+   * 批量导入历史余额快照（本机助手读 balance.log 这类文件后回填）。
+   * 只补缺口：同一时刻、或同一分钟内同一金额都算已存在，重复导入不会翻倍；
+   * 0 元是查询失败的占位，一律丢掉。
+   */
+  function importBalanceSnapshots(entries) {
+    if (!Array.isArray(entries)) return 0;
+    let added = 0;
+    for (const entry of entries) {
+      const value = Number(entry?.v);
+      const at = Number(entry?.t);
+      if (!Number.isFinite(value) || value <= 0) continue;
+      if (!Number.isFinite(at) || at <= 0) continue;
+      const day = todayKey(at);
+      const rounded = Number(value.toFixed(6));
+      const known = state.balances.some(
+        (item) =>
+          Number(item.t) === at ||
+          (item.d === day &&
+            Number(item.v) === rounded &&
+            Math.abs(Number(item.t) - at) < 60000)
+      );
+      if (known) continue;
+      state.balances.push({
+        t: at,
+        d: day,
+        v: rounded,
+        c: String(
+          entry?.c || state.settings.balanceCurrency || "CNY"
+        ).toUpperCase(),
+        s: String(entry?.s || "log"),
+      });
+      added += 1;
+    }
+    if (!added) return 0;
+    pruneBalances();
+    scheduleSave();
+    render();
+    updateLauncherBadge();
+    return added;
+  }
+
+  function dayDistance(from, to) {
+    const start = Date.parse(`${from}T00:00:00Z`);
+    const end = Date.parse(`${to}T00:00:00Z`);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+    return Math.max(0, Math.round((end - start) / 86400000));
+  }
+
+  /*
+   * 每天只保留首末两次快照：当日消耗 = 上一个有记录的收盘余额 - 当日收盘余额。
+   * 中间断档的日期会用 spanDays 标记，避免把跨多天的消耗当成单日消耗。
+   */
+  let balanceCache = null;
+
+  function balanceDayList() {
+    if (balanceCache) return balanceCache;
+    const days = new Map();
+    for (const snapshot of state.balances) {
+      /* 0 元快照只用于展示当前余额，不能当跨天基线。 */
+      if (Number(snapshot.v) <= 0) continue;
+      const item = days.get(snapshot.d) || {
+        day: snapshot.d,
+        first: snapshot,
+        last: snapshot,
+        count: 0,
+      };
+      item.count += 1;
+      if (Number(snapshot.t) < Number(item.first.t)) item.first = snapshot;
+      if (Number(snapshot.t) >= Number(item.last.t)) item.last = snapshot;
+      days.set(snapshot.d, item);
+    }
+    const list = Array.from(days.values()).sort((a, b) =>
+      a.day < b.day ? -1 : a.day > b.day ? 1 : 0
+    );
+    list.forEach((item, index) => {
+      const previous = index > 0 ? list[index - 1] : null;
+      item.open = previous ? Number(previous.last.v) : null;
+      item.close = Number(item.last.v);
+      item.spend = previous
+        ? Number((Number(previous.last.v) - Number(item.last.v)).toFixed(6))
+        : null;
+      /* 还没有跨天基线时，用当天首尾快照给出当日消耗（会偏低，仅作参考）。 */
+      item.spendFromFirst = Number(
+        (Number(item.first.v) - Number(item.last.v)).toFixed(6)
+      );
+      item.spanDays = previous ? dayDistance(previous.day, item.day) : 0;
+    });
+    balanceCache = list;
+    return list;
+  }
+
+  function balanceDayItem(day) {
+    return balanceDayList().find((item) => item.day === day) || null;
+  }
+
+  function balanceMonthSpend(month, dayList = balanceDayList()) {
+    const list = dayList;
+    const inside = list.filter((item) => item.day.startsWith(month));
+    if (!inside.length) return null;
+    const first = inside[0];
+    const close = Number(inside[inside.length - 1].last.v);
+    const hasOpen = first.open !== null && first.open !== undefined;
+    const open = hasOpen ? Number(first.open) : Number(first.first.v);
+    const previous = hasOpen ? list[list.indexOf(first) - 1] : null;
+    return {
+      open,
+      close,
+      spend: Number((open - close).toFixed(6)),
+      spanDays: first.spanDays,
+      from: previous ? previous.day : first.day,
+      to: inside[inside.length - 1].day,
+    };
+  }
+
+  function balanceStatusElement() {
+    return (
+      state.ui?.panel?.querySelector('[data-field="balanceStatus"]') || null
+    );
+  }
+
+  function setBalanceStatus(message, tone = "") {
+    state.balanceStatus = message;
+    state.balanceStatusTone = tone;
+    state.balanceStatusAt = Date.now();
+    paintBalanceStatus();
+  }
+
+  function paintBalanceStatus() {
+    const element = balanceStatusElement();
+    if (!element) return;
+    const fresh =
+      Date.now() - Number(state.balanceStatusAt || 0) < BALANCE_STATUS_TTL_MS;
+    element.textContent = fresh ? state.balanceStatus : "";
+    element.dataset.tone = fresh ? state.balanceStatusTone || "" : "";
+  }
+
+  function balanceSyncAge() {
+    const at = Number(state.settings.balanceSyncAt) || 0;
+    return at ? Date.now() - at : Infinity;
+  }
+
+  function balanceHelperAlive() {
+    return balanceSyncAge() < BALANCE_HELPER_TIMEOUT_MS;
+  }
+
+  function formatAgo(milliseconds) {
+    if (!Number.isFinite(milliseconds)) return "从未";
+    const seconds = Math.max(0, Math.round(milliseconds / 1000));
+    if (seconds < 90) return `${seconds} 秒前`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 90) return `${minutes} 分钟前`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 36) return `${hours} 小时前`;
+    return `${Math.round(hours / 24)} 天前`;
+  }
+
+  function balanceSyncText() {
+    if (!balanceEnabled()) return "余额功能已关闭";
+    if (!Number(state.settings.balanceSyncAt)) {
+      return "余额助手没在跑（用量统计不受影响）";
+    }
+    if (!balanceHelperAlive()) {
+      return `余额助手 ${formatAgo(balanceSyncAge())}没动静，重启 Codex 可恢复`;
+    }
+    const note = String(state.settings.balanceSyncNote || "").trim();
+    const used = balanceReadSourceLabel(state.settings.balanceSourceUsed);
+    if (used) return `余额来源：${used} · ${formatAgo(balanceSyncAge())}同步`;
+    if (note) return note;
+    if (state.settings.balanceProxyAuth === false) {
+      return "助手已就绪，等待第一次 DeepSeek 请求（在 Codex 里发一条消息即可）";
+    }
+    return `本机助手正常运行 · ${formatAgo(balanceSyncAge())}同步`;
+  }
+
+  /*
+   * Codex 页面被 CSP 禁止联网，面板里任何 fetch 都会被拦下，所以这里不直接
+   * 请求接口，只登记一个刷新请求；随 Codex 启动的本机助手会读到它，把真实
+   * 余额回填进来（recordBalance）。
+   */
+  function requestBalanceRefresh({ silent = false } = {}) {
+    if (!balanceEnabled()) {
+      if (!silent) {
+        setBalanceStatus("余额功能已关闭，可在「说明」里打开", "warn");
+      }
+      return false;
+    }
+    state.settings.balanceRequestAt = Date.now();
+    scheduleSave();
+    const alive = balanceHelperAlive();
+    if (!silent) {
+      setBalanceStatus(
+        alive ? "已请求刷新，余额助手稍后回填" : "余额助手没在跑，重启 Codex 会自动带上",
+        alive ? "ok" : "warn"
+      );
+    }
+    render();
+    return alive;
+  }
+
+  function balanceSyncReport() {
+    const latest = latestBalance();
+    return {
+      requestAt: Number(state.settings.balanceRequestAt) || 0,
+      handledAt: Number(state.settings.balanceHandledAt) || 0,
+      syncAt: Number(state.settings.balanceSyncAt) || 0,
+      pushedAt: Number(state.settings.balancePushedAt) || 0,
+      proxyAuth: state.settings.balanceProxyAuth,
+      note: state.settings.balanceSyncNote || "",
+      currency: state.settings.balanceCurrency || "CNY",
+      lastValue: latest ? Number(latest.v) : null,
+      lastDay: latest ? latest.d : "",
+      visible: Boolean(state.ui?.panel && !state.ui.panel.hidden),
+      enabled: balanceEnabled(),
+      source: balanceSourceChoice(),
+      sourceUsed: state.settings.balanceSourceUsed || "",
+      hasKey: state.settings.balanceKeyPresent,
+      keyRequestAt: Number(state.settings.balanceKeyRequestAt) || 0,
+      keyClearAt: Number(state.settings.balanceKeyClearAt) || 0,
+      keySaved: state.settings.balanceKeySaved === true,
+      /* 助手取走这个值去加密保存；取完会通过 keySaved 让面板清掉。 */
+      pendingKey: pendingBalanceKey,
+    };
+  }
+
+  /* 本机助手调用：登记一次同步结果（心跳 / 推送成功 / 失败原因）。 */
+  function applyBalanceSync(report = {}) {
+    const info = report && typeof report === "object" ? report : {};
+    state.settings.balanceSyncAt = Date.now();
+    if (typeof info.hasAuth === "boolean") {
+      state.settings.balanceProxyAuth = info.hasAuth;
+    }
+    const handled = Number(info.handledRequestAt);
+    if (Number.isFinite(handled)) {
+      state.settings.balanceHandledAt = Math.max(
+        Number(state.settings.balanceHandledAt) || 0,
+        handled
+      );
+    }
+    if (info.pushed) {
+      state.settings.balancePushedAt = state.settings.balanceSyncAt;
+    }
+    if (typeof info.hasKey === "boolean") {
+      state.settings.balanceKeyPresent = info.hasKey;
+    }
+    if (typeof info.sourceUsed === "string" && info.sourceUsed) {
+      state.settings.balanceSourceUsed = info.sourceUsed;
+    }
+    /* 助手把面板里的 Key 存好了：内存里那份立刻丢掉。 */
+    if (info.keySaved === true) {
+      pendingBalanceKey = "";
+      state.settings.balanceKeySaved = true;
+      state.settings.balanceKeyPresent = true;
+    }
+    if (info.keyCleared === true) {
+      pendingBalanceKey = "";
+      state.settings.balanceKeySaved = false;
+      state.settings.balanceKeyPresent = false;
+    }
+    state.settings.balanceSyncNote = String(info.note || info.error || "");
+    scheduleSave();
+    render();
+    return balanceSyncReport();
   }
 
   function parseJson(value) {
@@ -921,6 +1412,54 @@
           <div class="dsu-card dsu-green"><span>输出 tokens</span><strong data-field="output">0</strong><small data-field="reasoning"></small></div>
           <div class="dsu-card dsu-red"><span>估算费用</span><strong data-field="cost">¥0.000000</strong><small data-field="rate"></small></div>
         </div>
+        <div class="dsu-balance-card">
+          <div class="dsu-card-title">
+            <span>账户余额</span>
+            <span class="dsu-balance-status" data-field="balanceStatus"></span>
+            <button type="button" class="dsu-text-button dsu-balance-toggle" data-action="balance-settings">说明</button>
+          </div>
+          <div class="dsu-balance-grid">
+            <div class="dsu-balance-main">
+              <span>当前余额</span>
+              <strong data-field="balanceNow">—</strong>
+              <small data-field="balanceNowHint">尚未记录</small>
+            </div>
+            <div><span>今日消耗</span><strong data-field="balanceToday">—</strong><small data-field="balanceTodayHint"></small></div>
+            <div><span>昨日消耗</span><strong data-field="balanceYesterday">—</strong><small data-field="balanceYesterdayHint"></small></div>
+            <div><span>本月消耗</span><strong data-field="balanceMonth">—</strong><small data-field="balanceMonthHint"></small></div>
+          </div>
+          <div class="dsu-balance-actions">
+            <input data-field="balanceInput" type="number" step="0.01" min="0" placeholder="手动填入当前余额">
+            <button type="button" class="dsu-text-button" data-action="balance-save">记录余额</button>
+            <button type="button" class="dsu-text-button" data-action="balance-fetch">刷新余额</button>
+          </div>
+          <div class="dsu-balance-settings" data-field="balanceSettings" hidden>
+            <p class="dsu-balance-note">余额由随 Codex 启动的本机助手读取 · <strong data-field="balanceSyncHint">检测中…</strong></p>
+            <label>余额来源
+              <select data-field="balanceSource">
+                <option value="auto">自动（先用本机代理，再直连）</option>
+                <option value="proxy">只问本机代理</option>
+                <option value="key">我填的 API Key</option>
+              </select>
+            </label>
+            <label>API Key
+              <input data-field="balanceKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...（只在需要时填一次）">
+            </label>
+            <button type="button" class="dsu-text-button" data-action="balance-key-save">保存 Key</button>
+            <button type="button" class="dsu-text-button" data-action="balance-key-clear">清除本机 Key</button>
+            <label class="dsu-balance-switch">
+              <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
+            </label>
+            <p class="dsu-balance-note">Codex 页面被安全策略禁止联网，余额只能由页面外的本机助手读取后回填。助手按上面选的来源读：自动 = 先问本机代理，读不到再用下面的 Key 直连 DeepSeek。填进面板的 Key 只经内存交给助手，用 Windows DPAPI 加密存在本机，<strong>不会写进统计、也不会随脚本上传</strong>；不需要余额可以整个关掉。点「刷新余额」可让助手立刻重读一次。</p>
+            <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
+          </div>
+          <div class="dsu-balance-table">
+            <table>
+              <thead><tr><th>日期</th><th class="dsu-num">收盘余额</th><th class="dsu-num">余额消耗</th><th class="dsu-num">费率估算</th></tr></thead>
+              <tbody data-field="balanceRows"></tbody>
+            </table>
+          </div>
+        </div>
         <div class="dsu-chart-card">
           <div class="dsu-card-title">
             <span data-field="chartTitle">按小时用量</span>
@@ -1252,6 +1791,60 @@
       .dsu-orange strong { color: #fb923c; }
       .dsu-green strong { color: #4ade80; }
       .dsu-red strong { color: #f87171; }
+      .dsu-balance-card {
+        margin: 14px 18px 0; padding: 14px; border-radius: 12px;
+        background: #10161f; border: 1px solid #263140;
+      }
+      .dsu-balance-status { margin-left: auto; color: #64748b; font-size: 10px; }
+      .dsu-balance-status[data-tone="warn"] { color: #fbbf24; }
+      .dsu-balance-status[data-tone="ok"] { color: #4ade80; }
+      .dsu-balance-toggle { margin-left: 8px; padding: 4px 9px; font-size: 11px; }
+      .dsu-balance-grid {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(124px, 1fr));
+        gap: 10px; margin-top: 12px;
+      }
+      .dsu-balance-grid > div {
+        min-width: 0; padding: 10px 11px; border-radius: 10px;
+        background: #0d1320; border: 1px solid #1f2937;
+      }
+      .dsu-balance-grid span { display: block; color: #94a3b8; font-size: 11px; }
+      .dsu-balance-grid strong {
+        display: block; margin-top: 6px; font-size: 17px; font-weight: 700;
+        font-variant-numeric: tabular-nums; color: #e2e8f0;
+      }
+      .dsu-balance-grid small { display: block; margin-top: 4px; color: #64748b; font-size: 10px; min-height: 12px; }
+      .dsu-balance-main strong { color: #facc15; }
+      .dsu-balance-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+      .dsu-balance-actions input {
+        width: 168px; background: #0f141c; color: #e2e8f0; border: 1px solid #2b3544;
+        border-radius: 8px; padding: 6px 8px; font-size: 12px;
+      }
+      .dsu-balance-settings {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #232c38;
+      }
+      .dsu-balance-settings[hidden] { display: none; }
+      .dsu-balance-settings label { display: flex; align-items: center; gap: 7px; color: #94a3b8; font-size: 12px; }
+      .dsu-balance-settings input[type="text"],
+      .dsu-balance-settings input[type="password"] {
+        flex: 1 1 auto; min-width: 0; background: #0f141c; color: #e2e8f0;
+        border: 1px solid #2b3544; border-radius: 8px; padding: 6px 8px; font-size: 12px;
+      }
+      .dsu-balance-settings select {
+        background: #0f141c; color: #e2e8f0; border: 1px solid #2b3544;
+        border-radius: 8px; padding: 6px 8px; font-size: 12px;
+      }
+      .dsu-balance-note { grid-column: 1 / -1; margin: 0; color: #64748b; font-size: 10px; line-height: 1.5; }
+      .dsu-balance-settings .dsu-text-button { justify-self: start; }
+      .dsu-balance-settings .dsu-balance-switch { grid-column: 1 / -1; }
+      .dsu-balance-settings .dsu-balance-switch input { accent-color: #38bdf8; }
+      .dsu-balance-card[data-enabled="false"] .dsu-balance-grid { opacity: 0.5; }
+      .dsu-balance-table { margin-top: 12px; padding-top: 10px; border-top: 1px solid #232c38; max-height: 236px; overflow: auto; }
+      .dsu-balance-table table { width: 100%; border-collapse: collapse; font-size: 11px; }
+      .dsu-balance-table th, .dsu-balance-table td { padding: 6px 5px; border-bottom: 1px solid #202a36; text-align: left; }
+      .dsu-balance-table th { color: #64748b; font-weight: 500; position: sticky; top: 0; background: #10161f; }
+      .dsu-balance-table td { color: #cbd5e1; }
+      .dsu-balance-span { color: #fbbf24; }
       .dsu-chart-card {
         position: relative;
         margin: 14px 18px 0; padding: 14px; border-radius: 12px;
@@ -1297,6 +1890,7 @@
         font-variant-numeric: tabular-nums;
       }
       .dsu-tip-cost { color: #f87171; }
+      .dsu-tip-balance { color: #facc15; }
       .dsu-empty { color: #64748b; font-size: 12px; text-align: center; padding: 70px 0; }
       .dsu-table-grid { display: grid; grid-template-columns: 1fr 1.35fr; gap: 12px; padding: 14px 18px 0; }
       .dsu-table-card { min-width: 0; padding: 13px; border-radius: 12px; background: #10161f; border: 1px solid #263140; }
@@ -1422,6 +2016,12 @@
     else if (action === "minimize") toggleMinimized();
     else if (action === "close") closePanel();
     else if (action === "clear") clearRecords();
+    else if (action === "balance-fetch") requestBalanceRefresh();
+    else if (action === "balance-save") saveBalanceFromInput();
+    else if (action === "balance-settings") toggleBalanceSettings();
+    else if (action === "balance-reset") resetBalances();
+    else if (action === "balance-key-save") saveBalanceKeyFromInput();
+    else if (action === "balance-key-clear") clearSavedBalanceKey();
   }
 
   function bindPanelControls(panel) {
@@ -1438,6 +2038,30 @@
     const monthInput = panel.querySelector('[data-field="monthInput"]');
     const modelSelect = panel.querySelector('[data-field="modelSelect"]');
     const chart = panel.querySelector('[data-field="chart"]');
+    const balanceInput = panel.querySelector('[data-field="balanceInput"]');
+    if (balanceInput) {
+      balanceInput.onkeydown = (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        saveBalanceFromInput();
+      };
+    }
+    const balanceKeyInput = panel.querySelector('[data-field="balanceKeyInput"]');
+    if (balanceKeyInput) {
+      balanceKeyInput.onkeydown = (event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        saveBalanceKeyFromInput();
+      };
+    }
+    const balanceSourceSelect = panel.querySelector('[data-field="balanceSource"]');
+    if (balanceSourceSelect) {
+      balanceSourceSelect.onchange = () => setBalanceSource(balanceSourceSelect.value);
+    }
+    const balanceEnabledBox = panel.querySelector('[data-field="balanceEnabled"]');
+    if (balanceEnabledBox) {
+      balanceEnabledBox.onchange = () => toggleBalanceEnabled(balanceEnabledBox.checked);
+    }
     if (chart) {
       chart.onmousemove = handleChartHover;
       chart.onmouseleave = hideChartTooltip;
@@ -1470,12 +2094,23 @@
 
   function ensurePanel() {
     let panel = document.getElementById(PANEL_ID);
-    if (
-      panel &&
-      panel.dataset.dsuVersion !== VERSION
-    ) {
-      panel.remove();
-      panel = null;
+    let panelContentReplaced = false;
+    if (panel && panel.dataset.dsuVersion !== VERSION) {
+      /*
+       * Codex++ 热重载会把新脚本注入同一个页面，此时旧脚本的回调仍在跑。
+       * 删掉节点再新建会和旧副本来回抢同一个面板，所以这里原地换内容：
+       * 节点身份不变，位置和尺寸也就不会丢。
+       */
+      const probe = document.createElement("div");
+      probe.innerHTML = panelShell().trim();
+      const fresh = probe.firstElementChild;
+      if (fresh) {
+        /* 只换内容，可见性沿用节点当前状态，避免换版时把面板藏起来。 */
+        panel.className = fresh.className;
+        panel.innerHTML = fresh.innerHTML;
+      }
+      panel.dataset.dsuVersion = VERSION;
+      panelContentReplaced = true;
     }
     if (!panel) {
       const wrapper = document.createElement("div");
@@ -1494,6 +2129,14 @@
       chart: panel.querySelector('[data-field="chart"]'),
       modelRows: panel.querySelector('[data-field="modelRows"]'),
       recentRows: panel.querySelector('[data-field="recentRows"]'),
+      balanceRows: panel.querySelector('[data-field="balanceRows"]'),
+      balanceInput: panel.querySelector('[data-field="balanceInput"]'),
+      balanceSettings: panel.querySelector('[data-field="balanceSettings"]'),
+      balanceSyncHint: panel.querySelector('[data-field="balanceSyncHint"]'),
+      balanceCard: panel.querySelector(".dsu-balance-card"),
+      balanceSource: panel.querySelector('[data-field="balanceSource"]'),
+      balanceEnabledBox: panel.querySelector('[data-field="balanceEnabled"]'),
+      balanceKeyInput: panel.querySelector('[data-field="balanceKeyInput"]'),
     };
     restorePanelPosition(panel);
     applyPanelMinimized(panel);
@@ -1511,6 +2154,11 @@
     if (panel.__deepseekUsageBoundVersion === VERSION) return;
     panel.__deepseekUsageBoundVersion = VERSION;
     bindPanelControls(panel);
+    /*
+     * 接管别人留下的面板时，旧内容已经换成新内容但还没渲染过，面板又是开着的：
+     * 立刻画一次，否则要等用户点一下才显示数字。
+     */
+    if (panelContentReplaced && !panel.hidden) render();
     window.addEventListener("keydown", (event) => {
       if (event.key === "Escape") closePanel();
     });
@@ -2014,6 +2662,115 @@
     render({ animate: true });
   }
 
+  function saveBalanceFromInput() {
+    const input = state.ui?.panel?.querySelector('[data-field="balanceInput"]');
+    const raw = String(input?.value ?? "").trim();
+    const value = Number(raw);
+    /* 空输入会被 Number() 变成 0，那会把当天消耗算成充值，必须挡住。 */
+    if (!input || !raw || !Number.isFinite(value) || value <= 0) {
+      setBalanceStatus("请输入大于 0 的余额金额", "warn");
+      input?.focus();
+      return;
+    }
+    const currency = state.settings.balanceCurrency || "CNY";
+    recordBalance(value, { source: "manual", currency });
+    input.value = "";
+    setBalanceStatus(`已记录 ${formatBalance(value, currency)}`, "ok");
+  }
+
+  function toggleBalanceSettings() {
+    state.settings.balanceSettingsOpen = !state.settings.balanceSettingsOpen;
+    scheduleSave();
+    render();
+  }
+
+  /*
+   * 用户填的 Key 只留在页面内存：面板不能写文件，也不能联网，所以这里登记
+   * 一个请求，等随 Codex 启动的余额助手取走，用 DPAPI 加密存到本机。
+   */
+  function rememberBalanceKey(value, { announce = true } = {}) {
+    const key = String(value ?? "").trim();
+    if (!/^sk-[A-Za-z0-9_-]{8,}$/.test(key)) {
+      if (announce) setBalanceStatus("Key 看着不对（应以 sk- 开头）", "warn");
+      return false;
+    }
+    pendingBalanceKey = key;
+    state.settings.balanceKeyRequestAt = Date.now();
+    state.settings.balanceRequestAt = state.settings.balanceKeyRequestAt;
+    state.settings.balanceSource = "key";
+    scheduleSave();
+    render();
+    if (announce) {
+      const alive = balanceHelperAlive();
+      setBalanceStatus(
+        alive
+          ? "Key 已交给余额助手保存，稍等回填"
+          : "Key 暂存在面板内存里，重启 Codex 后助手会取走保存",
+        alive ? "ok" : "warn"
+      );
+    }
+    return true;
+  }
+
+  function saveBalanceKeyFromInput() {
+    const input = state.ui?.panel?.querySelector('[data-field="balanceKeyInput"]');
+    const value = String(input?.value ?? "").trim();
+    if (!rememberBalanceKey(value)) {
+      input?.focus();
+      return;
+    }
+    if (input) input.value = "";
+  }
+
+  function clearSavedBalanceKey() {
+    pendingBalanceKey = "";
+    state.settings.balanceKeyClearAt = Date.now();
+    state.settings.balanceKeySaved = false;
+    state.settings.balanceKeyPresent = null;
+    scheduleSave();
+    render();
+    const alive = balanceHelperAlive();
+    setBalanceStatus(
+      alive ? "已请求清除本机保存的 Key" : "余额助手没在跑，重启 Codex 后清除",
+      alive ? "ok" : "warn"
+    );
+  }
+
+  function setBalanceSource(value) {
+    state.settings.balanceSource =
+      value === "proxy" || value === "key" ? value : "auto";
+    state.settings.balanceRequestAt = Date.now();
+    scheduleSave();
+    render();
+    setBalanceStatus(`余额来源已切到「${balanceReadSourceLabelForChoice()}」`, "ok");
+  }
+
+  function balanceReadSourceLabelForChoice() {
+    const choice = balanceSourceChoice();
+    if (choice === "proxy") return "本机代理";
+    if (choice === "key") return "我填的 API Key";
+    return "自动";
+  }
+
+  function toggleBalanceEnabled(enabled) {
+    state.settings.balanceEnabled = enabled !== false;
+    scheduleSave();
+    render();
+    setBalanceStatus(
+      state.settings.balanceEnabled ? "余额统计已启用" : "余额统计已关闭",
+      "ok"
+    );
+  }
+
+  function resetBalances() {
+    if (!window.confirm("确定清除全部余额记录吗？用量统计不受影响。")) return;
+    state.balances = [];
+    balanceCache = null;
+    scheduleSave();
+    render();
+    setBalanceStatus("余额记录已清除", "ok");
+  }
+
   function visibleRecords() {
     if (state.settings.mode === "month") {
       const month = state.settings.month;
@@ -2166,18 +2923,31 @@
     }
     const data = hit.item;
     const total = count(data.hit) + count(data.miss) + count(data.output);
-    if (!count(data.calls) && !total) {
+    const month = state.settings.month;
+    const balanceItem =
+      state.settings.mode === "month"
+        ? balanceDayItem(`${month}-${String(data.label).padStart(2, "0")}`)
+        : null;
+    if (!count(data.calls) && !total && !balanceItem) {
       hideChartTooltip();
       return;
     }
     tooltip.innerHTML =
       `<div class="dsu-tip-title">${escapeHtml(chartNodeLabel(data))}</div>` +
-      `<div class="dsu-tip-row"><span>请求</span><b>${count(data.calls)} 次</b></div>` +
-      `<div class="dsu-tip-row"><span>缓存命中</span><b>${formatTokens(data.hit)}</b></div>` +
-      `<div class="dsu-tip-row"><span>缓存未命中</span><b>${formatTokens(data.miss)}</b></div>` +
-      `<div class="dsu-tip-row"><span>输出</span><b>${formatTokens(data.output)}</b></div>` +
-      `<div class="dsu-tip-row"><span>总 tokens</span><b>${formatTokens(total)}</b></div>` +
-      `<div class="dsu-tip-row dsu-tip-cost"><span>费用</span><b>${formatCost(data.cost)}</b></div>`;
+      (count(data.calls) || total
+        ? `<div class="dsu-tip-row"><span>请求</span><b>${count(data.calls)} 次</b></div>` +
+          `<div class="dsu-tip-row"><span>缓存命中</span><b>${formatTokens(data.hit)}</b></div>` +
+          `<div class="dsu-tip-row"><span>缓存未命中</span><b>${formatTokens(data.miss)}</b></div>` +
+          `<div class="dsu-tip-row"><span>输出</span><b>${formatTokens(data.output)}</b></div>` +
+          `<div class="dsu-tip-row"><span>总 tokens</span><b>${formatTokens(total)}</b></div>` +
+          `<div class="dsu-tip-row dsu-tip-cost"><span>费用</span><b>${formatCost(data.cost)}</b></div>`
+        : '<div class="dsu-tip-row"><span>调用</span><b>无</b></div>') +
+      (balanceItem
+        ? `<div class="dsu-tip-row dsu-tip-balance"><span>收盘余额</span><b>${formatBalance(balanceItem.close, balanceItem.last.c)}</b></div>` +
+          (balanceItem.spend === null
+            ? ""
+            : `<div class="dsu-tip-row dsu-tip-balance"><span>余额消耗</span><b>${formatBalanceSpend(balanceItem.spend, balanceItem.last.c)}</b></div>`)
+        : "");
     tooltip.hidden = false;
 
     const card = canvas.closest(".dsu-chart-card");
@@ -2200,9 +2970,17 @@
   }
 
   function render({ animate = false } = {}) {
+    if (!ownsPanel()) {
+      retirePanel();
+      return;
+    }
     if (state.renderTimer) return;
     state.renderTimer = window.requestAnimationFrame(() => {
       state.renderTimer = 0;
+      if (!ownsPanel()) {
+        retirePanel();
+        return;
+      }
       if (!state.ui?.panel || state.ui.panel.hidden) return;
       const records = visibleRecords();
       const { totals, models } = aggregateRecords(records);
@@ -2253,6 +3031,125 @@
         `${formatTokens(totals.total || totals.input + totals.output)} tokens`
       );
       setText("miniCost", formatCost(totals.cost));
+
+      const currency = state.settings.balanceCurrency || "CNY";
+      const latest = latestBalance();
+      const balanceDayItems = balanceDayList();
+      const todayItem =
+        balanceDayItems.find((item) => item.day === todayKey()) || null;
+      const yesterdayItem =
+        balanceDayItems.find(
+          (item) => item.day === todayKey(Date.now() - 86400000)
+        ) || null;
+      const monthInfo = balanceMonthSpend(
+        state.settings.month,
+        balanceDayItems
+      );
+
+      setText("balanceNow", latest ? formatBalance(latest.v, latest.c) : "—");
+      setText(
+        "balanceNowHint",
+        latest
+          ? `${formatDateTime(latest.t)} · ${balanceSourceLabel(latest.s)}`
+          : !balanceEnabled()
+            ? "余额功能已关闭（点上方「说明」可打开）"
+            : state.settings.balanceSyncNote || balanceSyncText()
+      );
+      setText(
+        "balanceToday",
+        todayItem && todayItem.spend !== null
+          ? formatBalanceSpend(todayItem.spend, todayItem.last.c)
+          : todayItem && todayItem.count > 1
+            ? formatBalanceSpend(todayItem.spendFromFirst, todayItem.last.c)
+            : "—"
+      );
+      setText(
+        "balanceTodayHint",
+        todayItem
+          ? todayItem.spend === null
+            ? todayItem.count > 1
+              ? "自今日首次记录起"
+              : "需要跨天的两次快照"
+            : `快照 ${todayItem.count} 次`
+          : "今日暂无快照"
+      );
+      setText(
+        "balanceYesterday",
+        yesterdayItem && yesterdayItem.spend !== null
+          ? formatBalanceSpend(yesterdayItem.spend, yesterdayItem.last.c)
+          : "—"
+      );
+      setText(
+        "balanceYesterdayHint",
+        yesterdayItem
+          ? `收盘 ${formatBalance(yesterdayItem.close, yesterdayItem.last.c)}`
+          : "昨日无快照"
+      );
+      setText(
+        "balanceMonth",
+        monthInfo ? formatBalanceSpend(monthInfo.spend, currency) : "—"
+      );
+      setText(
+        "balanceMonthHint",
+        monthInfo ? `自 ${monthInfo.from} 起` : "本月暂无余额"
+      );
+
+      if (state.ui.balanceSyncHint) {
+        const hint = balanceSyncText();
+        state.ui.balanceSyncHint.textContent = hint;
+        state.ui.balanceSyncHint.dataset.tone = balanceHelperAlive()
+          ? "ok"
+          : "warn";
+      }
+      if (state.ui.balanceSettings) {
+        state.ui.balanceSettings.hidden = !state.settings.balanceSettingsOpen;
+      }
+      if (state.ui.balanceSource) {
+        state.ui.balanceSource.value = balanceSourceChoice();
+      }
+      if (state.ui.balanceEnabledBox) {
+        state.ui.balanceEnabledBox.checked = balanceEnabled();
+      }
+      if (state.ui.balanceCard) {
+        state.ui.balanceCard.dataset.enabled = balanceEnabled()
+          ? "true"
+          : "false";
+      }
+      paintBalanceStatus();
+
+      const dayCost = new Map();
+      for (const record of state.records) {
+        dayCost.set(
+          record.d,
+          (dayCost.get(record.d) || 0) + Number(record.cost || 0)
+        );
+      }
+      const balanceDays = balanceDayItems.slice(-BALANCE_BAR_DAYS).reverse();
+      if (state.ui.balanceRows) {
+        state.ui.balanceRows.innerHTML = balanceDays.length
+          ? balanceDays
+              .map((item) => {
+                const estimated = dayCost.get(item.day) || 0;
+                const spend =
+                  item.spend === null
+                    ? item.count > 1
+                      ? formatBalanceSpend(item.spendFromFirst, item.last.c) +
+                        ' <span class="dsu-balance-span">(当日)</span>'
+                      : '<span class="dsu-balance-span">基线</span>'
+                    : formatBalanceSpend(item.spend, item.last.c) +
+                      (item.spanDays > 1
+                        ? ` <span class="dsu-balance-span">(${item.spanDays}天)</span>`
+                        : "");
+                return (
+                  `<tr><td>${escapeHtml(item.day.slice(5))}</td>` +
+                  `<td class="dsu-num">${formatBalance(item.close, item.last.c)}</td>` +
+                  `<td class="dsu-num">${spend}</td>` +
+                  `<td class="dsu-num">${estimated ? formatCost(estimated) : "—"}</td></tr>`
+                );
+              })
+              .join("")
+          : '<tr><td colspan="4" class="dsu-empty-row">还没有余额记录</td></tr>';
+      }
 
       state.ui.panel
         .querySelectorAll('[data-action^="mode-"]')
@@ -2421,9 +3318,17 @@
   }
 
   function scheduleEnsure() {
+    if (!ownsPanel()) {
+      retirePanel();
+      return;
+    }
     if (state.ensureTimer) return;
     state.ensureTimer = window.requestAnimationFrame(() => {
       state.ensureTimer = 0;
+      if (!ownsPanel()) {
+        retirePanel();
+        return;
+      }
       ensureLauncher();
       ensurePanel();
     });
@@ -2432,12 +3337,23 @@
   function start() {
     installStyles();
     scheduleEnsure();
-    const observer = new MutationObserver(scheduleEnsure);
-    observer.observe(document.documentElement, {
+    state.observer = new MutationObserver(scheduleEnsure);
+    state.observer.observe(document.documentElement, {
       childList: true,
       subtree: true,
     });
     updateLauncherBadge();
+    /*
+     * 面板自己不能联网，余额靠随 Codex 启动的本机助手回填。这里只在助手还
+     * 在线、而且今天还没有任何余额快照时，补记一次刷新请求。
+     */
+    if (
+      balanceEnabled() &&
+      balanceHelperAlive() &&
+      !state.balances.some((item) => item.d === todayKey())
+    ) {
+      requestBalanceRefresh({ silent: true });
+    }
   }
 
   loadState();
@@ -2448,8 +3364,10 @@
     start();
   }
 
-  window[PANEL_API] = {
+  instance.api = {
     version: VERSION,
+    /* 诊断用：被更新的版本接管后，旧实例会把这个变成 true 并停止动面板。 */
+    retired: () => instance.retired,
     open: openPanel,
     close: closePanel,
     toggle: togglePanel,
@@ -2503,5 +3421,36 @@
     mergeProxyRecords: (records) =>
       window[PANEL_API].importProxyRecords(records),
     clear: clearRecords,
+    getBalances: () => JSON.parse(JSON.stringify(state.balances)),
+    importBalanceSnapshots: (entries) => importBalanceSnapshots(entries),
+    recordBalance: (value, source = "external", options = {}) =>
+      recordBalance(value, {
+        source,
+        currency:
+          options?.currency ||
+          state.settings.balanceCurrency ||
+          "CNY",
+      }),
+    /* 本机助手用这两个接口做心跳和推送确认。 */
+    getBalanceSync: () => balanceSyncReport(),
+    ackBalanceSync: (report) => applyBalanceSync(report),
+    requestBalanceRefresh: (options) => requestBalanceRefresh(options),
+    /* 兼容旧名字：面板不联网，只登记刷新请求。 */
+    fetchBalance: (options) => requestBalanceRefresh(options),
+    /*
+     * 给外面（助手 / 自动化）用：setBalanceKey 把 Key 放进面板内存等助手取走，
+     * takeBalanceKey 取走后就地清空，面板内存里也不再留。
+     */
+    setBalanceKey: (key) => rememberBalanceKey(key),
+    takeBalanceKey: () => {
+      const key = pendingBalanceKey;
+      pendingBalanceKey = "";
+      return key;
+    },
+    clearBalanceKey: () => clearSavedBalanceKey(),
+    setBalanceEnabled: (enabled) => toggleBalanceEnabled(enabled),
+    setBalanceSource: (value) => setBalanceSource(value),
   };
+  /* 登记之后，旧版本脚本下次动手时就会发现自己已经不是主人了。 */
+  window[PANEL_API] = instance.api;
 })();

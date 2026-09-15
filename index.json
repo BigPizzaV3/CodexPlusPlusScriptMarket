@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-09-11T02:00:16Z",
+  "updated_at": "2026-09-15T06:15:34Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -288,8 +288,8 @@
     {
       "id": "deepseek-token-usage",
       "name": "DeepSeek Token Usage",
-      "description": "按 DeepSeek 官方费率逐条请求统计 token 用量与费用，支持按天/按月的图表、峰谷时段计价、缓存命中拆分，面板可拖动缩放并可收成 mini 条。",
-      "version": "1.13.0",
+      "description": "按 DeepSeek 官方费率逐条请求统计 token 用量与费用；按天/按月图表、峰谷时段计价、缓存命中拆分；面板可拖动缩放、可收成 mini 条；可选显示账户余额与每日余额消耗。",
+      "version": "1.16.1",
       "author": "Saydness",
       "tags": [
         "codex",
@@ -302,15 +302,17 @@
       ],
       "homepage": "https://github.com/Saydness/codexpp-deepseek-token-usage",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/deepseek-token-usage.js",
-      "sha256": "9c39e6392651f41463e43258c2598d44b9134cd67d8f27bbb71fe81574db0a8d",
+      "sha256": "b2a7a211962bdc68c55841adf8c1b32090c7050ba1d5b62ac38ddd383c44c6fe",
       "requirements": [
         "Codex++ 用户脚本环境",
-        "Codex 会话中使用 DeepSeek 模型"
+        "Codex 会话中使用 DeepSeek 模型",
+        "（可选）账户余额需要 Node.js 18+ 运行仓库内的本机助手 helper/start-helper.vbs"
       ],
       "limitations": [
         "只在 Codex 页面内运行时采集，其他客户端的 DeepSeek 调用不计入",
         "费用按内置官方费率表估算，与账号实际账单可能有小额差异",
-        "历史数据保存在本机 localStorage，清理站点数据后会丢失"
+        "历史数据保存在本机 localStorage，清理站点数据后会丢失",
+        "账户余额只能由页面外的本机助手读取后回填；不装助手时余额区提示助手未运行，用量与费用统计不受影响"
       ]
     }
   ]

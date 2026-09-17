@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.17.4
+// @version      1.17.9
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.17.4";
+const VERSION = "1.17.9";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -29,7 +29,7 @@ const VERSION = "1.17.4";
    * 普通请求，唯一能出去的路是 Codex++ 的宿主桥：
    *   window.__codexSessionDeleteBridge("/llm-proxy", { url, method, headers })
    * 所以余额由面板自己查，Key 由用户提供，来源二选一：
-   *   1. Codex 配置里的 Key（Codex++ /settings/get 的 relayApiKey / auth.json 拖入）
+   *   1. Codex 配置里的 Key（Codex++ /settings/get 的 relayApiKey，也就是 Codex 正在用的那把）
    *   2. 用户直接粘进面板的 Key
    * 面板不再依赖任何随 Codex 启动的本机助手：助手在就顺带用，不在也完全不提示。
    * 桥目前只允许 POST，DeepSeek 余额接口只认 GET，所以查询会先试 GET 再试 POST，
@@ -40,6 +40,13 @@ const VERSION = "1.17.4";
   const BALANCE_BRIDGE_PATH = "/llm-proxy";
   const BALANCE_ENDPOINT = "https://api.deepseek.com/user/balance";
   const BALANCE_QUERY_TIMEOUT_MS = 20000;
+  /*
+   * Codex++ 的网络桥目前只放行 POST，而 DeepSeek 余额接口只认 GET，面板直连
+   * 这条路暂时查不通，所以在 UI 上先撤掉（实现代码全部保留）。等 Codex++ 放开
+   * GET（或出现 POST 版余额接口），把下面这一行改回 true，自动查询、Key 设置区
+   * 和状态提示会一起恢复，其它地方都不用动。
+   */
+  const BRIDGE_BALANCE_QUERY_ENABLED = false;
   const BALANCE_QUERY_MIN_GAP_MS = 30 * 1000;
   const BALANCE_QUERY_AUTO_MS = 15 * 60 * 1000;
   /* 网络桥明确不支持 GET 时别死磕：静默查询退避到 6 小时后，手动点按钮不受限。 */
@@ -52,9 +59,10 @@ const VERSION = "1.17.4";
   const MAX_BALANCE_SNAPSHOTS = 5000;
   /* 用户刚填的 Key：默认只存在页面内存；勾了"记住"才写 localStorage。 */
   let pendingBalanceKey = "";
+  /* 这是一份脚本 = 一次 Codex 启动；第一次打开面板要占这个标记。 */
+  let openedThisRun = false;
   let panelBalanceKey = "";
   let balanceConfigKey = "";
-  let balanceAuthKey = "";
   let balanceQueryPromise = null;
   let balanceQueryTimer = 0;
 
@@ -690,7 +698,7 @@ const VERSION = "1.17.4";
 
   /*
    * Key 优先级：面板刚填的 > 本机记住的 > Codex 配置里的（Codex++ 设置里的
-   * relayApiKey）> 用户拖进来的 auth.json。任何一条都不需要额外装助手。
+   * relayApiKey）。两条都不需要额外装助手，也不需要用户找文件。
    */
   function balanceKeyInfo() {
     if (looksLikeKey(panelBalanceKey)) {
@@ -706,9 +714,6 @@ const VERSION = "1.17.4";
     }
     if (looksLikeKey(balanceConfigKey)) {
       return { key: balanceConfigKey.trim(), label: "Codex 配置里的 Key", source: "config" };
-    }
-    if (looksLikeKey(balanceAuthKey)) {
-      return { key: balanceAuthKey.trim(), label: "拖入的 auth.json", source: "auth" };
     }
     return { key: "", label: "", source: "" };
   }
@@ -840,14 +845,25 @@ const VERSION = "1.17.4";
       if (!silent) setBalanceStatus("余额功能已关闭，可在「设置」里打开", "warn");
       return null;
     }
+    if (!BRIDGE_BALANCE_QUERY_ENABLED) {
+      /*
+       * 面板直连这条路先撤了：有助手就让助手顺手刷一次，没有就安静返回，
+       * 不写失败状态，免得开面板时总挂一条"查不到余额"的提示。
+       */
+      if (balanceHelperAlive()) {
+        state.settings.balanceRequestAt = Date.now();
+        scheduleSave();
+      }
+      return null;
+    }
     if (balanceQueryPromise) return balanceQueryPromise;
     if (silent && Date.now() < (Number(state.settings.balanceQueryCooldownUntil) || 0)) {
       return null;
     }
     if (!silent) state.settings.balanceQueryCooldownUntil = 0;
     /*
-     * 面板永远自己先试一次直连；本机如果还跑着旧助手（8787 代理那套），顺手也请它
-     * 刷一次（它用 GET，读得到），两条路谁先回来用谁，互不依赖。
+     * 面板永远自己先试一次直连；本机如果还跑着可选的本机助手，顺手也请它刷一次
+     * （它用 GET，读得到），两条路谁先回来用谁，互不依赖。两者都不依赖本机代理。
      */
     if (balanceHelperAlive()) {
       state.settings.balanceRequestAt = Date.now();
@@ -969,22 +985,6 @@ const VERSION = "1.17.4";
     }
     queryBalanceNow({ silent: true });
     return true;
-  }
-
-  /* 想让面板用 auth.json 里的 Key，把文件拖到面板上就行。 */
-  function readKeyFromAuthFile(text) {
-    const parsed = parseJson(text);
-    if (!parsed || typeof parsed !== "object") return "";
-    for (const name of [
-      "OPENAI_API_KEY",
-      "openai_api_key",
-      "DEEPSEEK_API_KEY",
-      "deepseek_api_key",
-      "api_key",
-    ]) {
-      if (looksLikeKey(parsed[name])) return String(parsed[name]).trim();
-    }
-    return "";
   }
 
   function balanceEnabled() {
@@ -1193,10 +1193,12 @@ const VERSION = "1.17.4";
 
   function balanceSyncText() {
     if (!balanceEnabled()) return "余额功能已关闭";
-    if (state.settings.balanceQueryBusy) return "正在查询余额…";
+    if (BRIDGE_BALANCE_QUERY_ENABLED && state.settings.balanceQueryBusy) {
+      return "正在查询余额…";
+    }
     const note = String(state.settings.balanceQueryNote || "").trim();
     const at = Number(state.settings.balanceQueryAt) || 0;
-    if (state.settings.balanceQueryOk === true) {
+    if (BRIDGE_BALANCE_QUERY_ENABLED && state.settings.balanceQueryOk === true) {
       return at ? `面板直连 · ${formatAgo(Date.now() - at)}更新` : "面板直连 · 已更新";
     }
     /* 本机如果有助手在跑，它的数据照样算数；没有就完全不提它。 */
@@ -1204,11 +1206,42 @@ const VERSION = "1.17.4";
       const used = balanceReadSourceLabel(state.settings.balanceSourceUsed);
       if (used) return `余额来源：${used} · ${formatAgo(balanceSyncAge())}同步`;
     }
-    if (state.settings.balanceQueryOk === false && note) return note;
+    if (
+      BRIDGE_BALANCE_QUERY_ENABLED &&
+      state.settings.balanceQueryOk === false &&
+      note
+    ) {
+      return note;
+    }
+    /* 桥这条路先撤了：查不到时只说手动记录，不摆桥的错误、也不提助手。 */
+    if (!BRIDGE_BALANCE_QUERY_ENABLED) {
+      return "自动查询等 Codex++ 放开 GET 后恢复；现在可以手动记录一次";
+    }
     if (!balanceKeyInfo().key) {
       return "填一次 API Key 就能自动更新；也可以直接手动记录";
     }
     return "已就绪，点「刷新余额」立刻查询";
+  }
+
+  /*
+   * 桥还查不了余额时，「刷新余额」只请本机助手去查：它用 GET，读得到。
+   * 没检测到助手就说清楚"现在只能手动记录"，不报网络桥的限制、也不提助手。
+   */
+  function requestHelperBalanceRefresh({ silent = false } = {}) {
+    if (!balanceHelperAlive()) {
+      if (!silent) {
+        setBalanceStatus(
+          "余额自动查询等 Codex++ 放开 GET 后恢复，现在可以手动记录一次",
+          "warn"
+        );
+      }
+      return false;
+    }
+    state.settings.balanceRequestAt = Date.now();
+    scheduleSave();
+    if (!silent) setBalanceStatus("已请本机助手刷新余额，几秒后回填", "ok");
+    render();
+    return true;
   }
 
   /*
@@ -1221,6 +1254,9 @@ const VERSION = "1.17.4";
         setBalanceStatus("余额功能已关闭，可在「设置」里打开", "warn");
       }
       return false;
+    }
+    if (!BRIDGE_BALANCE_QUERY_ENABLED) {
+      return requestHelperBalanceRefresh({ silent });
     }
     state.settings.balanceRequestAt = Date.now();
     scheduleSave();
@@ -1241,6 +1277,8 @@ const VERSION = "1.17.4";
    * 隔 BALANCE_QUERY_MIN_GAP_MS，页面在后台时不查，避免无意义请求。
    */
   function scheduleBalanceAutoQuery() {
+    /* 桥能查之前不需要这个定时器：本机助手自己会定时推余额。 */
+    if (!BRIDGE_BALANCE_QUERY_ENABLED) return;
     if (balanceQueryTimer) return;
     balanceQueryTimer = window.setInterval(() => {
       if (!balanceEnabled() || document.hidden) return;
@@ -1258,6 +1296,7 @@ const VERSION = "1.17.4";
    */
   function refreshBalanceOnOpen() {
     if (!balanceEnabled()) return;
+    if (!BRIDGE_BALANCE_QUERY_ENABLED) return;
     if (!balanceBridgeReady()) return;
     const last = Number(state.settings.balanceQueryAt) || 0;
     if (balanceKeyInfo().key) {
@@ -1890,6 +1929,7 @@ const VERSION = "1.17.4";
           </div>
           <div class="dsu-balance-settings" data-field="balanceSettings" hidden>
             <p class="dsu-balance-note">余额状态 · <strong data-field="balanceSyncHint">检测中…</strong></p>
+            <div data-bridge-only>
             <label>Key 来源
               <select data-field="balanceKeyMode">
                 <option value="auto">自动读 Codex 配置里的 Key</option>
@@ -1908,10 +1948,12 @@ const VERSION = "1.17.4";
               <input type="checkbox" data-field="balanceKeyRemember"> 把 Key 记在本机（重开 Codex 不用再填）
             </label>
             <p class="dsu-balance-note" data-field="balanceKeyState">当前 Key：未填</p>
+            </div>
+            <p class="dsu-balance-note" data-helper-only>余额由随 Codex 启动的本机助手自动获取：它在本机自己找凭据，不需要你填 Key；同步间隔几分钟一次，点「刷新余额」可以请它立刻查一次，查不到时可以手动记录。等 Codex++ 的网络桥放开 GET，这块会换回面板自己查，Key 来源只有两条：Codex++ 配置里的那把，或者你手动填的。</p>
             <label class="dsu-balance-switch">
               <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
             </label>
-            <p class="dsu-balance-note">Codex 页面被安全策略挡着、自己不能联网，所以面板借 Codex++ 的网络桥去查 DeepSeek 余额：自动 = 读 Codex++ 里配的那把 Key（也就是 Codex 正在用的），读不到就手动填一次；手动 = 只在这台机器上，勾了「记住」才写本机存储，<strong>不会进统计、也不会随脚本上传</strong>。也可以把 Codex 的 <code>auth.json</code> 直接拖到面板上，面板会读里面的 Key。查询频率：打开面板时一次，之后每 15 分钟一次，两次之间至少隔 30 秒。</p>
+            <p class="dsu-balance-note" data-bridge-only>Codex 页面被安全策略挡着、自己不能联网，所以面板借 Codex++ 的网络桥去查 DeepSeek 余额：自动 = 读 Codex++ 里配的那把 Key（也就是 Codex 正在用的），读不到就手动填一次；手动 = 只在这台机器上，勾了「记住」才写本机存储，<strong>不会进统计、也不会随脚本上传</strong>。Key 只有这两条来源，不用你去找文件。查询频率：打开面板时一次，之后每 15 分钟一次，两次之间至少隔 30 秒。</p>
             <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
           </div>
           <div class="dsu-balance-table">
@@ -1962,9 +2004,12 @@ const VERSION = "1.17.4";
   }
 
   function installStyles() {
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement("style");
+    const existing = document.getElementById(STYLE_ID);
+    /* 样式表跟着版本走：热重载换了脚本，旧样式也要一起换掉。 */
+    if (existing && existing.dataset.dsuVersion === VERSION) return;
+    const style = existing || document.createElement("style");
     style.id = STYLE_ID;
+    style.dataset.dsuVersion = VERSION;
     style.textContent = `
       #${PANEL_ID},
       #${PANEL_ID} *,
@@ -2285,6 +2330,11 @@ const VERSION = "1.17.4";
         gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #232c38;
       }
       .dsu-balance-settings[hidden] { display: none; }
+      /* Codex++ 网络桥只放行 POST 期间：面板直连相关的 UI 先藏起来，实现代码保留。 */
+      #${PANEL_ID}[data-dsu-bridge-query="off"] [data-bridge-only],
+      #${PANEL_ID}[data-dsu-bridge-query="on"] [data-helper-only] {
+        display: none !important;
+      }
       .dsu-balance-settings label { display: flex; align-items: center; gap: 7px; color: #94a3b8; font-size: 12px; }
       .dsu-balance-settings input[type="text"],
       .dsu-balance-settings input[type="password"] {
@@ -2580,6 +2630,7 @@ const VERSION = "1.17.4";
         panel.innerHTML = fresh.innerHTML;
       }
       panel.dataset.dsuVersion = VERSION;
+      panel.dataset.dsuBridgeQuery = BRIDGE_BALANCE_QUERY_ENABLED ? "on" : "off";
       panelContentReplaced = true;
     }
     if (!panel) {
@@ -2587,7 +2638,18 @@ const VERSION = "1.17.4";
       wrapper.innerHTML = panelShell().trim();
       panel = wrapper.firstElementChild;
       panel.dataset.dsuVersion = VERSION;
+      panel.dataset.dsuBridgeQuery = BRIDGE_BALANCE_QUERY_ENABLED ? "on" : "off";
       document.body.appendChild(panel);
+    }
+    /*
+     * 桥查询开关决定哪些余额控件露出来。用行内样式而不是只靠 CSS：
+     * 热重载时旧的样式表可能还挂着，行内样式不受影响。
+     */
+    for (const element of panel.querySelectorAll("[data-bridge-only]")) {
+      element.style.display = BRIDGE_BALANCE_QUERY_ENABLED ? "" : "none";
+    }
+    for (const element of panel.querySelectorAll("[data-helper-only]")) {
+      element.style.display = BRIDGE_BALANCE_QUERY_ENABLED ? "none" : "";
     }
     state.ui = {
       panel,
@@ -2612,7 +2674,6 @@ const VERSION = "1.17.4";
       ),
       balanceKeyState: panel.querySelector('[data-field="balanceKeyState"]'),
     };
-    setupBalanceKeyDrop(panel);
     restorePanelPosition(panel);
     applyPanelMinimized(panel);
     applyPanelSize(panel);
@@ -3063,11 +3124,16 @@ const VERSION = "1.17.4";
   function openPanel() {
     ensurePanel();
     if (!state.ui?.panel) return;
-    if (state.settings.hasOpened !== true) {
+    /*
+     * 每次 Codex 启动（= 这份脚本被注入一次）后的第一次打开，先给完整窗口，
+     * 不要沿用上次收起来的 mini 条；之后用户自己收起来的话，再打开就听他的。
+     */
+    if (!openedThisRun) {
+      openedThisRun = true;
       state.settings.panelMinimized = false;
       applyPanelMinimized();
       applyPanelSize();
-      state.settings.hasOpened = true;
+      if (state.settings.hasOpened !== true) state.settings.hasOpened = true;
       scheduleSave();
     }
     state.ui.panel.hidden = false;
@@ -3206,7 +3272,6 @@ const VERSION = "1.17.4";
   function clearSavedBalanceKey() {
     panelBalanceKey = "";
     balanceConfigKey = "";
-    balanceAuthKey = "";
     pendingBalanceKey = "";
     writeBalanceStoredKey("");
     state.settings.balanceKeyClearAt = Date.now();
@@ -3246,39 +3311,6 @@ const VERSION = "1.17.4";
         : "Key 不会写入本机存储，重开 Codex 需要重新填",
       "ok"
     );
-  }
-
-  /* 把 auth.json 拖到面板上就能读里面的 Key，省得手动找文件。 */
-  function setupBalanceKeyDrop(panel) {
-    if (!panel || panel.__deepseekUsageDropBound === VERSION) return;
-    panel.__deepseekUsageDropBound = VERSION;
-    panel.addEventListener("dragover", (event) => {
-      if (!event.dataTransfer) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
-    });
-    panel.addEventListener("drop", (event) => {
-      const file = event.dataTransfer?.files?.[0];
-      if (!file) return;
-      event.preventDefault();
-      event.stopPropagation();
-      file
-        .text()
-        .then((text) => {
-          const key = readKeyFromAuthFile(text);
-          if (!key) {
-            setBalanceStatus("这个文件里没找到 Key（需要 Codex 的 auth.json）", "warn");
-            return;
-          }
-          balanceAuthKey = key;
-          state.settings.balanceKeyMode = "auto";
-          scheduleSave();
-          render();
-          setBalanceStatus(`已从 ${file.name} 读到 Key（${maskKeyTail(key)}）`, "ok");
-          queryBalanceNow({ silent: true });
-        })
-        .catch(() => setBalanceStatus("读不了这个文件", "warn"));
-    });
   }
 
   function setBalanceSource(value) {

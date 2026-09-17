@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-09-17T04:10:00Z",
+  "updated_at": "2026-09-17T08:30:05Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -289,7 +289,7 @@
       "id": "deepseek-token-usage",
       "name": "DeepSeek Token Usage",
       "description": "按 DeepSeek 官方费率逐条请求统计 token 用量与费用；按天/按月图表、峰谷时段计价、缓存命中拆分；面板可拖动缩放、可收成 mini 条；可选显示账户余额与每日余额消耗，余额由面板自己查（填 Key 或读 Codex 配置的 Key），不需要额外装本机助手。只观察不改写，响应正文按 provider/model 归属读取：DeepSeek 域名的请求，或 OpenAI 兼容 completions 路径且本次请求点名了 deepseek 模型的请求。",
-      "version": "1.17.4",
+      "version": "1.17.9",
       "author": "Saydness",
       "tags": [
         "codex",
@@ -302,7 +302,7 @@
       ],
       "homepage": "https://github.com/Saydness/codexpp-deepseek-token-usage",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/deepseek-token-usage.js",
-      "sha256": "67808a964c842cbe26e7bae9dfa031faecd972e85d68b012b0548beafd3ae27b",
+      "sha256": "dbd6ae91da02e77cc7f40b170bf77b163a4d95ae14934db428466cc6032a4e67",
       "requirements": [
         "Codex++ 用户脚本环境",
         "Codex 会话中使用 DeepSeek 模型",
@@ -313,7 +313,7 @@
         "费用按内置官方费率表估算，与账号实际账单可能有小额差异",
         "历史数据保存在本机 localStorage，清理站点数据后会丢失",
         "账户余额只认查到的数字（接口返回 / 历史导入 / 手动记录），不会用本机 token 用量推算，因为同一账户可能多台机器共用",
-        "Codex 页面不能直接联网，余额查询要借 Codex++ 的网络桥；而该桥目前只放行 POST，DeepSeek 余额接口只认 GET，所以在部分 Codex++ 版本上面板会查不到余额，此时可手动记录一次",
+        "Codex 页面不能直接联网，余额查询要借 Codex++ 的网络桥；该桥目前只放行 POST，而 DeepSeek 余额接口只认 GET，所以自动刷新在部分 Codex++ 版本上暂时拿不到数据。面板里已经把「刷新余额」按钮暂时收起（功能保留，等桥放开 GET 就能恢复），需要余额时手动记录一次即可",
         "响应正文按 provider/model 归属读取：主机名含 deepseek 的地址，或路径为 /chat/completions、/completions、/beta/chat/completions 且本次请求体里出现 deepseek 模型的地址才读；它一律不读：回环地址上的其它接口、/responses、页面自身接口、以及请求里没点名 deepseek 的流量",
         "WebSocket 只解析「消息里出现过 deepseek 模型名」的连接（首帧认出归属后，该连接的后续帧继续解析，避免漏掉流式末尾的 usage），其余连接一帧都不读"
       ]

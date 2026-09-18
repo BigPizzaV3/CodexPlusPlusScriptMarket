@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.18.3
+// @version      1.19.1
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.18.3";
+const VERSION = "1.19.1";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -57,6 +57,13 @@ const VERSION = "1.18.3";
   const BALANCE_STATUS_TTL_MS = 45 * 1000;
   const BALANCE_BAR_DAYS = 14;
   const MAX_BALANCE_SNAPSHOTS = 5000;
+  /*
+   * 可选的本机助手：面板自己装不了本机程序（页面在沙箱里，宿主桥也没有执行、
+   * 写文件的口子），所以只把一条安装命令准备好，用户点一下复制、粘到终端回车。
+   * 命令按系统给：Windows 是 PowerShell，macOS / Linux 是 curl | bash。
+   */
+  const HELPER_RAW_BASE =
+    "https://raw.githubusercontent.com/Saydness/codexpp-deepseek-token-usage/main/helper";
   /* 用户刚填的 Key：默认只存在页面内存；勾了"记住"才写 localStorage。 */
   let pendingBalanceKey = "";
   /* 这是一份脚本 = 一次 Codex 启动；第一次打开面板要占这个标记。 */
@@ -117,6 +124,8 @@ const VERSION = "1.18.3";
       balancePushedAt: 0,
       balanceProxyAuth: null,
       balanceSyncNote: "",
+      /* 命令按哪个系统给：auto 看浏览器线索，用户也可以自己指定。 */
+      helperPlatformPick: "auto",
       balanceEnabled: true,
       balanceSource: "auto",
       balanceKeyRequestAt: 0,
@@ -1002,7 +1011,7 @@ const VERSION = "1.18.3";
       setBalanceStatus(
         BRIDGE_BALANCE_QUERY_ENABLED
           ? `已读到配置里的 Key（${maskKeyTail(key)}）`
-          : `已读到配置里的 Key（${maskKeyTail(key)}）；自动查询等 Codex++ 放开 GET`,
+          : `已读到配置里的 Key（${maskKeyTail(key)}）· 有 Key，但自动查询暂缓：Codex++ 桥只放行 POST，余额接口只认 GET`,
         "ok"
       );
     }
@@ -1203,6 +1212,112 @@ const VERSION = "1.18.3";
     return balanceSyncAge() < BALANCE_HELPER_TIMEOUT_MS;
   }
 
+  /*
+   * 面板要照顾的系统比 Codex++ 的安装包多：Windows（x64 与 ARM 版）、macOS
+   * （Intel 与 Apple 芯片）、Linux 及类 Unix、WSL 都有人跑。先按浏览器的线索
+   * 猜一个系统，猜错可以在面板里手动挑；三种系统各有自己那条命令，互不干扰。
+   */
+  function helperPlatformPick() {
+    const picked = String(state.settings.helperPlatformPick || "auto");
+    return picked === "win" || picked === "mac" || picked === "linux"
+      ? picked
+      : "auto";
+  }
+
+  function detectHelperPlatform() {
+    const nav = typeof navigator !== "undefined" ? navigator : {};
+    const ua = String(nav.userAgent || "");
+    /* Android 只能落到类 Unix 的终端；iPad 桌面模式会被报成 Mac。 */
+    if (/Android/i.test(ua)) return "linux";
+    if (/iPhone|iPad|iPod/i.test(ua)) return "mac";
+    if (/Macintosh|Mac OS X/i.test(ua)) return "mac";
+    if (/Windows|Win32|Win64/i.test(ua)) return "win";
+    if (/Linux|X11|CrOS|FreeBSD|OpenBSD|NetBSD|SunOS|Unix/i.test(ua)) return "linux";
+    return "win";
+  }
+
+  function helperPlatform() {
+    const picked = helperPlatformPick();
+    return picked === "auto" ? detectHelperPlatform() : picked;
+  }
+
+  function helperPlatformLabel(platform = helperPlatform()) {
+    if (platform === "mac") return "macOS";
+    if (platform === "linux") return "Linux";
+    return "Windows";
+  }
+
+  function helperShellCommand(extra = "") {
+    /* curl 是 macOS 和各大 Linux 的标配；万一没有，安装说明里给了 wget 版。 */
+    return `curl -fsSL ${HELPER_RAW_BASE}/install-helper.sh | bash${extra}`;
+  }
+
+  function helperInstallCommand() {
+    if (helperPlatform() === "win") {
+      return `powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path $env:TEMP 'dstu-helper-install.ps1'; irm '${HELPER_RAW_BASE}/install-helper.ps1' -OutFile $p -UseBasicParsing; & $p"`;
+    }
+    return helperShellCommand();
+  }
+
+  function helperUninstallCommand() {
+    if (helperPlatform() === "win") {
+      return `powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path $env:TEMP 'dstu-helper-install.ps1'; irm '${HELPER_RAW_BASE}/install-helper.ps1' -OutFile $p -UseBasicParsing; & $p -Uninstall"`;
+    }
+    return helperShellCommand(" -s -- -Uninstall");
+  }
+
+  function setHelperPlatformPick(value) {
+    state.settings.helperPlatformPick =
+      value === "win" || value === "mac" || value === "linux" ? value : "auto";
+    scheduleSave();
+    render();
+  }
+
+  /* 页面里没有剪贴板权限时退回到老办法；两条都不行就把命令留在状态行里。 */
+  function fallbackCopyText(value) {
+    try {
+      const area = document.createElement("textarea");
+      area.value = value;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.top = "-1000px";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function copyHelperCommand(kind) {
+    const uninstall = kind === "uninstall";
+    const command = uninstall ? helperUninstallCommand() : helperInstallCommand();
+    const where = helperPlatform() === "win" ? "PowerShell 窗口" : "终端";
+    const done = (ok) => {
+      setBalanceStatus(
+        ok
+          ? `已复制${uninstall ? "卸载" : "安装"}命令（${helperPlatformLabel()}），粘到${where}回车即可`
+          : `复制失败，请手动复制这条命令：${command}`,
+        ok ? "ok" : "warn"
+      );
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard
+          .writeText(command)
+          .then(() => done(true))
+          .catch(() => done(fallbackCopyText(command)));
+        return;
+      }
+    } catch (_) {
+      /* 落到下面的兜底 */
+    }
+    done(fallbackCopyText(command));
+  }
+
   function formatAgo(milliseconds) {
     if (!Number.isFinite(milliseconds)) return "从未";
     const seconds = Math.max(0, Math.round(milliseconds / 1000));
@@ -1238,7 +1353,7 @@ const VERSION = "1.18.3";
     }
     /* 桥这条路先撤了：查不到时只说手动记录，不摆桥的错误、也不提助手。 */
     if (!BRIDGE_BALANCE_QUERY_ENABLED) {
-      return "自动查询等 Codex++ 放开 GET 后恢复；现在用「记录余额」填一次即可";
+      return "自动查询暂缓：Codex++ 桥只放行 POST，余额接口只认 GET · 先用「记录余额」手填";
     }
     if (!balanceKeyInfo().key) {
       return "填一次 API Key 就能自动更新；也可以直接手动记录";
@@ -1254,7 +1369,7 @@ const VERSION = "1.18.3";
     if (!balanceHelperAlive()) {
       if (!silent) {
         setBalanceStatus(
-          "自动查询等 Codex++ 放开 GET 后恢复；现在用「记录余额」填一次即可",
+          "自动查询暂缓：Codex++ 桥只放行 POST，余额接口只认 GET · 先用「记录余额」手填",
           "warn"
         );
       }
@@ -1951,32 +2066,72 @@ const VERSION = "1.18.3";
             <button type="button" class="dsu-text-button" data-bridge-only data-action="balance-fetch">刷新余额</button>
           </div>
           <div class="dsu-balance-settings" data-field="balanceSettings" hidden>
-            <p class="dsu-balance-note">余额状态 · <strong data-field="balanceSyncHint">检测中…</strong></p>
-            <div>
-            <label>Key 来源
-              <select data-field="balanceKeyMode">
-                <option value="auto">自动读 Codex 配置里的 Key</option>
-                <option value="manual">只用我下面填的 Key</option>
-              </select>
-            </label>
-            <label>API Key
-              <input data-field="balanceKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...（填一次就能自动更新）">
-            </label>
-            <div class="dsu-balance-key-actions">
-              <button type="button" class="dsu-text-button" data-action="balance-key-save">用这个 Key</button>
-              <button type="button" class="dsu-text-button" data-action="balance-key-config">读取 Codex 配置</button>
-              <button type="button" class="dsu-text-button" data-action="balance-key-clear">清除 Key</button>
+            <p class="dsu-balance-sync">
+              <span class="dsu-balance-sync-label">余额同步</span>
+              <strong data-field="balanceSyncHint">检测中…</strong>
+            </p>
+            <section class="dsu-balance-group">
+              <h4 class="dsu-balance-group-title">Key 设置</h4>
+              <div class="dsu-balance-fields">
+                <label class="dsu-field">
+                  <span>取 Key 的方式</span>
+                  <select data-field="balanceKeyMode">
+                    <option value="auto">自动读 Codex 配置里的 Key</option>
+                    <option value="manual">只用我下面填的 Key</option>
+                  </select>
+                </label>
+                <label class="dsu-field">
+                  <span>API Key</span>
+                  <input data-field="balanceKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...（填一次即可）">
+                </label>
+              </div>
+              <div class="dsu-balance-key-actions">
+                <button type="button" class="dsu-text-button" data-action="balance-key-save">用这个 Key</button>
+                <button type="button" class="dsu-text-button" data-action="balance-key-config">读取 Codex 配置</button>
+                <button type="button" class="dsu-text-button" data-action="balance-key-clear">清除 Key</button>
+              </div>
+              <p class="dsu-balance-note" data-field="balanceKeyState">当前 Key：未填</p>
+            </section>
+            <section class="dsu-balance-group">
+              <h4 class="dsu-balance-group-title">选项</h4>
+              <div class="dsu-balance-options">
+                <label class="dsu-balance-switch">
+                  <input type="checkbox" data-field="balanceKeyRemember"> 把 Key 记在本机（重开 Codex 不用再填）
+                </label>
+                <label class="dsu-balance-switch">
+                  <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
+                </label>
+              </div>
+              <p class="dsu-balance-note">Key 只用来查 DeepSeek 余额，脚本本体不含任何 Key，也<strong>不会进统计、不会随脚本上传</strong>；不勾「记在本机」就只保留在本次运行的页面内存里。</p>
+            </section>
+            <section class="dsu-balance-group">
+              <h4 class="dsu-balance-group-title">本机助手（可选）</h4>
+              <p class="dsu-balance-sync">
+                <span class="dsu-balance-sync-label">助手状态</span>
+                <strong data-field="balanceHelperState">检测中…</strong>
+              </p>
+              <div class="dsu-balance-key-actions">
+                <button type="button" class="dsu-text-button" data-action="helper-install">复制安装命令</button>
+                <button type="button" class="dsu-text-button" data-action="helper-uninstall">复制卸载命令</button>
+                <label class="dsu-inline-pick">
+                  <span>命令给哪个系统</span>
+                  <select data-field="helperPlatformPick">
+                    <option value="auto">自动识别</option>
+                    <option value="win">Windows</option>
+                    <option value="mac">macOS</option>
+                    <option value="linux">Linux / 类 Unix</option>
+                  </select>
+                </label>
+              </div>
+              <p class="dsu-balance-note">装了助手才会自动更新余额：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。命令按上面选的系统给（现在按 <span data-field="helperPlatformLabel">Windows</span> 给），粘到系统终端回车即可，不用管理员权限；Windows 的 64 位 / ARM 版、macOS 的 Intel / Apple 芯片、各家 Linux 发行版和 WSL 都是同一套命令，安装脚本会自己适配，本机缺 Node.js 时会提示怎么补。</p>
+            </section>
+            <details class="dsu-balance-help">
+              <summary>自动查询为什么先收起来了？</summary>
+              <p class="dsu-balance-note">Codex 页面被安全策略挡住，不能自己联网，只能借 Codex++ 的网络桥出去；这条桥目前只放行 POST，而 DeepSeek 的余额接口只认 GET，两边对不上，所以自动查询暂时不可用——实现代码保留着，等桥放开 GET 会自动回来。在那之前，用上面的「记录余额」填一次当前数值就能更新。</p>
+            </details>
+            <div class="dsu-balance-footer">
+              <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
             </div>
-            <label class="dsu-balance-switch">
-              <input type="checkbox" data-field="balanceKeyRemember"> 把 Key 记在本机（重开 Codex 不用再填）
-            </label>
-            <p class="dsu-balance-note" data-field="balanceKeyState">当前 Key：未填</p>
-            </div>
-            <label class="dsu-balance-switch">
-              <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
-            </label>
-            <p class="dsu-balance-note">Key 只用来查 DeepSeek 余额，脚本本体不含任何 Key：自动 = 读 Codex++ 配置里的那把（Codex 正在用的那把），手动 = 只用你填的这一把；勾了「记住」才写到本机存储，<strong>不会进统计、也不会随脚本上传</strong>。自动查询现在差一步：Codex++ 的网络桥只放行 POST，而余额接口只认 GET，所以先收起来了，代码留着，等桥放开 GET 会自动回来。今天想更新余额，用上面的「记录余额」填一次当前数值就行。</p>
-            <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
           </div>
           <div class="dsu-balance-table">
             <table>
@@ -2349,28 +2504,65 @@ const VERSION = "1.18.3";
       }
       .dsu-balance-settings {
         display: flex; flex-direction: column;
-        gap: 10px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #232c38;
+        gap: 14px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #232c38;
       }
       .dsu-balance-settings[hidden] { display: none; }
       /* Codex++ 网络桥只放行 POST 期间：面板直连相关的 UI 先藏起来，实现代码保留。 */
       #${PANEL_ID}[data-dsu-bridge-query="off"] [data-bridge-only] {
         display: none !important;
       }
-      .dsu-balance-settings label { display: flex; align-items: center; gap: 7px; color: #94a3b8; font-size: 12px; }
+      .dsu-balance-sync {
+        display: flex; align-items: baseline; gap: 8px; margin: 0;
+        padding: 7px 10px; border-radius: 8px;
+        background: #0d1320; border: 1px solid #1f2937;
+        color: #94a3b8; font-size: 11px; line-height: 1.45;
+      }
+      .dsu-balance-sync-label { flex: none; color: #475569; }
+      .dsu-balance-sync strong { font-weight: 500; color: #cbd5e1; }
+      .dsu-balance-sync strong[data-tone="ok"] { color: #4ade80; }
+      .dsu-balance-sync strong[data-tone="warn"] { color: #fbbf24; }
+      .dsu-balance-group { display: flex; flex-direction: column; gap: 10px; }
+      .dsu-balance-group-title {
+        margin: 0; color: #64748b; font-size: 10px; font-weight: 600;
+        letter-spacing: 0.08em;
+      }
+      .dsu-balance-fields {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+        gap: 10px;
+      }
+      .dsu-balance-settings .dsu-field {
+        display: flex; flex-direction: column; align-items: stretch;
+        gap: 5px; color: #64748b; font-size: 11px;
+      }
       .dsu-balance-settings input[type="text"],
       .dsu-balance-settings input[type="password"] {
-        flex: 1 1 auto; min-width: 0; background: #0f141c; color: #e2e8f0;
+        width: 100%; min-width: 0; background: #0f141c; color: #e2e8f0;
         border: 1px solid #2b3544; border-radius: 8px; padding: 6px 8px; font-size: 12px;
       }
       .dsu-balance-settings select {
-        background: #0f141c; color: #e2e8f0; border: 1px solid #2b3544;
+        width: 100%; background: #0f141c; color: #e2e8f0; border: 1px solid #2b3544;
         border-radius: 8px; padding: 6px 8px; font-size: 12px;
       }
-      .dsu-balance-note { grid-column: 1 / -1; margin: 0; color: #64748b; font-size: 10px; line-height: 1.5; }
+      .dsu-balance-note { grid-column: 1 / -1; margin: 0; color: #64748b; font-size: 10px; line-height: 1.6; }
       .dsu-balance-key-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-      .dsu-balance-settings .dsu-text-button { align-self: flex-start; }
-      .dsu-balance-settings .dsu-balance-switch { display: flex; }
-      .dsu-balance-settings .dsu-balance-switch input { accent-color: #38bdf8; }
+      .dsu-balance-key-actions .dsu-inline-pick {
+        display: flex; align-items: center; gap: 6px;
+        color: #64748b; font-size: 11px;
+      }
+      .dsu-balance-key-actions .dsu-inline-pick select {
+        width: auto; padding: 4px 6px; font-size: 11px;
+      }
+      .dsu-balance-options { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+      .dsu-balance-settings .dsu-balance-switch {
+        display: flex; align-items: center; gap: 7px;
+        color: #94a3b8; font-size: 12px; cursor: pointer;
+      }
+      .dsu-balance-settings .dsu-balance-switch input { accent-color: #38bdf8; margin: 0; }
+      .dsu-balance-help { border-top: 1px dashed #232c38; padding-top: 10px; }
+      .dsu-balance-help summary { color: #64748b; font-size: 11px; cursor: pointer; }
+      .dsu-balance-help summary:hover { color: #94a3b8; }
+      .dsu-balance-help .dsu-balance-note { margin-top: 8px; }
+      .dsu-balance-footer { display: flex; justify-content: flex-end; }
       .dsu-balance-card[data-enabled="false"] .dsu-balance-grid { opacity: 0.5; }
       .dsu-balance-table { margin-top: 12px; padding-top: 10px; border-top: 1px solid #232c38; max-height: 236px; overflow: auto; }
       .dsu-balance-table table { width: 100%; border-collapse: collapse; font-size: 11px; }
@@ -2556,6 +2748,8 @@ const VERSION = "1.18.3";
     else if (action === "balance-key-save") saveBalanceKeyFromInput();
     else if (action === "balance-key-clear") clearSavedBalanceKey();
     else if (action === "balance-key-config") useCodexConfigKey();
+    else if (action === "helper-install") copyHelperCommand("install");
+    else if (action === "helper-uninstall") copyHelperCommand("uninstall");
   }
 
   function bindPanelControls(panel) {
@@ -2591,6 +2785,13 @@ const VERSION = "1.18.3";
     const balanceKeyMode = panel.querySelector('[data-field="balanceKeyMode"]');
     if (balanceKeyMode) {
       balanceKeyMode.onchange = () => setBalanceKeyMode(balanceKeyMode.value);
+    }
+    const helperPlatformPickBox = panel.querySelector(
+      '[data-field="helperPlatformPick"]'
+    );
+    if (helperPlatformPickBox) {
+      helperPlatformPickBox.onchange = () =>
+        setHelperPlatformPick(helperPlatformPickBox.value);
     }
     const balanceKeyRemember = panel.querySelector(
       '[data-field="balanceKeyRemember"]'
@@ -2691,6 +2892,16 @@ const VERSION = "1.18.3";
         '[data-field="balanceKeyRemember"]'
       ),
       balanceKeyState: panel.querySelector('[data-field="balanceKeyState"]'),
+      balanceHelperState: panel.querySelector(
+        '[data-field="balanceHelperState"]'
+      ),
+      helperPlatformLabel: panel.querySelector(
+        '[data-field="helperPlatformLabel"]'
+      ),
+      helperPlatformPick: panel.querySelector(
+        '[data-field="helperPlatformPick"]'
+      ),
+      balanceFetchButton: panel.querySelector('[data-action="balance-fetch"]'),
     };
     restorePanelPosition(panel);
     applyPanelMinimized(panel);
@@ -3749,6 +3960,30 @@ const VERSION = "1.18.3";
       }
       if (state.ui.balanceEnabledBox) {
         state.ui.balanceEnabledBox.checked = balanceEnabled();
+      }
+      if (state.ui.balanceHelperState) {
+        const alive = balanceHelperAlive();
+        state.ui.balanceHelperState.textContent = alive
+          ? `运行中 · ${formatAgo(balanceSyncAge())}同步`
+          : "未检测到（自动更新余额要靠它）";
+        state.ui.balanceHelperState.dataset.tone = alive ? "ok" : "warn";
+      }
+      if (state.ui.helperPlatformLabel) {
+        state.ui.helperPlatformLabel.textContent = helperPlatformLabel();
+      }
+      if (state.ui.helperPlatformPick) {
+        const picked = helperPlatformPick();
+        if (state.ui.helperPlatformPick.value !== picked) {
+          state.ui.helperPlatformPick.value = picked;
+        }
+      }
+      /*
+       * 「刷新余额」在桥不可用时本来是藏着的；装了本机助手之后它有意义了
+       * （请助手立刻重读一次），所以只要助手在跑就重新露出来。
+       */
+      if (state.ui.balanceFetchButton) {
+        state.ui.balanceFetchButton.style.display =
+          BRIDGE_BALANCE_QUERY_ENABLED || balanceHelperAlive() ? "" : "none";
       }
       if (state.ui.balanceCard) {
         state.ui.balanceCard.dataset.enabled = balanceEnabled()

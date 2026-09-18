@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.3
+// @version      1.19.8
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.19.3";
+const VERSION = "1.19.7";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -43,8 +43,8 @@ const VERSION = "1.19.3";
   /*
    * Codex++ 的网络桥目前只放行 POST，而 DeepSeek 余额接口只认 GET，面板直连
    * 这条路暂时查不通，所以在 UI 上先撤掉（实现代码全部保留）。等 Codex++ 放开
-   * GET（或出现 POST 版余额接口），把下面这一行改回 true，自动查询、Key 设置区
-   * 和状态提示会一起恢复，其它地方都不用动。
+   * GET（或出现 POST 版余额接口），把下面这一行改回 true，面板直连查询与状态提示
+   * 会一起恢复，其它地方都不用动（面板上没有 Key 输入区，直连只认 Codex 配置里的 Key）。
    */
   const BRIDGE_BALANCE_QUERY_ENABLED = false;
   const BALANCE_QUERY_MIN_GAP_MS = 30 * 1000;
@@ -59,9 +59,11 @@ const VERSION = "1.19.3";
   const MAX_BALANCE_SNAPSHOTS = 5000;
   /*
    * 可选的本机助手：面板自己装不了本机程序（页面在沙箱里，宿主桥也没有执行、
-   * 写文件的口子），所以只把一条安装命令准备好，用户点一下复制、粘到终端回车。
-   * 命令按系统给：Windows 是 PowerShell，macOS 是 curl | bash。
-   * 安装脚本自己会先检查机器上有没有能用的 Node.js：有就直接用，没有才替用户装。
+   * 写文件的口子），但应用里的 Codex 能在这台电脑上跑命令：点「一键安装」时
+   * 把安装请求写进对话框、直接发送，由 Codex 执行安装脚本；找不到对话框
+   * （或 Codex 正忙）时才退回「复制命令」让用户自己粘。
+   * 命令按系统给：Windows 是 PowerShell，macOS 是 curl | bash。安装脚本自己会先
+   * 检查机器上有没有能用的 Node.js：有就直接用，没有才替用户装。
    */
   const HELPER_RAW_BASE =
     "https://raw.githubusercontent.com/Saydness/codexpp-deepseek-token-usage/main/helper";
@@ -749,11 +751,6 @@ const VERSION = "1.19.3";
     return { key: "", label: "", source: "" };
   }
 
-  function balanceKeyText() {
-    const info = balanceKeyInfo();
-    if (!info.key) return "未填 Key";
-    return `${info.label} · ${maskKeyTail(info.key)}`;
-  }
 
   function balanceBridgeReady() {
     return typeof window[BALANCE_BRIDGE_FN] === "function";
@@ -864,7 +861,7 @@ const VERSION = "1.19.3";
   function balanceQueryFailureText(result) {
     if (result?.fatal && result.message) return result.message;
     if (result?.bridgeBlocksGet) {
-      return "面板直连查不了：当前 Codex++ 的网络桥只允许 POST，余额接口只认 GET（先手动记录一次，或等 Codex++ 开放 GET 后自动生效）";
+      return "面板直连查不了：当前 Codex++ 的网络桥只允许 POST，余额接口只认 GET（装本机助手可以自动更新，或等 Codex++ 开放 GET 后自动生效）";
     }
     const reasons = Array.isArray(result?.reasons) ? result.reasons : [];
     if (!reasons.length) return "余额查询失败";
@@ -904,16 +901,16 @@ const VERSION = "1.19.3";
     if (!info.key) {
       state.settings.balanceQueryOk = null;
       state.settings.balanceQueryNote =
-        "还没有 Key：填一次就能自动更新，也可以直接用下面的手动记录";
+        "面板直连要 Key：装本机助手后由它自动更新余额";
       if (!silent) {
-        setBalanceStatus("先填一次 API Key，或者手动记录当前余额", "warn");
+        setBalanceStatus("面板直连要 Key；装本机助手可以让余额自动更新", "warn");
       }
       render();
       return null;
     }
     if (!balanceBridgeReady()) {
       state.settings.balanceQueryOk = false;
-      state.settings.balanceQueryNote = "当前 Codex++ 没开放网络桥，面板查不到余额（可先手动记录）";
+      state.settings.balanceQueryNote = "当前 Codex++ 没开放网络桥，面板查不到余额（装本机助手可以自动更新）";
       if (!silent) setBalanceStatus(state.settings.balanceQueryNote, "warn");
       render();
       return null;
@@ -1015,7 +1012,9 @@ const VERSION = "1.19.3";
       setBalanceStatus(
         BRIDGE_BALANCE_QUERY_ENABLED
           ? `已读到配置里的 Key（${maskKeyTail(key)}）`
-          : `已读到配置里的 Key（${maskKeyTail(key)}）· 有 Key，但自动查询暂缓：Codex++ 桥只放行 POST，余额接口只认 GET`,
+          : balanceHelperAlive()
+            ? `已读到配置里的 Key（${maskKeyTail(key)}）· 余额交给本机助手更新`
+            : `已读到配置里的 Key（${maskKeyTail(key)}）· 装上本机助手（点「一键安装」）就能自动更新`,
         "ok"
       );
     }
@@ -1281,6 +1280,81 @@ const VERSION = "1.19.3";
     return helperShellCommand(" -s -- -Uninstall");
   }
 
+  /*
+   * 把安装 / 卸载请求交给应用里的 Codex 执行：写进它的输入框，能发就直接发。
+   * 返回值说明：sent 已发送；waiting 已写进输入框但发送键不可用（Codex 正忙，
+   * 这颗键会变成「停止」，绝不能点）；composer-occupied 输入框里有用户自己的
+   * 内容，不能覆盖；no-composer / insert-failed 退回复制命令。
+   */
+  function codexComposerInput() {
+    return document.querySelector("[data-codex-composer]");
+  }
+
+  function codexSendButton() {
+    const composer = codexComposerInput();
+    if (!composer) return null;
+    let node = composer;
+    /* 只在输入框所在的这块结构里找，绝不扫到整页去点别的按钮。 */
+    for (
+      let depth = 0;
+      depth < 8 && node && node !== document.body && node !== document.documentElement;
+      depth += 1, node = node.parentElement
+    ) {
+      if (!node.querySelectorAll) continue;
+      for (const button of node.querySelectorAll("button")) {
+        const label = String(button.getAttribute("aria-label") || "").trim();
+        /* 只认「发送」，codexHelperRequest 的注释里说明了为什么不能点别的键。 */
+        if (/^(发送|发送消息|提交|Send|Send message|Submit)$/i.test(label)) {
+          return button;
+        }
+      }
+    }
+    return null;
+  }
+
+  function codexHelperRequest(command, uninstall) {
+    const composer = codexComposerInput();
+    if (!composer) return "no-composer";
+    const existing = String(composer.textContent || "");
+    if (!existing.includes("DeepSeek 用量面板")) {
+      if (existing.trim()) return "composer-occupied";
+      const lines = uninstall
+        ? [
+            "【DeepSeek 用量面板】请在这台电脑上卸载 DeepSeek 余额小助手（面板其它功能不受影响）。",
+            "",
+            "直接执行下面这条命令即可，不需要管理员权限：",
+            command,
+            "",
+            "执行完说一声结果就行。",
+          ]
+        : [
+            "【DeepSeek 用量面板】请在这台电脑上装一下「本机助手」，它负责把 DeepSeek 账户余额推给用量面板。",
+            "",
+            "直接执行下面这条命令即可：脚本会先检查这台机器，Node.js 已经有就直接用、没有才自动补上，全程不需要管理员权限：",
+            command,
+            "",
+            "装好后面板上的助手状态会变成「运行中」，不用重启 Codex。",
+          ];
+      composer.focus();
+      const range = document.createRange();
+      range.selectNodeContents(composer);
+      range.collapse(false);
+      const selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+      document.execCommand("insertText", false, lines.join("\n"));
+      if (!String(composer.textContent || "").includes("DeepSeek 用量面板")) {
+        return "insert-failed";
+      }
+    }
+    const send = codexSendButton();
+    if (!send) return "waiting";
+    send.click();
+    return "sent";
+  }
+
   function setHelperPlatformPick(value) {
     state.settings.helperPlatformPick =
       value === "win" || value === "mac" ? value : "auto";
@@ -1336,6 +1410,40 @@ const VERSION = "1.19.3";
     done(fallbackCopyText(command));
   }
 
+  /*
+   * 面板上的「一键安装 / 卸载」：优先让 Codex 直接执行；它没在对话页（找不到
+   * 输入框）、正忙或输入框被占用时，退回复制命令，用户照样能一条命令装好。
+   */
+  function runHelperFromPanel(uninstall) {
+    const command = uninstall ? helperUninstallCommand() : helperInstallCommand();
+    const result = codexHelperRequest(command, uninstall);
+    if (result === "sent") {
+      setBalanceStatus(
+        uninstall
+          ? "已让 Codex 在这台电脑上卸载助手，进度看对话窗口"
+          : "已让 Codex 在这台电脑上安装助手（先检测依赖、缺了才补），装好后这里会显示「运行中」",
+        "ok"
+      );
+      return;
+    }
+    if (result === "waiting") {
+      setBalanceStatus(
+        "安装请求已经写进 Codex 输入框；它正忙，等忙完按回车发送即可",
+        "warn"
+      );
+      return;
+    }
+    if (result === "composer-occupied") {
+      setBalanceStatus(
+        "Codex 输入框里已经有内容，没有动它：可以点「复制安装命令」自己粘一次",
+        "warn"
+      );
+      return;
+    }
+    /* 找不到输入框或写入失败：退回复制，不让用户空手而归。 */
+    copyHelperCommand(uninstall ? "uninstall" : "install");
+  }
+
   function formatAgo(milliseconds) {
     if (!Number.isFinite(milliseconds)) return "从未";
     const seconds = Math.max(0, Math.round(milliseconds / 1000));
@@ -1369,25 +1477,28 @@ const VERSION = "1.19.3";
     ) {
       return note;
     }
-    /* 桥这条路先撤了：查不到时只说手动记录，不摆桥的错误、也不提助手。 */
+    /* 面板自己连不了网：自动更新的活交给本机助手，没装就直接引导去装。 */
     if (!BRIDGE_BALANCE_QUERY_ENABLED) {
-      return "自动查询暂缓：Codex++ 桥只放行 POST，余额接口只认 GET · 先用「记录余额」手填";
+      if (balanceHelperAlive()) {
+        return "余额由本机助手自动更新 · 点「刷新余额」立刻补一次";
+      }
+      return "自动更新要装一次本机助手：点「一键安装」，余额就会自动更新";
     }
     if (!balanceKeyInfo().key) {
-      return "填一次 API Key 就能自动更新；也可以直接手动记录";
+      return "面板直连要 Key（读 Codex 配置里那把）；装本机助手可以让余额自动更新";
     }
     return "已就绪，点「刷新余额」立刻查询";
   }
 
   /*
-   * 桥还查不了余额时，「刷新余额」只请本机助手去查：它用 GET，读得到。
-   * 没检测到助手就说清楚"现在只能手动记录"，不报网络桥的限制、也不提助手。
+   * 面板自己连不了网，「刷新余额」就请本机助手去查：它在本机用 GET，读得到。
+   * 没检测到助手就直接说去装：面板没有手填渠道，余额只由助手提供。
    */
   function requestHelperBalanceRefresh({ silent = false } = {}) {
     if (!balanceHelperAlive()) {
       if (!silent) {
         setBalanceStatus(
-          "自动查询暂缓：Codex++ 桥只放行 POST，余额接口只认 GET · 先用「记录余额」手填",
+          "本机助手没在跑：点「一键安装」装上它，余额就会自动更新",
           "warn"
         );
       }
@@ -1407,7 +1518,7 @@ const VERSION = "1.19.3";
   function requestBalanceRefresh({ silent = false } = {}) {
     if (!balanceEnabled()) {
       if (!silent) {
-        setBalanceStatus("余额功能已关闭，可在「设置」里打开", "warn");
+        setBalanceStatus("余额功能已关闭，勾选卡片上的「启用」即可打开", "warn");
       }
       return false;
     }
@@ -1422,7 +1533,7 @@ const VERSION = "1.19.3";
       return true;
     }
     if (!silent) {
-      setBalanceStatus("先填一次 API Key；也可以直接用「记录余额」手动填", "warn");
+      setBalanceStatus("面板直连要 Key；装本机助手可以让余额自动更新", "warn");
     }
     render();
     return false;
@@ -2065,6 +2176,9 @@ const VERSION = "1.19.3";
         <div class="dsu-balance-card">
           <div class="dsu-card-title">
             <span>账户余额</span>
+            <label class="dsu-balance-enable">
+              <input type="checkbox" data-field="balanceEnabled"> 启用
+            </label>
             <span class="dsu-balance-status" data-field="balanceStatus"></span>
             <button type="button" class="dsu-text-button dsu-balance-toggle" data-action="balance-settings">设置</button>
           </div>
@@ -2072,15 +2186,13 @@ const VERSION = "1.19.3";
             <div class="dsu-balance-main">
               <span>当前余额</span>
               <strong data-field="balanceNow">—</strong>
-              <small data-field="balanceNowHint">尚未记录</small>
+              <small data-field="balanceNowHint">等助手回填</small>
             </div>
             <div><span>今日消耗</span><strong data-field="balanceToday">—</strong><small data-field="balanceTodayHint"></small></div>
             <div><span>昨日消耗</span><strong data-field="balanceYesterday">—</strong><small data-field="balanceYesterdayHint"></small></div>
             <div><span>本月消耗</span><strong data-field="balanceMonth">—</strong><small data-field="balanceMonthHint"></small></div>
           </div>
           <div class="dsu-balance-actions">
-            <input data-field="balanceInput" type="number" step="0.01" min="0" placeholder="手动填入当前余额">
-            <button type="button" class="dsu-text-button" data-action="balance-save">记录余额</button>
             <!--
               这颗按钮在「桥能直连」或「本机助手在跑」时才有意义，两种情况都由 render
               按行内样式决定显隐；不要再挂 data-bridge-only——那条规则带 !important，
@@ -2094,47 +2206,15 @@ const VERSION = "1.19.3";
               <strong data-field="balanceSyncHint">检测中…</strong>
             </p>
             <section class="dsu-balance-group">
-              <h4 class="dsu-balance-group-title">Key 设置</h4>
-              <div class="dsu-balance-fields">
-                <label class="dsu-field">
-                  <span>取 Key 的方式</span>
-                  <select data-field="balanceKeyMode">
-                    <option value="auto">自动读 Codex 配置里的 Key</option>
-                    <option value="manual">只用我下面填的 Key</option>
-                  </select>
-                </label>
-                <label class="dsu-field">
-                  <span>API Key</span>
-                  <input data-field="balanceKeyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...（填一次即可）">
-                </label>
-              </div>
-              <div class="dsu-balance-key-actions">
-                <button type="button" class="dsu-text-button" data-action="balance-key-save">用这个 Key</button>
-                <button type="button" class="dsu-text-button" data-action="balance-key-config">读取 Codex 配置</button>
-                <button type="button" class="dsu-text-button" data-action="balance-key-clear">清除 Key</button>
-              </div>
-              <p class="dsu-balance-note" data-field="balanceKeyState">当前 Key：未填</p>
-            </section>
-            <section class="dsu-balance-group">
-              <h4 class="dsu-balance-group-title">选项</h4>
-              <div class="dsu-balance-options">
-                <label class="dsu-balance-switch">
-                  <input type="checkbox" data-field="balanceKeyRemember"> 把 Key 记在本机（重开 Codex 不用再填）
-                </label>
-                <label class="dsu-balance-switch">
-                  <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
-                </label>
-              </div>
-              <p class="dsu-balance-note">Key 只用来查 DeepSeek 余额，脚本本体不含任何 Key，也<strong>不会进统计、不会随脚本上传</strong>；不勾「记在本机」就只保留在本次运行的页面内存里。</p>
-            </section>
-            <section class="dsu-balance-group">
               <h4 class="dsu-balance-group-title">本机助手（可选）</h4>
               <p class="dsu-balance-sync">
                 <span class="dsu-balance-sync-label">助手状态</span>
                 <strong data-field="balanceHelperState">检测中…</strong>
               </p>
               <div class="dsu-balance-key-actions">
-                <button type="button" class="dsu-text-button" data-action="helper-install">复制一键安装命令</button>
+                <button type="button" class="dsu-text-button" data-action="helper-run">一键安装（交给 Codex）</button>
+                <button type="button" class="dsu-text-button" data-action="helper-install">复制安装命令</button>
+                <button type="button" class="dsu-text-button" data-action="helper-uninstall-run">让 Codex 卸载</button>
                 <button type="button" class="dsu-text-button" data-action="helper-uninstall">复制卸载命令</button>
                 <label class="dsu-inline-pick">
                   <span>命令给哪个系统</span>
@@ -2145,11 +2225,11 @@ const VERSION = "1.19.3";
                   </select>
                 </label>
               </div>
-              <p class="dsu-balance-note">装了助手才会自动更新余额：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。点上面的按钮会复制一条命令（现在按 <span data-field="helperPlatformLabel">Windows</span> 给）；Windows 粘进 PowerShell，macOS 粘进「终端」，回车之后全自动：脚本先检查这台机器，Node.js 已经有就直接用，没有才替你装好（Windows 先试 winget、不成改用便携版，macOS 先试 Homebrew、不成改用官方安装包），不用管理员权限，也不用提前准备什么。Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片）都走这一套命令，脚本自己按机器适配。</p>
+              <p class="dsu-balance-note">点「一键安装」＝让 Codex 在这台电脑上装好助手：缺 Node.js 会自动补，不需要管理员权限。命令按下面的系统选（现在按 <span data-field="helperPlatformLabel">Windows</span>）。Key 不用你管：助手会用 Codex 里已有的那把，面板不保存任何 Key。</p>
             </section>
             <details class="dsu-balance-help">
-              <summary>自动查询为什么先收起来了？</summary>
-              <p class="dsu-balance-note">Codex 页面被安全策略挡住，不能自己联网，只能借 Codex++ 的网络桥出去；这条桥目前只放行 POST，而 DeepSeek 的余额接口只认 GET，两边对不上，所以自动查询暂时不可用——实现代码保留着，等桥放开 GET 会自动回来。在那之前，用上面的「记录余额」填一次当前数值就能更新。</p>
+              <summary>余额是怎么自动更新的？</summary>
+              <p class="dsu-balance-note">Codex 页面自己连不了网，余额由「本机助手」在本机查：装一次之后每 5 分钟更新一次，点「刷新余额」立刻补一次。Key 由助手自己找（环境变量 / <code>config.toml</code> / <code>~/.codex/auth.json</code>），面板不接触 Key。</p>
             </details>
             <div class="dsu-balance-footer">
               <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
@@ -2548,14 +2628,6 @@ const VERSION = "1.19.3";
         margin: 0; color: #64748b; font-size: 10px; font-weight: 600;
         letter-spacing: 0.08em;
       }
-      .dsu-balance-fields {
-        display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-        gap: 10px;
-      }
-      .dsu-balance-settings .dsu-field {
-        display: flex; flex-direction: column; align-items: stretch;
-        gap: 5px; color: #64748b; font-size: 11px;
-      }
       .dsu-balance-settings input[type="text"],
       .dsu-balance-settings input[type="password"] {
         width: 100%; min-width: 0; background: #0f141c; color: #e2e8f0;
@@ -2574,12 +2646,11 @@ const VERSION = "1.19.3";
       .dsu-balance-key-actions .dsu-inline-pick select {
         width: auto; padding: 4px 6px; font-size: 11px;
       }
-      .dsu-balance-options { display: flex; flex-wrap: wrap; gap: 8px 18px; }
-      .dsu-balance-settings .dsu-balance-switch {
-        display: flex; align-items: center; gap: 7px;
-        color: #94a3b8; font-size: 12px; cursor: pointer;
+      .dsu-balance-enable {
+        display: flex; align-items: center; gap: 5px;
+        color: #94a3b8; font-size: 11px; cursor: pointer;
       }
-      .dsu-balance-settings .dsu-balance-switch input { accent-color: #38bdf8; margin: 0; }
+      .dsu-balance-enable input { accent-color: #38bdf8; margin: 0; }
       .dsu-balance-help { border-top: 1px dashed #232c38; padding-top: 10px; }
       .dsu-balance-help summary { color: #64748b; font-size: 11px; cursor: pointer; }
       .dsu-balance-help summary:hover { color: #94a3b8; }
@@ -2764,14 +2835,12 @@ const VERSION = "1.19.3";
     else if (action === "close") closePanel();
     else if (action === "clear") clearRecords();
     else if (action === "balance-fetch") requestBalanceRefresh();
-    else if (action === "balance-save") saveBalanceFromInput();
     else if (action === "balance-settings") toggleBalanceSettings();
     else if (action === "balance-reset") resetBalances();
-    else if (action === "balance-key-save") saveBalanceKeyFromInput();
-    else if (action === "balance-key-clear") clearSavedBalanceKey();
-    else if (action === "balance-key-config") useCodexConfigKey();
     else if (action === "helper-install") copyHelperCommand("install");
     else if (action === "helper-uninstall") copyHelperCommand("uninstall");
+    else if (action === "helper-run") runHelperFromPanel(false);
+    else if (action === "helper-uninstall-run") runHelperFromPanel(true);
   }
 
   function bindPanelControls(panel) {
@@ -2788,39 +2857,12 @@ const VERSION = "1.19.3";
     const monthInput = panel.querySelector('[data-field="monthInput"]');
     const modelSelect = panel.querySelector('[data-field="modelSelect"]');
     const chart = panel.querySelector('[data-field="chart"]');
-    const balanceInput = panel.querySelector('[data-field="balanceInput"]');
-    if (balanceInput) {
-      balanceInput.onkeydown = (event) => {
-        if (event.key !== "Enter") return;
-        event.preventDefault();
-        saveBalanceFromInput();
-      };
-    }
-    const balanceKeyInput = panel.querySelector('[data-field="balanceKeyInput"]');
-    if (balanceKeyInput) {
-      balanceKeyInput.onkeydown = (event) => {
-        if (event.key !== "Enter") return;
-        event.preventDefault();
-        saveBalanceKeyFromInput();
-      };
-    }
-    const balanceKeyMode = panel.querySelector('[data-field="balanceKeyMode"]');
-    if (balanceKeyMode) {
-      balanceKeyMode.onchange = () => setBalanceKeyMode(balanceKeyMode.value);
-    }
     const helperPlatformPickBox = panel.querySelector(
       '[data-field="helperPlatformPick"]'
     );
     if (helperPlatformPickBox) {
       helperPlatformPickBox.onchange = () =>
         setHelperPlatformPick(helperPlatformPickBox.value);
-    }
-    const balanceKeyRemember = panel.querySelector(
-      '[data-field="balanceKeyRemember"]'
-    );
-    if (balanceKeyRemember) {
-      balanceKeyRemember.onchange = () =>
-        setBalanceKeyRemember(balanceKeyRemember.checked);
     }
     const balanceEnabledBox = panel.querySelector('[data-field="balanceEnabled"]');
     if (balanceEnabledBox) {
@@ -2903,17 +2945,10 @@ const VERSION = "1.19.3";
       modelRows: panel.querySelector('[data-field="modelRows"]'),
       recentRows: panel.querySelector('[data-field="recentRows"]'),
       balanceRows: panel.querySelector('[data-field="balanceRows"]'),
-      balanceInput: panel.querySelector('[data-field="balanceInput"]'),
       balanceSettings: panel.querySelector('[data-field="balanceSettings"]'),
       balanceSyncHint: panel.querySelector('[data-field="balanceSyncHint"]'),
       balanceCard: panel.querySelector(".dsu-balance-card"),
       balanceEnabledBox: panel.querySelector('[data-field="balanceEnabled"]'),
-      balanceKeyInput: panel.querySelector('[data-field="balanceKeyInput"]'),
-      balanceKeyMode: panel.querySelector('[data-field="balanceKeyMode"]'),
-      balanceKeyRemember: panel.querySelector(
-        '[data-field="balanceKeyRemember"]'
-      ),
-      balanceKeyState: panel.querySelector('[data-field="balanceKeyState"]'),
       balanceHelperState: panel.querySelector(
         '[data-field="balanceHelperState"]'
       ),
@@ -3478,22 +3513,6 @@ const VERSION = "1.19.3";
     render({ animate: true });
   }
 
-  function saveBalanceFromInput() {
-    const input = state.ui?.panel?.querySelector('[data-field="balanceInput"]');
-    const raw = String(input?.value ?? "").trim();
-    const value = Number(raw);
-    /* 空输入会被 Number() 变成 0，那会把当天消耗算成充值，必须挡住。 */
-    if (!input || !raw || !Number.isFinite(value) || value <= 0) {
-      setBalanceStatus("请输入大于 0 的余额金额", "warn");
-      input?.focus();
-      return;
-    }
-    const currency = state.settings.balanceCurrency || "CNY";
-    recordBalance(value, { source: "manual", currency });
-    input.value = "";
-    setBalanceStatus(`已记录 ${formatBalance(value, currency)}`, "ok");
-  }
-
   function toggleBalanceSettings() {
     state.settings.balanceSettingsOpen = !state.settings.balanceSettingsOpen;
     scheduleSave();
@@ -3536,15 +3555,6 @@ const VERSION = "1.19.3";
     return true;
   }
 
-  function saveBalanceKeyFromInput() {
-    const input = state.ui?.panel?.querySelector('[data-field="balanceKeyInput"]');
-    const value = String(input?.value ?? "").trim();
-    if (!rememberBalanceKey(value)) {
-      input?.focus();
-      return;
-    }
-    if (input) input.value = "";
-  }
 
   function clearSavedBalanceKey() {
     panelBalanceKey = "";
@@ -3560,7 +3570,7 @@ const VERSION = "1.19.3";
     state.settings.balanceQueryNote = "";
     scheduleSave();
     render();
-    setBalanceStatus("Key 已清除（手动记录的余额不受影响）", "ok");
+    setBalanceStatus("Key 已清除（已有的余额记录不受影响）", "ok");
   }
 
   function setBalanceKeyMode(value) {
@@ -3909,7 +3919,7 @@ const VERSION = "1.19.3";
         latest
           ? `${formatDateTime(latest.t)} · ${balanceSourceLabel(latest.s)}`
           : !balanceEnabled()
-            ? "余额功能已关闭（点上方「设置」可打开）"
+            ? "余额功能已关闭（勾选上面的「启用」即可打开）"
             : balanceSyncText()
       );
       setText(
@@ -3961,24 +3971,6 @@ const VERSION = "1.19.3";
       }
       if (state.ui.balanceSettings) {
         state.ui.balanceSettings.hidden = !state.settings.balanceSettingsOpen;
-      }
-      if (state.ui.balanceKeyMode) {
-        state.ui.balanceKeyMode.value =
-          state.settings.balanceKeyMode === "manual" ? "manual" : "auto";
-      }
-      if (state.ui.balanceKeyRemember) {
-        state.ui.balanceKeyRemember.checked =
-          state.settings.balanceKeyRemember === true;
-      }
-      if (state.ui.balanceKeyState) {
-        const info = balanceKeyInfo();
-        const bridge = balanceBridgeReady() ? "" : " · 网络桥不可用";
-        const pending = BRIDGE_BALANCE_QUERY_ENABLED
-          ? ""
-          : " · 自动查询暂缓（等 Codex++ 放开 GET）";
-        state.ui.balanceKeyState.textContent = info.key
-          ? `当前 Key：${info.label} · ${maskKeyTail(info.key)}${bridge}${pending}`
-          : `当前 Key：未填${bridge}${pending}`;
       }
       if (state.ui.balanceEnabledBox) {
         state.ui.balanceEnabledBox.checked = balanceEnabled();
@@ -4092,6 +4084,61 @@ const VERSION = "1.19.3";
     });
   }
 
+  /*
+   * 图表细节辅助：圆角柱、平滑曲线、圆角数值小标——只负责画，不碰数据。
+   */
+  function chartRoundRect(context, x, y, width, height, radius, bottomRadius) {
+    const top = Math.max(0, Math.min(radius, width / 2, height));
+    const bottom = Math.max(
+      0,
+      Math.min(
+        bottomRadius === undefined ? radius : bottomRadius,
+        width / 2,
+        height - top
+      )
+    );
+    context.beginPath();
+    context.moveTo(x, y + height - bottom);
+    context.arcTo(x, y + height, x + bottom, y + height, bottom);
+    context.lineTo(x + width - bottom, y + height);
+    context.arcTo(x + width, y + height, x + width, y + height - bottom, bottom);
+    context.lineTo(x + width, y + top);
+    context.arcTo(x + width, y, x + width - top, y, top);
+    context.lineTo(x + top, y);
+    context.arcTo(x, y, x, y + top, top);
+    context.closePath();
+  }
+
+  function chartSmoothPath(context, points) {
+    context.moveTo(points[0].x, points[0].y);
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const current = points[index];
+      const next = points[index + 1];
+      const middle = (current.x + next.x) / 2;
+      context.bezierCurveTo(middle, current.y, middle, next.y, next.x, next.y);
+    }
+  }
+
+  function chartPill(context, x, y, text, background, color, align, limit) {
+    context.font = "bold 10px Segoe UI, sans-serif";
+    const pillWidth = context.measureText(text).width + 14;
+    let left =
+      align === "right"
+        ? x - pillWidth
+        : align === "center"
+          ? x - pillWidth / 2
+          : x;
+    if (Number.isFinite(limit)) left = Math.min(left, limit - pillWidth);
+    left = Math.max(4, left);
+    chartRoundRect(context, left, y, pillWidth, 15, 7);
+    context.fillStyle = background;
+    context.fill();
+    context.fillStyle = color;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillText(text, left + pillWidth / 2, y + 7.6);
+  }
+
   function drawChart(buckets, animate = false) {
     const canvas = state.ui?.chart;
     if (!canvas) return;
@@ -4124,7 +4171,7 @@ const VERSION = "1.19.3";
     );
     const maxCost = Math.max(0.000001, ...buckets.map((item) => item.cost));
     const step = chartWidth / buckets.length;
-    const barWidth = Math.max(4, Math.min(22, step * 0.58));
+    const barWidth = Math.max(5, Math.min(26, step * 0.68));
     const colors = {
       hit: "#38bdf8",
       miss: "#fb923c",
@@ -4161,18 +4208,47 @@ const VERSION = "1.19.3";
         width: step,
         item,
       });
-      let y = padding.top + chartHeight;
       const values = [
         [item.hit, colors.hit],
         [item.miss, colors.miss],
         [item.output, colors.output],
       ];
-      for (const [value, color] of values) {
-        const barHeight = (chartHeight * value) / maxTokens;
-        if (barHeight <= 0) continue;
-        y -= barHeight;
-        context.fillStyle = color;
-        context.fillRect(x - barWidth / 2, y, barWidth, barHeight);
+      const barTotal = item.hit + item.miss + item.output;
+      if (barTotal > 0) {
+        /*
+         * 圆角画在整根柱子上：先用圆角矩形当裁剪区，再在里面堆命中/未命中/输出。
+         * 只磨圆顶端两角、柱脚保持直角，这样顶部圆角不会被细小分段盖没。
+         */
+        const barHeight = (chartHeight * barTotal) / maxTokens;
+        const barTop = padding.top + chartHeight - barHeight;
+        const barRadius = Math.min(5, barWidth * 0.3);
+        context.save();
+        chartRoundRect(
+          context,
+          x - barWidth / 2,
+          barTop,
+          barWidth,
+          barHeight,
+          barRadius,
+          0
+        );
+        context.clip();
+        let y = padding.top + chartHeight;
+        values.forEach(([value, color], segmentIndex) => {
+          const segmentHeight = (chartHeight * value) / maxTokens;
+          if (segmentHeight <= 0) return;
+          y -= segmentHeight;
+          if (segmentIndex === 0) {
+            const barGradient = context.createLinearGradient(0, y, 0, y + segmentHeight);
+            barGradient.addColorStop(0, "#4cc3fb");
+            barGradient.addColorStop(1, "#2b8fc9");
+            context.fillStyle = barGradient;
+          } else {
+            context.fillStyle = color;
+          }
+          context.fillRect(x - barWidth / 2, y, barWidth, segmentHeight);
+        });
+        context.restore();
       }
       if (index % labelEvery === 0 || index === buckets.length - 1) {
         context.fillStyle = colors.text;
@@ -4182,23 +4258,42 @@ const VERSION = "1.19.3";
       }
     });
 
-    context.strokeStyle = colors.cost;
-    context.lineWidth = 1.6;
+    const costPoints = buckets.map((item, index) => ({
+      x: padding.left + index * step + step / 2,
+      y: padding.top + chartHeight - (chartHeight * item.cost) / maxCost,
+    }));
+    const costGradient = context.createLinearGradient(
+      0,
+      padding.top,
+      0,
+      padding.top + chartHeight
+    );
+    costGradient.addColorStop(0, "rgba(250, 204, 21, 0.14)");
+    costGradient.addColorStop(1, "rgba(250, 204, 21, 0)");
     context.beginPath();
-    buckets.forEach((item, index) => {
-      const x = padding.left + index * step + step / 2;
-      const y = padding.top + chartHeight - (chartHeight * item.cost) / maxCost;
-      if (index === 0) context.moveTo(x, y);
-      else context.lineTo(x, y);
-    });
+    chartSmoothPath(context, costPoints);
+    context.lineTo(costPoints[costPoints.length - 1].x, padding.top + chartHeight);
+    context.lineTo(costPoints[0].x, padding.top + chartHeight);
+    context.closePath();
+    context.fillStyle = costGradient;
+    context.fill();
+    context.beginPath();
+    chartSmoothPath(context, costPoints);
+    context.strokeStyle = colors.cost;
+    context.lineWidth = 1.8;
     context.stroke();
-    context.fillStyle = colors.cost;
     buckets.forEach((item, index) => {
-      const x = padding.left + index * step + step / 2;
-      const y = padding.top + chartHeight - (chartHeight * item.cost) / maxCost;
+      if (item.cost <= 0) return;
+      const point = costPoints[index];
       context.beginPath();
-      context.arc(x, y, 2.2, 0, Math.PI * 2);
+      context.arc(point.x, point.y, 2.6, 0, Math.PI * 2);
+      context.fillStyle = colors.cost;
       context.fill();
+      context.beginPath();
+      context.arc(point.x, point.y, 2.6, 0, Math.PI * 2);
+      context.strokeStyle = "#10161f";
+      context.lineWidth = 1;
+      context.stroke();
     });
 
     context.textAlign = "left";
@@ -4210,6 +4305,45 @@ const VERSION = "1.19.3";
         formatCost((maxCost * index) / 2),
         padding.left + chartWidth + 8,
         y
+      );
+    }
+    /* 峰值自动标注：最高的一柱写总量，费用最高的那点写金额，省得每次去悬停。 */
+    let peakIndex = 0;
+    let costPeakIndex = 0;
+    buckets.forEach((item, index) => {
+      const total = item.hit + item.miss + item.output;
+      const peakItem = buckets[peakIndex];
+      if (total > peakItem.hit + peakItem.miss + peakItem.output) peakIndex = index;
+      if (item.cost > buckets[costPeakIndex].cost) costPeakIndex = index;
+    });
+    const peakItem = buckets[peakIndex];
+    const peakTotal = peakItem.hit + peakItem.miss + peakItem.output;
+    if (peakTotal > 0) {
+      const peakX = padding.left + peakIndex * step + step / 2;
+      const peakY = padding.top + chartHeight - (chartHeight * peakTotal) / maxTokens;
+      chartPill(
+        context,
+        Math.max(padding.left + 10, Math.min(peakX, width - 10)),
+        Math.max(4, peakY - 21),
+        formatTokens(peakTotal),
+        "#1c2735",
+        "#e8eaed",
+        "center",
+        width - 4
+      );
+    }
+    const costPeak = buckets[costPeakIndex];
+    if (costPeak.cost > 0) {
+      const point = costPoints[costPeakIndex];
+      chartPill(
+        context,
+        point.x + 14,
+        Math.max(4, point.y - 5),
+        formatCost(costPeak.cost),
+        "#2a2410",
+        colors.cost,
+        "left",
+        width - 4
       );
     }
   }

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-09-18T02:47:20Z",
+  "updated_at": "2026-09-18T02:53:40Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -302,7 +302,7 @@
       ],
       "homepage": "https://github.com/Saydness/codexpp-deepseek-token-usage",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/deepseek-token-usage.js",
-      "sha256": "d3a86f7f7bb1e907866bfd6ca98a61b02d0970ade74a9ebf0bfc90880ed13b4a",
+      "sha256": "13b50af569936fecaf1bbdd097d332b6c415dddcd2bf1e9c75f202c1aaf6789a",
       "requirements": [
         "Codex++ 用户脚本环境",
         "Codex 会话中使用 DeepSeek 模型",

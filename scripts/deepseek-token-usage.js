@@ -2063,7 +2063,12 @@ const VERSION = "1.19.1";
           <div class="dsu-balance-actions">
             <input data-field="balanceInput" type="number" step="0.01" min="0" placeholder="手动填入当前余额">
             <button type="button" class="dsu-text-button" data-action="balance-save">记录余额</button>
-            <button type="button" class="dsu-text-button" data-bridge-only data-action="balance-fetch">刷新余额</button>
+            <!--
+              这颗按钮在「桥能直连」或「本机助手在跑」时才有意义，两种情况都由 render
+              按行内样式决定显隐；不要再挂 data-bridge-only——那条规则带 !important，
+              会把助手在跑时的显示意图按死。
+            -->
+            <button type="button" class="dsu-text-button" data-helper-or-bridge data-action="balance-fetch" style="display: none">刷新余额</button>
           </div>
           <div class="dsu-balance-settings" data-field="balanceSettings" hidden>
             <p class="dsu-balance-sync">

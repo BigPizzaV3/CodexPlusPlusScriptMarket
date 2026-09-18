@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.2
+// @version      1.19.3
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.19.2";
+const VERSION = "1.19.3";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -60,10 +60,14 @@ const VERSION = "1.19.2";
   /*
    * 可选的本机助手：面板自己装不了本机程序（页面在沙箱里，宿主桥也没有执行、
    * 写文件的口子），所以只把一条安装命令准备好，用户点一下复制、粘到终端回车。
-   * 命令按系统给：Windows 是 PowerShell，macOS / Linux 是 curl | bash。
+   * 命令按系统给：Windows 是 PowerShell，macOS 是 curl | bash。
+   * 安装脚本自己会先检查机器上有没有能用的 Node.js：有就直接用，没有才替用户装。
    */
   const HELPER_RAW_BASE =
     "https://raw.githubusercontent.com/Saydness/codexpp-deepseek-token-usage/main/helper";
+  /* 直连 GitHub 不通时的备用源（国内可访问的 CDN）。 */
+  const HELPER_MIRROR_BASE =
+    "https://cdn.jsdelivr.net/gh/Saydness/codexpp-deepseek-token-usage@main/helper";
   /* 用户刚填的 Key：默认只存在页面内存；勾了"记住"才写 localStorage。 */
   let pendingBalanceKey = "";
   /* 这是一份脚本 = 一次 Codex 启动；第一次打开面板要占这个标记。 */
@@ -1213,26 +1217,22 @@ const VERSION = "1.19.2";
   }
 
   /*
-   * 面板要照顾的系统比 Codex++ 的安装包多：Windows（x64 与 ARM 版）、macOS
-   * （Intel 与 Apple 芯片）、Linux 及类 Unix、WSL 都有人跑。先按浏览器的线索
-   * 猜一个系统，猜错可以在面板里手动挑；三种系统各有自己那条命令，互不干扰。
+   * Codex++ 目前只发布了三种安装包：Windows x64、macOS Intel、macOS Apple 芯片，
+   * 所以命令也只按这两套系统给：Windows 用 PowerShell，macOS 用 curl | bash。
+   * 先按浏览器的线索猜一个，猜错可以在面板里手动挑。
    */
   function helperPlatformPick() {
     const picked = String(state.settings.helperPlatformPick || "auto");
-    return picked === "win" || picked === "mac" || picked === "linux"
-      ? picked
-      : "auto";
+    return picked === "win" || picked === "mac" ? picked : "auto";
   }
 
   function detectHelperPlatform() {
     const nav = typeof navigator !== "undefined" ? navigator : {};
     const ua = String(nav.userAgent || "");
-    /* Android 只能落到类 Unix 的终端；iPad 桌面模式会被报成 Mac。 */
-    if (/Android/i.test(ua)) return "linux";
-    if (/iPhone|iPad|iPod/i.test(ua)) return "mac";
-    if (/Macintosh|Mac OS X/i.test(ua)) return "mac";
     if (/Windows|Win32|Win64/i.test(ua)) return "win";
-    if (/Linux|X11|CrOS|FreeBSD|OpenBSD|NetBSD|SunOS|Unix/i.test(ua)) return "linux";
+    /* iPad 的桌面模式会把自己报成 Mac，跟着走就行。 */
+    if (/Macintosh|Mac OS X|iPhone|iPad|iPod/i.test(ua)) return "mac";
+    /* 认不出来时按 Windows 给：桌面版用户里它最多。 */
     return "win";
   }
 
@@ -1243,32 +1243,47 @@ const VERSION = "1.19.2";
 
   function helperPlatformLabel(platform = helperPlatform()) {
     if (platform === "mac") return "macOS";
-    if (platform === "linux") return "Linux";
     return "Windows";
   }
 
   function helperShellCommand(extra = "") {
-    /* curl 是 macOS 和各大 Linux 的标配；万一没有，安装说明里给了 wget 版。 */
-    return `curl -fsSL ${HELPER_RAW_BASE}/install-helper.sh | bash${extra}`;
+    /* curl 是 macOS 自带的；GitHub 直连不通时换国内镜像，括号里先挑好再管给 bash。 */
+    return `(curl -fsSL ${HELPER_RAW_BASE}/install-helper.sh || curl -fsSL ${HELPER_MIRROR_BASE}/install-helper.sh) | bash${extra}`;
+  }
+
+  /*
+   * Windows 这条命令要能同时粘进 cmd 和 PowerShell：
+   * 所以整条命令里不出现 $ 变量（在 PowerShell 里会被提前展开），
+   * 只用单引号和括号表达式，脚本直接在内存里跑，落地文件都不需要。
+   */
+  function helperWindowsCommand(uninstall) {
+    const tail = uninstall ? " -Uninstall" : "";
+    const run = (base) =>
+      `& ([scriptblock]::Create((New-Object Net.WebClient).DownloadString('${base}/install-helper.ps1')))${tail}`;
+    return (
+      'powershell -NoProfile -ExecutionPolicy Bypass -Command "' +
+      `try { ${run(HELPER_RAW_BASE)} } catch { ${run(HELPER_MIRROR_BASE)} }` +
+      '"'
+    );
   }
 
   function helperInstallCommand() {
     if (helperPlatform() === "win") {
-      return `powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path $env:TEMP 'dstu-helper-install.ps1'; irm '${HELPER_RAW_BASE}/install-helper.ps1' -OutFile $p -UseBasicParsing; & $p"`;
+      return helperWindowsCommand(false);
     }
     return helperShellCommand();
   }
 
   function helperUninstallCommand() {
     if (helperPlatform() === "win") {
-      return `powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=Join-Path $env:TEMP 'dstu-helper-install.ps1'; irm '${HELPER_RAW_BASE}/install-helper.ps1' -OutFile $p -UseBasicParsing; & $p -Uninstall"`;
+      return helperWindowsCommand(true);
     }
     return helperShellCommand(" -s -- -Uninstall");
   }
 
   function setHelperPlatformPick(value) {
     state.settings.helperPlatformPick =
-      value === "win" || value === "mac" || value === "linux" ? value : "auto";
+      value === "win" || value === "mac" ? value : "auto";
     scheduleSave();
     render();
   }
@@ -1297,9 +1312,12 @@ const VERSION = "1.19.2";
     const command = uninstall ? helperUninstallCommand() : helperInstallCommand();
     const where = helperPlatform() === "win" ? "PowerShell 窗口" : "终端";
     const done = (ok) => {
+      const tail = uninstall
+        ? ""
+        : "；脚本自己检查依赖，缺什么会替你补上";
       setBalanceStatus(
         ok
-          ? `已复制${uninstall ? "卸载" : "安装"}命令（${helperPlatformLabel()}），粘到${where}回车即可`
+          ? `已复制${uninstall ? "卸载" : "安装"}命令（${helperPlatformLabel()}），粘到${where}回车即可${tail}`
           : `复制失败，请手动复制这条命令：${command}`,
         ok ? "ok" : "warn"
       );
@@ -2116,7 +2134,7 @@ const VERSION = "1.19.2";
                 <strong data-field="balanceHelperState">检测中…</strong>
               </p>
               <div class="dsu-balance-key-actions">
-                <button type="button" class="dsu-text-button" data-action="helper-install">复制安装命令</button>
+                <button type="button" class="dsu-text-button" data-action="helper-install">复制一键安装命令</button>
                 <button type="button" class="dsu-text-button" data-action="helper-uninstall">复制卸载命令</button>
                 <label class="dsu-inline-pick">
                   <span>命令给哪个系统</span>
@@ -2124,11 +2142,10 @@ const VERSION = "1.19.2";
                     <option value="auto">自动识别</option>
                     <option value="win">Windows</option>
                     <option value="mac">macOS</option>
-                    <option value="linux">Linux / 类 Unix</option>
                   </select>
                 </label>
               </div>
-              <p class="dsu-balance-note">装了助手才会自动更新余额：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。命令按上面选的系统给（现在按 <span data-field="helperPlatformLabel">Windows</span> 给），粘到系统终端回车即可，不用管理员权限；Windows 的 64 位 / ARM 版、macOS 的 Intel / Apple 芯片、各家 Linux 发行版和 WSL 都是同一套命令，安装脚本会自己适配，本机缺 Node.js 时会提示怎么补。</p>
+              <p class="dsu-balance-note">装了助手才会自动更新余额：Codex 运行时每 5 分钟读一次、点「刷新余额」立刻补一次，Codex 退出就停。点上面的按钮会复制一条命令（现在按 <span data-field="helperPlatformLabel">Windows</span> 给）；Windows 粘进 PowerShell，macOS 粘进「终端」，回车之后全自动：脚本先检查这台机器，Node.js 已经有就直接用，没有才替你装好（Windows 先试 winget、不成改用便携版，macOS 先试 Homebrew、不成改用官方安装包），不用管理员权限，也不用提前准备什么。Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片）都走这一套命令，脚本自己按机器适配。</p>
             </section>
             <details class="dsu-balance-help">
               <summary>自动查询为什么先收起来了？</summary>

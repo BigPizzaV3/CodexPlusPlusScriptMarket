@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.17.9
+// @version      1.18.3
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-const VERSION = "1.17.9";
+const VERSION = "1.18.3";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
   const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
@@ -183,7 +183,7 @@ const VERSION = "1.17.9";
    * 看起来像「按钮全失效」。所以只有接管了 window.__deepseekUsagePanel 的那一份
    * 才准动面板，另一份发现名字被抢走后就安静退休。
    */
-  const instance = { api: null, retired: false };
+  const instance = { api: null, retired: false, bindTag: {} };
 
   function ownsPanel() {
     if (instance.retired) return false;
@@ -208,11 +208,7 @@ const VERSION = "1.17.9";
     }
     for (const key of ["ensureTimer", "renderTimer"]) {
       if (!state[key]) continue;
-      try {
-        window.cancelAnimationFrame(state[key]);
-      } catch (_) {
-        /* 忽略 */
-      }
+      cancelFrame(state[key]);
       state[key] = 0;
     }
   }
@@ -220,6 +216,28 @@ const VERSION = "1.17.9";
   function count(value) {
     const number = Number(value);
     return Number.isFinite(number) && number > 0 ? Math.round(number) : 0;
+  }
+
+  /*
+   * 窗口被最小化或者切到后台时，requestAnimationFrame 根本不会回调，面板就会
+   * 一直停在旧数字上、按钮看着像「全失效」。这种时候退回 setTimeout，保证状态
+   * 改了页面就跟着画。
+   */
+  function scheduleFrame(callback) {
+    if (typeof document !== "undefined" && document.hidden) {
+      return window.setTimeout(callback, 16);
+    }
+    return window.requestAnimationFrame(callback);
+  }
+
+  function cancelFrame(handle) {
+    if (!handle) return;
+    try {
+      window.clearTimeout(handle);
+      window.cancelAnimationFrame(handle);
+    } catch (_) {
+      /* 句柄已经失效，忽略 */
+    }
   }
 
   function firstDefined(...values) {
@@ -981,7 +999,12 @@ const VERSION = "1.17.9";
     scheduleSave();
     render();
     if (!silent) {
-      setBalanceStatus(`已读到配置里的 Key（${maskKeyTail(key)}）`, "ok");
+      setBalanceStatus(
+        BRIDGE_BALANCE_QUERY_ENABLED
+          ? `已读到配置里的 Key（${maskKeyTail(key)}）`
+          : `已读到配置里的 Key（${maskKeyTail(key)}）；自动查询等 Codex++ 放开 GET`,
+        "ok"
+      );
     }
     queryBalanceNow({ silent: true });
     return true;
@@ -1215,7 +1238,7 @@ const VERSION = "1.17.9";
     }
     /* 桥这条路先撤了：查不到时只说手动记录，不摆桥的错误、也不提助手。 */
     if (!BRIDGE_BALANCE_QUERY_ENABLED) {
-      return "自动查询等 Codex++ 放开 GET 后恢复；现在可以手动记录一次";
+      return "自动查询等 Codex++ 放开 GET 后恢复；现在用「记录余额」填一次即可";
     }
     if (!balanceKeyInfo().key) {
       return "填一次 API Key 就能自动更新；也可以直接手动记录";
@@ -1231,7 +1254,7 @@ const VERSION = "1.17.9";
     if (!balanceHelperAlive()) {
       if (!silent) {
         setBalanceStatus(
-          "余额自动查询等 Codex++ 放开 GET 后恢复，现在可以手动记录一次",
+          "自动查询等 Codex++ 放开 GET 后恢复；现在用「记录余额」填一次即可",
           "warn"
         );
       }
@@ -1925,11 +1948,11 @@ const VERSION = "1.17.9";
           <div class="dsu-balance-actions">
             <input data-field="balanceInput" type="number" step="0.01" min="0" placeholder="手动填入当前余额">
             <button type="button" class="dsu-text-button" data-action="balance-save">记录余额</button>
-            <button type="button" class="dsu-text-button" data-action="balance-fetch">刷新余额</button>
+            <button type="button" class="dsu-text-button" data-bridge-only data-action="balance-fetch">刷新余额</button>
           </div>
           <div class="dsu-balance-settings" data-field="balanceSettings" hidden>
             <p class="dsu-balance-note">余额状态 · <strong data-field="balanceSyncHint">检测中…</strong></p>
-            <div data-bridge-only>
+            <div>
             <label>Key 来源
               <select data-field="balanceKeyMode">
                 <option value="auto">自动读 Codex 配置里的 Key</option>
@@ -1949,11 +1972,10 @@ const VERSION = "1.17.9";
             </label>
             <p class="dsu-balance-note" data-field="balanceKeyState">当前 Key：未填</p>
             </div>
-            <p class="dsu-balance-note" data-helper-only>余额由随 Codex 启动的本机助手自动获取：它在本机自己找凭据，不需要你填 Key；同步间隔几分钟一次，点「刷新余额」可以请它立刻查一次，查不到时可以手动记录。等 Codex++ 的网络桥放开 GET，这块会换回面板自己查，Key 来源只有两条：Codex++ 配置里的那把，或者你手动填的。</p>
             <label class="dsu-balance-switch">
               <input type="checkbox" data-field="balanceEnabled"> 启用余额统计
             </label>
-            <p class="dsu-balance-note" data-bridge-only>Codex 页面被安全策略挡着、自己不能联网，所以面板借 Codex++ 的网络桥去查 DeepSeek 余额：自动 = 读 Codex++ 里配的那把 Key（也就是 Codex 正在用的），读不到就手动填一次；手动 = 只在这台机器上，勾了「记住」才写本机存储，<strong>不会进统计、也不会随脚本上传</strong>。Key 只有这两条来源，不用你去找文件。查询频率：打开面板时一次，之后每 15 分钟一次，两次之间至少隔 30 秒。</p>
+            <p class="dsu-balance-note">Key 只用来查 DeepSeek 余额，脚本本体不含任何 Key：自动 = 读 Codex++ 配置里的那把（Codex 正在用的那把），手动 = 只用你填的这一把；勾了「记住」才写到本机存储，<strong>不会进统计、也不会随脚本上传</strong>。自动查询现在差一步：Codex++ 的网络桥只放行 POST，而余额接口只认 GET，所以先收起来了，代码留着，等桥放开 GET 会自动回来。今天想更新余额，用上面的「记录余额」填一次当前数值就行。</p>
             <button type="button" class="dsu-text-button dsu-danger" data-action="balance-reset">清除余额记录</button>
           </div>
           <div class="dsu-balance-table">
@@ -2331,8 +2353,7 @@ const VERSION = "1.17.9";
       }
       .dsu-balance-settings[hidden] { display: none; }
       /* Codex++ 网络桥只放行 POST 期间：面板直连相关的 UI 先藏起来，实现代码保留。 */
-      #${PANEL_ID}[data-dsu-bridge-query="off"] [data-bridge-only],
-      #${PANEL_ID}[data-dsu-bridge-query="on"] [data-helper-only] {
+      #${PANEL_ID}[data-dsu-bridge-query="off"] [data-bridge-only] {
         display: none !important;
       }
       .dsu-balance-settings label { display: flex; align-items: center; gap: 7px; color: #94a3b8; font-size: 12px; }
@@ -2648,9 +2669,6 @@ const VERSION = "1.17.9";
     for (const element of panel.querySelectorAll("[data-bridge-only]")) {
       element.style.display = BRIDGE_BALANCE_QUERY_ENABLED ? "" : "none";
     }
-    for (const element of panel.querySelectorAll("[data-helper-only]")) {
-      element.style.display = BRIDGE_BALANCE_QUERY_ENABLED ? "none" : "";
-    }
     state.ui = {
       panel,
       body: panel.querySelector('[data-field="panelBody"]'),
@@ -2683,12 +2701,17 @@ const VERSION = "1.17.9";
       state.resizeObserver = new ResizeObserver(() => {
         if (state.dragState || state.resizeState) return;
         clampPanelPosition(panel);
-        window.requestAnimationFrame(() => clampPanelPosition(panel));
+        scheduleFrame(() => clampPanelPosition(panel));
       });
       state.resizeObserver.observe(panel);
     }
-    if (panel.__deepseekUsageBoundVersion === VERSION) return;
-    panel.__deepseekUsageBoundVersion = VERSION;
+    /*
+     * 用「本份脚本自己的标记对象」判断有没有绑过，而不是只用版本号：热重载时
+     * 新旧两份版本号可能相同（或旧那份先绑了），只比版本号会让接管面板的那份
+     * 跳过绑定，按钮就留在已经退休的那份身上 —— 看起来就是「按钮全失效」。
+     */
+    if (panel.__deepseekUsageBindTag === instance.bindTag) return;
+    panel.__deepseekUsageBindTag = instance.bindTag;
     bindPanelControls(panel);
     /*
      * 接管别人留下的面板时，旧内容已经换成新内容但还没渲染过，面板又是开着的：
@@ -2706,6 +2729,24 @@ const VERSION = "1.17.9";
         }
       }
     });
+  }
+
+  /*
+   * 页面上真正活着的那个面板节点，才是唯一该画的。热重载期间别的副本可能已经
+   * 换过一次内容甚至换过节点，这里的 state.ui 如果还指着老的，按钮和数字就全
+   * 停在原地 —— 表现就是「按键全失效」。每次渲染前对一下，对不上就重挂引用。
+   */
+  function livePanelNode() {
+    const live = document.getElementById(PANEL_ID);
+    if (!live) return null;
+    if (
+      !state.ui ||
+      state.ui.panel !== live ||
+      live.__deepseekUsageBindTag !== instance.bindTag
+    ) {
+      ensurePanel();
+    }
+    return document.getElementById(PANEL_ID);
   }
 
   const PANEL_MARGIN = 8;
@@ -2776,7 +2817,7 @@ const VERSION = "1.17.9";
     run();
     window.setTimeout(run, 0);
     window.setTimeout(run, 120);
-    window.requestAnimationFrame(() => window.requestAnimationFrame(run));
+    scheduleFrame(() => scheduleFrame(run));
   }
 
   function restorePanelPosition(panel) {
@@ -2790,8 +2831,8 @@ const VERSION = "1.17.9";
   }
 
   function setupPanelDrag(panel) {
-    if (panel.__deepseekDragBound === VERSION) return;
-    panel.__deepseekDragBound = VERSION;
+    if (panel.__deepseekDragTag === instance.bindTag) return;
+    panel.__deepseekDragTag = instance.bindTag;
 
     /*
      * Interactive controls stay clickable, but their pointer events must not
@@ -2873,7 +2914,7 @@ const VERSION = "1.17.9";
         if (!current) return;
         current.pending = { x: moveEvent.clientX, y: moveEvent.clientY };
         if (current.frame) return;
-        current.frame = window.requestAnimationFrame(() => {
+      current.frame = scheduleFrame(() => {
           if (state.dragState) state.dragState.frame = 0;
           applyMove();
         });
@@ -2882,7 +2923,7 @@ const VERSION = "1.17.9";
       const finish = () => {
         const current = state.dragState;
         if (!current) return;
-        if (current.frame) window.cancelAnimationFrame(current.frame);
+      if (current.frame) cancelFrame(current.frame);
         applyMove();
         state.dragState = null;
         panel.style.left = `${Math.round(current.left)}px`;
@@ -2927,8 +2968,8 @@ const VERSION = "1.17.9";
   }
 
   function setupPanelResize(panel) {
-    if (panel.__deepseekResizeBound === VERSION) return;
-    panel.__deepseekResizeBound = VERSION;
+    if (panel.__deepseekResizeTag === instance.bindTag) return;
+    panel.__deepseekResizeTag = instance.bindTag;
     for (const direction of ["n", "s", "e", "w", "ne", "nw", "sw"]) {
       if (panel.querySelector(`[data-resize-direction="${direction}"]`)) {
         continue;
@@ -3042,7 +3083,7 @@ const VERSION = "1.17.9";
         if (!current) return;
         current.pending = { x: moveEvent.clientX, y: moveEvent.clientY };
         if (current.frame) return;
-        current.frame = window.requestAnimationFrame(() => {
+      current.frame = scheduleFrame(() => {
           if (state.resizeState) state.resizeState.frame = 0;
           applyResize();
         });
@@ -3051,7 +3092,7 @@ const VERSION = "1.17.9";
       const finish = () => {
         const current = state.resizeState;
         if (!current) return;
-        if (current.frame) window.cancelAnimationFrame(current.frame);
+      if (current.frame) cancelFrame(current.frame);
         applyResize();
         state.resizeState = null;
         panel.classList.remove("dsu-resizing");
@@ -3248,10 +3289,13 @@ const VERSION = "1.17.9";
     scheduleSave();
     render();
     if (announce) {
+      const scope = state.settings.balanceKeyRemember
+        ? `已记在本机（${maskKeyTail(key)}）`
+        : `只在本次运行有效（${maskKeyTail(key)}）`;
       setBalanceStatus(
-        state.settings.balanceKeyRemember
-          ? `Key 已记住（${maskKeyTail(key)}），正在查询余额…`
-          : `Key 只在本次运行有效（${maskKeyTail(key)}），正在查询余额…`,
+        BRIDGE_BALANCE_QUERY_ENABLED
+          ? `Key ${scope}，正在查询余额…`
+          : `Key ${scope}；自动查询等 Codex++ 放开 GET 后就会用它`,
         "ok"
       );
     }
@@ -3552,13 +3596,16 @@ const VERSION = "1.17.9";
       return;
     }
     if (state.renderTimer) return;
-    state.renderTimer = window.requestAnimationFrame(() => {
+    state.renderTimer = scheduleFrame(() => {
       state.renderTimer = 0;
       if (!ownsPanel()) {
         retirePanel();
         return;
       }
-      if (!state.ui?.panel || state.ui.panel.hidden) return;
+      const live = livePanelNode();
+      if (!live || !state.ui?.panel || state.ui.panel.hidden || live.hidden) {
+        return;
+      }
       const records = visibleRecords();
       const { totals, models } = aggregateRecords(records);
       const input = totals.input || 0;
@@ -3693,9 +3740,12 @@ const VERSION = "1.17.9";
       if (state.ui.balanceKeyState) {
         const info = balanceKeyInfo();
         const bridge = balanceBridgeReady() ? "" : " · 网络桥不可用";
+        const pending = BRIDGE_BALANCE_QUERY_ENABLED
+          ? ""
+          : " · 自动查询暂缓（等 Codex++ 放开 GET）";
         state.ui.balanceKeyState.textContent = info.key
-          ? `当前 Key：${info.label} · ${maskKeyTail(info.key)}${bridge}`
-          : `当前 Key：未填${bridge}`;
+          ? `当前 Key：${info.label} · ${maskKeyTail(info.key)}${bridge}${pending}`
+          : `当前 Key：未填${bridge}${pending}`;
       }
       if (state.ui.balanceEnabledBox) {
         state.ui.balanceEnabledBox.checked = balanceEnabled();
@@ -3913,7 +3963,7 @@ const VERSION = "1.17.9";
       return;
     }
     if (state.ensureTimer) return;
-    state.ensureTimer = window.requestAnimationFrame(() => {
+    state.ensureTimer = scheduleFrame(() => {
       state.ensureTimer = 0;
       if (!ownsPanel()) {
         retirePanel();

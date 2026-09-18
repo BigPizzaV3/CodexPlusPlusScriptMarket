@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-08-31T13:52:10Z",
+  "updated_at": "2026-09-18T04:00:24Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -284,6 +284,40 @@
       "homepage": "https://github.com/cocoxia123/CodexPluginTranslator",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-plugin-translator.js",
       "sha256": "7baf09e43e1e0d7a2db7790b9a9bee9c186a3796869baa73eee04aaa9fbfb4b4"
+    },
+    {
+      "id": "deepseek-token-usage",
+      "name": "DeepSeek Token Usage",
+      "description": "按 DeepSeek 官方费率逐条请求统计 token 用量与费用；按天/按月图表、峰谷时段计价、缓存命中拆分；面板可拖动缩放、可收成 mini 条；可选显示账户余额与每日余额消耗，余额只认查到的数字，全部由可选的本机助手提供（面板不收集 Key，也没有手动填余额的入口）。只观察不改写，响应正文按 provider/model 归属读取：DeepSeek 域名的请求，或 OpenAI 兼容 completions 路径且本次请求点名了 deepseek 模型的请求。",
+      "version": "1.19.8",
+      "author": "Saydness",
+      "tags": [
+        "codex",
+        "deepseek",
+        "tokens",
+        "cost",
+        "usage",
+        "chart",
+        "ui"
+      ],
+      "homepage": "https://github.com/Saydness/codexpp-deepseek-token-usage",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/deepseek-token-usage.js",
+      "sha256": "a178c5e898f25f97cf06b92a22d2e7a58d1b42a334df338d72a879409cf59820",
+      "requirements": [
+        "Codex++ 用户脚本环境",
+        "Codex 会话中使用 DeepSeek 模型",
+        "（可选）账户余额：完全交给本机助手（面板上没有手填入口，也不收集 Key）——装一次助手，它在本机用 Codex 已有的那把 Key 每 5 分钟自动更新一次，点「刷新余额」立刻补一次",
+        "（可选）余额自动更新：面板「设置 → 本机助手」里点「一键安装（交给 Codex）」，安装请求会直接写进 Codex 对话框、由它在这台电脑上执行，不用复制粘贴；也可以点「复制安装命令」自己粘。支持 Codex++ 现有的三种安装包（Windows x64、macOS Intel、macOS Apple 芯片），命令按当前系统给、也能手动切换。缺 Node.js 时脚本先检测、再自动补上（Windows 优先 winget、macOS 优先 Homebrew，都不需要管理员权限）"
+      ],
+      "limitations": [
+        "只在 Codex 页面内运行时采集，其他客户端的 DeepSeek 调用不计入",
+        "费用按内置官方费率表估算，与账号实际账单可能有小额差异",
+        "历史数据保存在本机 localStorage，清理站点数据后会丢失",
+        "账户余额只认查到的数字（接口返回 / 历史导入 / 手动记录），不会用本机 token 用量推算，因为同一账户可能多台机器共用",
+        "Codex 页面不能直接联网，所以面板页内那条直连查询通道暂停中（Codex++ 的网络桥只放行 POST，而 DeepSeek 余额接口只认 GET，代码保留、桥放开 GET 就会恢复）。余额全部由可选的本机助手提供：面板「设置 → 本机助手」点「一键安装（交给 Codex）」装一次，Codex 运行时每 5 分钟自动更新一次、点「刷新余额」立刻补一次；Key 由助手在本机自己找（本机代理 / 环境变量 / config.toml 的 env_key / ~/.codex/auth.json / 本机加密保存），面板不接触 Key，也不提供手动填余额",
+        "响应正文按 provider/model 归属读取：主机名含 deepseek 的地址，或路径为 /chat/completions、/completions、/beta/chat/completions 且本次请求体里出现 deepseek 模型的地址才读；它一律不读：回环地址上的其它接口、/responses、页面自身接口、以及请求里没点名 deepseek 的流量",
+        "WebSocket 只解析「消息里出现过 deepseek 模型名」的连接（首帧认出归属后，该连接的后续帧继续解析，避免漏掉流式末尾的 usage），其余连接一帧都不读"
+      ]
     }
   ]
 }

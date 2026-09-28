@@ -357,6 +357,10 @@
     'Choose project': '选择项目',
     'Composer utility bar': '输入工具栏',
     'Dictate': '语音输入',
+    'What should we build?': '想做点什么？',
+    'Choose a project': '选择项目',
+    'New conversation': '新建对话',
+    'Get started': '开始使用',
   });
 
   // ---------------------------------------------------------------------------
@@ -368,6 +372,8 @@
     [/^Worked for (.+)$/, '已工作 $1'],
     [/^(\d+) files? changed$/, '$1 个文件已更改'],
     [/^Edited files\s*ran commands$/i, '已编辑文件并执行命令'],
+    [/^([\d.,]+[KkMm]?)\s+tokens?\s+used$/i, '已用 $1 令牌'],
+    [/^([\d.,]+[KkMm]?)\s+tokens?$/, '$1 令牌'],
   ];
 
   // 字典与正则定义完成后再启动，避免 const 暂时性死区

@@ -97,7 +97,7 @@ function tokenCountRow(timestamp, total, last, model = "") {
 const runtime = createRuntime();
 const api = runtime.api;
 const test = api.__test;
-assert.equal(api.version, "1.4.18");
+assert.equal(api.version, "1.4.19");
 
 const today = new Date();
 today.setHours(10, 0, 0, 0);
@@ -361,6 +361,15 @@ assert.match(source, /const FLOATING_DEFAULT_RIGHT = WINDOW_BUTTON_SAFE_RIGHT;/)
 assert.doesNotMatch(source, /document\.querySelector\(["']header["']\)/);
 
 assert.match(source, /html\.electron-dark #\$\{PANEL_ID\}/);
+assert.match(source, /html\[data-theme="dark"\] #\$\{ROOT_ID\}/);
+assert.match(
+  source,
+  /@media \(prefers-color-scheme: dark\)[\s\S]*?html:not\(\[data-theme="light"\]\) #\$\{ROOT_ID\},[\s\S]*?html:not\(\[data-theme="light"\]\) #\$\{PANEL_ID\}[\s\S]*?--color-token-foreground: #f2f2f2;/
+);
+assert.match(
+  source,
+  /html\[data-theme="dark"\] #\$\{ROOT_ID\},[\s\S]*?html\[data-theme="dark"\] #\$\{PANEL_ID\}[\s\S]*?--color-token-foreground-secondary: #a9a9ad;/
+);
 assert.match(source, /overflow-y: auto/);
 assert.match(source, /scheduleDomToolScan/);
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.18
+// @version      1.4.19
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时回填本机历史 session，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.18";
+  const VERSION = "1.4.19";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -4335,47 +4335,90 @@
         45% { transform: scale(1.035); }
       }
       @media (prefers-color-scheme: dark) {
-        #${PANEL_ID} {
+        html:not([data-theme="light"]) #${ROOT_ID},
+        html:not([data-theme="light"]) #${PANEL_ID} {
+          --color-token-border: rgba(255, 255, 255, 0.16);
+          --color-token-border-strong: rgba(255, 255, 255, 0.28);
+          --color-token-foreground: #f2f2f2;
+          --color-token-foreground-secondary: #a9a9ad;
+          --color-token-background: var(--color-background-panel, var(--color-background, #202124));
+          --color-token-background-secondary: rgba(255, 255, 255, 0.055);
+          --color-token-background-tertiary: rgba(255, 255, 255, 0.11);
+          color-scheme: dark;
+        }
+        html:not([data-theme="light"]) #${PANEL_ID} {
           background: var(--color-token-background, #202020);
           color: var(--color-token-foreground, #f2f2f2);
         }
-        #${PANEL_ID} .codex-daily-heading,
-        #${PANEL_ID} .codex-daily-foot {
+        html:not([data-theme="light"]) #${PANEL_ID} .codex-daily-heading,
+        html:not([data-theme="light"]) #${PANEL_ID} .codex-daily-foot {
           background: var(--color-token-background, #202020);
         }
-        #${PANEL_ID} .codex-daily-price-model-input,
-        #${PANEL_ID} .codex-daily-price-input {
+        html:not([data-theme="light"]) #${PANEL_ID} .codex-daily-price-model-input,
+        html:not([data-theme="light"]) #${PANEL_ID} .codex-daily-price-input {
           color: #f2f2f2;
           caret-color: #f2f2f2;
           border-color: rgba(255, 255, 255, 0.18);
           background: rgba(255, 255, 255, 0.1);
         }
-        #${PANEL_ID} .codex-daily-price-model-input::placeholder,
-        #${PANEL_ID} .codex-daily-price-input::placeholder {
+        html:not([data-theme="light"]) #${PANEL_ID} .codex-daily-price-model-input::placeholder,
+        html:not([data-theme="light"]) #${PANEL_ID} .codex-daily-price-input::placeholder {
           color: rgba(242, 242, 242, 0.48);
           opacity: 1;
         }
+        html:not([data-theme="light"]) #${PANEL_ID} .codex-daily-trend-tooltip {
+          --codex-daily-trend-tooltip-bg: rgba(35, 35, 38, 0.98);
+          --codex-daily-trend-tooltip-border: rgba(255, 255, 255, 0.16);
+          --codex-daily-trend-tooltip-fg: #f2f2f2;
+          --codex-daily-trend-tooltip-muted: #a9a9ad;
+        }
       }
-      html.electron-dark #${PANEL_ID} {
+      html.electron-dark #${ROOT_ID},
+      html.electron-dark #${PANEL_ID},
+      html[data-theme="dark"] #${ROOT_ID},
+      html[data-theme="dark"] #${PANEL_ID} {
+        --color-token-border: rgba(255, 255, 255, 0.16);
+        --color-token-border-strong: rgba(255, 255, 255, 0.28);
+        --color-token-foreground: #f2f2f2;
+        --color-token-foreground-secondary: #a9a9ad;
+        --color-token-background: var(--color-background-panel, var(--color-background, #202124));
+        --color-token-background-secondary: rgba(255, 255, 255, 0.055);
+        --color-token-background-tertiary: rgba(255, 255, 255, 0.11);
         color-scheme: dark;
-        background: #202124;
-        color: #f2f2f2;
+      }
+      html.electron-dark #${PANEL_ID},
+      html[data-theme="dark"] #${PANEL_ID} {
+        background: var(--color-token-background, #202124);
+        color: var(--color-token-foreground, #f2f2f2);
       }
       html.electron-dark #${PANEL_ID} .codex-daily-heading,
-      html.electron-dark #${PANEL_ID} .codex-daily-foot {
-        background: #202124;
+      html.electron-dark #${PANEL_ID} .codex-daily-foot,
+      html[data-theme="dark"] #${PANEL_ID} .codex-daily-heading,
+      html[data-theme="dark"] #${PANEL_ID} .codex-daily-foot {
+        background: var(--color-token-background, #202124);
       }
       html.electron-dark #${PANEL_ID} .codex-daily-price-model-input,
-      html.electron-dark #${PANEL_ID} .codex-daily-price-input {
+      html.electron-dark #${PANEL_ID} .codex-daily-price-input,
+      html[data-theme="dark"] #${PANEL_ID} .codex-daily-price-model-input,
+      html[data-theme="dark"] #${PANEL_ID} .codex-daily-price-input {
         color: #f2f2f2;
         caret-color: #f2f2f2;
         border-color: rgba(255, 255, 255, 0.18);
         background: rgba(255, 255, 255, 0.1);
       }
       html.electron-dark #${PANEL_ID} .codex-daily-price-model-input::placeholder,
-      html.electron-dark #${PANEL_ID} .codex-daily-price-input::placeholder {
+      html.electron-dark #${PANEL_ID} .codex-daily-price-input::placeholder,
+      html[data-theme="dark"] #${PANEL_ID} .codex-daily-price-model-input::placeholder,
+      html[data-theme="dark"] #${PANEL_ID} .codex-daily-price-input::placeholder {
         color: rgba(242, 242, 242, 0.48);
         opacity: 1;
+      }
+      html.electron-dark #${PANEL_ID} .codex-daily-trend-tooltip,
+      html[data-theme="dark"] #${PANEL_ID} .codex-daily-trend-tooltip {
+        --codex-daily-trend-tooltip-bg: rgba(35, 35, 38, 0.98);
+        --codex-daily-trend-tooltip-border: rgba(255, 255, 255, 0.16);
+        --codex-daily-trend-tooltip-fg: #f2f2f2;
+        --codex-daily-trend-tooltip-muted: #a9a9ad;
       }
     `;
     (document.head || document.documentElement).appendChild(style);

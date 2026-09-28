@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-09-28T03:31:55Z",
+  "updated_at": "2026-09-28T03:35:16Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -177,7 +177,7 @@
       ],
       "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-zh-cn-ui.js",
-      "sha256": "16f40a829d7af7e40390ee2fd34a0d11808ba3a5c33377dd725779f3a1a5ff4d"
+      "sha256": "2488fbd24f414a75d55fe9242df664a7f3703f4412f81274c99ea3638ae4fef1"
     },
     {
       "id": "tux-toolbar-buddy",

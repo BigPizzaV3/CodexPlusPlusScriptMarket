@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-09-23T02:43:09Z",
+  "updated_at": "2026-09-28T03:28:46Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -161,6 +161,23 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/hL091015/CodexPlusPlusScriptMarket/main/scripts/zh_CN%E6%B1%89%E5%8C%96.user.js",
       "sha256": "72214D31D425D1CE936B457AA43FCC40DF55F4DE3B9B140F9510C7F392CDC845"
+    },
+    {
+      "id": "codex-zh-cn-ui",
+      "name": "Codex 简体中文界面汉化",
+      "description": "把 Codex 桌面版界面上的英文文案替换为简体中文，覆盖顶部菜单、左侧导航、按钮、工具提示与状态提示。纯渲染层替换，不改动 Codex 任何安装文件，因此不会被 Codex 更新覆盖。",
+      "version": "1.0.0",
+      "author": "aliuzq",
+      "tags": [
+        "codex",
+        "chinese",
+        "i18n",
+        "ui",
+        "translate"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-zh-cn-ui.js",
+      "sha256": "86774f016df6765184a460ef09fbd7a46f6ff457689eefca5cb9452fdcd92936"
     },
     {
       "id": "tux-toolbar-buddy",

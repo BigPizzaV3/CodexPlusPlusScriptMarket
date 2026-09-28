@@ -361,6 +361,20 @@
     'Choose a project': '选择项目',
     'New conversation': '新建对话',
     'Get started': '开始使用',
+
+    // ---- 对话框与表单 ----
+    'Create project': '创建项目',
+    'New Project': '新建项目',
+    'Close dialog': '关闭对话框',
+    'Source folders': '源文件夹',
+    'Add folder': '添加文件夹',
+    'Choose folder': '选择文件夹',
+    'Select folder': '选择文件夹',
+    'Name': '名称',
+    'this computer': '本机',
+    'This computer': '本机',
+    'Browse': '浏览',
+    'Create': '创建',
   });
 
   // ---------------------------------------------------------------------------

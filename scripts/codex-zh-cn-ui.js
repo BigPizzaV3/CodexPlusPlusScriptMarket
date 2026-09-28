@@ -3,7 +3,7 @@
 // @namespace    codex-plus-plus
 // @version      1.0.0
 // @description  把 Codex 桌面版界面上的英文文案替换为简体中文（顶部菜单、左侧导航、按钮、工具提示、状态提示）。纯渲染层 DOM 替换，不改动 Codex 任何安装文件，因此不会被 Codex 更新覆盖。
-// @author       aliuz
+// @author       aliuzq
 // @match        app://-/*
 // @run-at       document-start
 // ==/UserScript==
@@ -45,6 +45,17 @@
   const MAX_TEXT_LEN = 60;
 
   // ---------------------------------------------------------------------------
+  // 还原记录：卸载或禁用时把界面恢复成英文原样，不留残留
+  // ---------------------------------------------------------------------------
+  const UNDO_LIMIT = 5000;
+  const undoLog = [];
+
+  function pushUndo(record) {
+    if (undoLog.length >= UNDO_LIMIT) undoLog.shift();
+    undoLog.push(record);
+  }
+
+  // ---------------------------------------------------------------------------
   // 翻译核心
   // ---------------------------------------------------------------------------
   function translate(raw) {
@@ -82,6 +93,7 @@
 
     const next = translate(node.nodeValue);
     if (next !== null && next !== node.nodeValue) {
+      pushUndo({ node, prev: node.nodeValue });
       node.nodeValue = next;
     }
   }
@@ -97,6 +109,7 @@
       if (!value) continue;
       const next = translate(value);
       if (next !== null && next !== value) {
+        pushUndo({ node: el, attr: name, prev: value });
         el.setAttribute(name, next);
       }
     }
@@ -359,4 +372,35 @@
 
   // 字典与正则定义完成后再启动，避免 const 暂时性死区
   start();
+
+  // ---------------------------------------------------------------------------
+  // 卸载支持：Codex++ 热重载或关闭本脚本时会回调这里
+  // 注册后重载可原地生效（不刷新页面），并且已翻译的文案会被还原成英文。
+  // ---------------------------------------------------------------------------
+  try {
+    const api = window.__codexPlusUserScripts;
+    if (api && typeof api.registerCleanup === 'function') {
+      api.registerCleanup(() => {
+        if (observer) observer.disconnect();
+        observer = null;
+        queue.clear();
+        scheduled = false;
+
+        // 逆序还原：同一节点被多次改写时，先还原最后一次
+        for (let i = undoLog.length - 1; i >= 0; i -= 1) {
+          const record = undoLog[i];
+          try {
+            if (!record.node || !record.node.isConnected) continue;
+            if (record.attr) record.node.setAttribute(record.attr, record.prev);
+            else record.node.nodeValue = record.prev;
+          } catch (err) { /* 节点已失效，跳过 */ }
+        }
+        undoLog.length = 0;
+
+        // 清掉守卫标记，允许脚本被重新加载
+        try { delete window[STATE_KEY]; } catch (err) { window[STATE_KEY] = undefined; }
+        try { delete window.__codexZhCnUiVersion; } catch (err) { /* 忽略 */ }
+      });
+    }
+  } catch (err) { /* 宿主未提供清理接口时忽略，Codex++ 会回退为刷新页面 */ }
 })();

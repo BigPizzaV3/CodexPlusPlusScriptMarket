@@ -147,22 +147,6 @@
       "sha256": "756ee2e2a91df449738192ae500de1ab75cbbc7129968982ca37f6f5a9aad78e"
     },
     {
-      "id": "codex-zhcn-translate",
-      "name": "Codex简体中文汉化",
-      "description": "全界面简体汉化补丁",
-      "version": "1.0",
-      "author": "hL091015",
-      "tags": [
-        "translation",
-        "chinese",
-        "zh-CN",
-        "ui"
-      ],
-      "homepage": "",
-      "script_url": "https://raw.githubusercontent.com/hL091015/CodexPlusPlusScriptMarket/main/scripts/zh_CN%E6%B1%89%E5%8C%96.user.js",
-      "sha256": "72214D31D425D1CE936B457AA43FCC40DF55F4DE3B9B140F9510C7F392CDC845"
-    },
-    {
       "id": "tux-toolbar-buddy",
       "name": "Tux Toolbar Buddy",
       "description": "把菜单入口轻量化为Tux工具栏按钮，隐藏状态点和版本信息。",

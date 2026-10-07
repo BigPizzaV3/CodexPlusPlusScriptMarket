@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Usage & Resets
 // @namespace    codex-plus-plus
-// @version      1.1.1
+// @version      1.1.2
 // @description  顶栏仅显示 5 小时剩余用量及重置时间，点击展开用量与重置卡片菜单。
 // @match        app://-/*
 // @run-at       document-start
@@ -11,7 +11,7 @@
   "use strict";
   const KEY = "__codexUsageReset";
   const ID = "codex-usage-reset";
-  const VERSION = "1.1.1";
+  const VERSION = "1.1.2";
   const USAGE = "/wham/usage";
   const CREDITS = "/wham/rate-limit-reset-credits";
 
@@ -72,6 +72,7 @@
   let usage = null, credits = null, usageAt = 0, creditsAt = 0;
   let usageError = "", creditsError = "", feedback = "", loading = false, resetting = false;
   let services = null, refreshPromise = null, transportAttempt = null;
+  let confirmingCreditId = null;
   const pending = new Set();
 
   function text(el, value) { if (el.textContent !== value) el.textContent = value; }
@@ -190,6 +191,7 @@
 
   async function consume(credit) {
     if (resetting || disposed) return;
+    confirmingCreditId = null;
     resetting = true; feedback = "正在核对可用重置…"; render();
     try {
       // A retry is the exact same logical attempt, even if the first request already consumed the last credit.
@@ -314,7 +316,7 @@
     render(); void refresh();
   }
   function toggle() { if (panel.hidden) { panel.hidden = false; render(); void refresh(); } else close(); }
-  function close() { if (!resetting) { panel.hidden = true; list.dataset.signature = ""; fiveButton.focus(); } }
+  function close() { if (!resetting) { panel.hidden = true; confirmingCreditId = null; list.dataset.signature = ""; fiveButton.focus(); } }
   function outside(event) { if (!panel.hidden && !root.contains(event.target) && !panel.contains(event.target)) close(); }
   function keydown(event) { if (event.key === "Escape" && !panel.hidden) close(); }
   function focusRefresh() { if (!document.hidden && !resetting && !fresh(usageAt)) void refresh(); }
@@ -331,6 +333,8 @@
     labelWindow(fiveButton, "5小时", usage?.five, usageAt, usageError, false);
     const usable = credits?.available.filter((c) => c.expiresAt == null || c.expiresAt > Date.now()) || [];
     const count = credits ? Math.max(0, credits.count - (credits.available.length - usable.length)) : null;
+    if (confirmingCreditId != null && (count === 0 ||
+      confirmingCreditId !== "automatic" && !usable.some((c) => c.id === confirmingCreditId))) confirmingCreditId = null;
     const first = usable[0];
     fiveButton.setAttribute("aria-expanded", String(!panel.hidden));
     refreshButton.disabled = loading || resetting;
@@ -341,7 +345,7 @@
       text(status, [feedback, usageError && `用量：${usageError}`, creditsError && `重置：${creditsError}`,
         loading ? "正在刷新…" : usageAt ? `更新于 ${formatTime(usageAt)}（本机时区）` : "等待用量数据"].filter(Boolean).join("\n"));
       // Preserve confirmation and keyboard focus across timer/layout refreshes.
-      const signature = JSON.stringify([usable, count, resetting, !!transportAttempt, fresh(creditsAt), creditsError]);
+      const signature = JSON.stringify([usable, count, resetting, !!transportAttempt, confirmingCreditId, fresh(creditsAt), creditsError]);
       if (list.dataset.signature !== signature) {
         list.dataset.signature = signature; list.replaceChildren();
         if (transportAttempt) {
@@ -352,11 +356,17 @@
           for (const credit of rows) {
             const row = element("div", "credit"); const info = element("div", "credit-info");
             info.append(element("div", "", credit.title), element("div", "expires", `到期：${fullTime(credit.expiresAt)}`));
-            let confirming = false;
-            const use = button("使用重置", () => {
-              if (!confirming) { confirming = true; text(use, "确认使用1次"); use.title = "再次点击使用这一重置"; return; }
+            const creditKey = credit.id ?? "automatic";
+            const use = button(confirmingCreditId === creditKey ? "确认使用1次" : "使用重置", () => {
+              if (confirmingCreditId !== creditKey) {
+                confirmingCreditId = creditKey; render();
+                const selected = Array.from(list.querySelectorAll("button[data-credit-key]")).find((b) => b.dataset.creditKey === creditKey);
+                selected?.focus(); return;
+              }
               void consume(credit);
             });
+            use.dataset.creditKey = creditKey;
+            if (confirmingCreditId === creditKey) use.title = "再次点击使用这一重置";
             use.className = "use"; use.disabled = resetting || !fresh(creditsAt) || !!creditsError;
             row.append(info, use); list.append(row);
           }

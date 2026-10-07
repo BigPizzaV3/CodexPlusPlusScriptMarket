@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-05T06:58:01Z",
+  "updated_at": "2026-10-07T16:13:31.045Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -309,7 +309,7 @@
       "id": "codex-usage-reset",
       "name": "Codex Usage & Resets",
       "description": "顶栏显示 5 小时剩余用量及重置时间，点击展开 5 小时、1 周用量和可用重置卡片，支持确认后使用重置。",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "author": "small32",
       "tags": [
         "codex",
@@ -317,9 +317,9 @@
         "reset",
         "ui"
       ],
-      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket/pull/96",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-usage-reset.js",
-      "sha256": "5eb9d36490aa3f912959af590c882d562389f78e6fb3d44d66fbb3cb35ee9168",
+      "sha256": "475af2b3456271c2ba3c84986c015164dba7c2b174d7d035f9aff9e459174d22",
       "requirements": [
         "Codex++ 用户脚本环境",
         "已登录支持用量查询的官方账号"

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-09-23T02:43:09Z",
+  "updated_at": "2026-10-07T16:13:31.045Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -303,6 +303,31 @@
         "WebSocket 只解析「消息里出现过 deepseek 模型名」的连接（首帧认出归属后，该连接的后续帧继续解析，避免漏掉流式末尾的 usage），其余连接一帧都不读",
         "每日余额消耗 = 当天自己的快照逐笔累加，跨零点那一小段按小时比例分给相邻两天；相邻快照隔得久（> 3 小时，例如助手没在跑）时这一段只是按时间比例估算、表里标 ≈，助手读到余额日志后会用真实快照替换",
         "本机助手会把每次读到的余额写进助手目录的 balance.log，并回读它 + 桌面 balance\\balance.log 回填面板；如果助手是被 Codex 沙箱拉起来的（沙箱里写不了文件），面板状态行会明确提示，在普通终端重跑一次安装命令即可恢复"
+      ]
+    },
+    {
+      "id": "codex-usage-reset",
+      "name": "Codex Usage & Resets",
+      "description": "顶栏显示 5 小时剩余用量及重置时间，点击展开 5 小时、1 周用量和可用重置卡片，支持确认后使用重置。",
+      "version": "1.1.2",
+      "author": "small32",
+      "tags": [
+        "codex",
+        "usage",
+        "reset",
+        "ui"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket/pull/96",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-usage-reset.js",
+      "sha256": "475af2b3456271c2ba3c84986c015164dba7c2b174d7d035f9aff9e459174d22",
+      "requirements": [
+        "Codex++ 用户脚本环境",
+        "已登录支持用量查询的官方账号"
+      ],
+      "limitations": [
+        "依赖 Codex 内部用量接口和请求通道，应用更新可能影响兼容性",
+        "使用重置会消耗账号可用重置次数，需要二次点击确认",
+        "时间使用本机时区，查询每分钟刷新"
       ]
     }
   ]

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeepSeek Token Usage
 // @namespace    codex-plus-plus
-// @version      1.19.11
+// @version      1.19.17
 // @description  DeepSeek API Token 用量与费用统计面板，按官方费率计算，只在 Codex 运行时工作。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,14 +10,27 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.19.11";
+  const VERSION = "1.19.17";
   const PANEL_API = "__deepseekUsagePanel";
   const STORAGE_KEY = "__deepseekUsagePanelV1";
-  const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
+const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
   const PANEL_ID = "deepseek-usage-panel";
   const STYLE_ID = "deepseek-usage-panel-style";
   const SIDEBAR_NAV_ID = "codex-plus-sidebar-nav";
   const HEADER_TOOLBAR_SELECTOR = ".ms-auto.flex.shrink-0.items-center";
+  /*
+   * 入口按钮的家，按顺序找：先聊天页标题栏（26.915 起），找不到就用侧边栏自己的
+   * 导航头（26.928 起侧边栏重写过，Codex-Plus 那个 nav id 没了），再不行退回
+   * 侧边栏列表。三条都不在时才不画按钮。
+   */
+  const SIDEBAR_HEADER_SELECTOR = '[class*="navigation-header"]';
+  const LAUNCHER_FLOAT_ID = "deepseek-usage-launcher-float";
+  /* 锚点全都找不到时，入口按钮退到右下角的小浮窗里，样式自带、不依赖应用。 */
+  const LAUNCHER_FLOAT_STYLE =
+    "display:flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;" +
+    "border:1px solid #2b3648;background:#131a24;color:#cbd5e1;" +
+    "font:11px/1.4 'Segoe UI',system-ui,sans-serif;cursor:pointer;" +
+    "box-shadow:0 4px 14px rgba(0,0,0,.35);";
   const DEFAULT_MODEL = "deepseek-flash";
   const RETENTION_DAYS = 400;
   const MAX_RECORDS = 50000;
@@ -1655,7 +1668,19 @@
       currency: state.settings.balanceCurrency || "CNY",
       lastValue: latest ? Number(latest.v) : null,
       lastDay: latest ? latest.d : "",
-      visible: Boolean(state.ui?.panel && !state.ui.panel.hidden),
+      /*
+       * 助手靠这个字段决定用快节奏还是慢节奏：面板没打开、或者窗口被切到后台
+       * （document.hidden）都算「没在看」，这时没必要每 15 秒让它来注入一次。
+       */
+      visible: Boolean(
+        state.ui?.panel &&
+          !state.ui.panel.hidden &&
+          !state.settings.panelMinimized &&
+          !document.hidden
+      ),
+      panelOpen: Boolean(state.ui?.panel && !state.ui.panel.hidden),
+      panelMinimized: Boolean(state.settings.panelMinimized),
+      documentHidden: Boolean(document.hidden),
       enabled: balanceEnabled(),
       source: balanceSourceChoice(),
       sourceUsed: state.settings.balanceSourceUsed || "",
@@ -2758,6 +2783,16 @@
       outline: 2px solid rgba(56, 189, 248, 0.5);
       outline-offset: 1px;
     }
+    /* 入口按钮的浮窗兜底：锚点（标题栏/侧边栏）都不在时挂在这里。 */
+    .dsu-launcher-float {
+      position: fixed;
+      right: 14px;
+      bottom: 14px;
+      z-index: 2147482000;
+      display: flex;
+      align-items: center;
+      pointer-events: auto;
+    }
       .dsu-balance-help { border-top: 1px dashed #232c38; padding-top: 10px; }
       .dsu-balance-help summary { color: #64748b; font-size: 11px; cursor: pointer; }
       .dsu-balance-help summary:hover { color: #94a3b8; }
@@ -2865,9 +2900,25 @@
   }
 
   function ensureLauncher() {
+    function ensureLauncherFloat() {
+      let host = document.getElementById(LAUNCHER_FLOAT_ID);
+      if (!host) {
+        host = document.createElement("div");
+        host.id = LAUNCHER_FLOAT_ID;
+        host.className = "dsu-launcher-float";
+        (document.body || document.documentElement).appendChild(host);
+      }
+      return host;
+    }
     const headerToolbar = document.querySelector(HEADER_TOOLBAR_SELECTOR);
+    const sidebarHeader = document.querySelector(SIDEBAR_HEADER_SELECTOR);
     const nav = document.getElementById(SIDEBAR_NAV_ID);
-    const desiredParent = headerToolbar || nav;
+    /*
+     * 三个锚点全没有时（侧边栏收起、窗口很窄、应用又改了界面）退到右下角浮窗：
+     * 入口按钮必须永远点得到，不然面板就等于"消失"了。
+     */
+    const floating = !headerToolbar && !sidebarHeader && !nav;
+    const desiredParent = headerToolbar || sidebarHeader || nav || ensureLauncherFloat();
     if (!desiredParent) return false;
     let button = document.getElementById(SIDEBAR_BUTTON_ID);
     if (!button) {
@@ -2882,19 +2933,35 @@
       });
     }
 
-    const compact = Boolean(headerToolbar);
+    const compact = Boolean(headerToolbar || sidebarHeader || floating);
     const parentChanged = button.parentElement !== desiredParent;
-    const shapeChanged = button.dataset.dsuCompact !== String(compact);
+    const shapeChanged =
+      button.dataset.dsuCompact !== String(compact) ||
+      button.dataset.dsuFloating !== String(floating);
     if (parentChanged || shapeChanged) {
       button.dataset.dsuCompact = String(compact);
+      button.dataset.dsuFloating = String(floating);
+      /* 搬回顶栏/侧边栏后，把右下角那个兜底浮窗收掉，别留一个多余的胶囊。 */
+      if (!floating) {
+        const stale = document.getElementById(LAUNCHER_FLOAT_ID);
+        if (stale) stale.remove();
+      }
       if (compact) {
-        button.className =
-          "no-drag cursor-interaction flex h-7 items-center " +
-          "justify-center gap-1 rounded-md px-1.5 text-xs";
-        button.style.cssText =
-          "border:0;background:transparent;color:inherit;cursor:pointer;";
-        button.innerHTML = launcherMarkup(true);
-        headerToolbar.insertBefore(button, headerToolbar.firstChild);
+        if (floating) {
+          button.className = "";
+          button.style.cssText = LAUNCHER_FLOAT_STYLE;
+          button.innerHTML =
+            '<span style="opacity:.75">今日</span>' +
+            '<span class="dsu-sidebar-badge" data-field="sidebarBadge">—</span>';
+        } else {
+          button.className =
+            "no-drag cursor-interaction flex h-7 items-center " +
+            "justify-center gap-1 rounded-md px-1.5 text-xs";
+          button.style.cssText =
+            "border:0;background:transparent;color:inherit;cursor:pointer;";
+          button.innerHTML = launcherMarkup(true);
+        }
+        desiredParent.insertBefore(button, desiredParent.firstChild);
       } else {
         button.removeAttribute("style");
         button.className =
@@ -3535,6 +3602,8 @@
     scheduleSave();
     clampPanelPosition();
     schedulePanelClamp();
+    /* 展开时把刚才省掉的整块重画补上（收起时不画，见 render 里的早退）。 */
+    if (!state.settings.panelMinimized) render({ force: true });
   }
 
   function openPanel() {
@@ -3555,7 +3624,8 @@
     state.ui.panel.hidden = false;
     const button = document.getElementById(SIDEBAR_BUTTON_ID);
     button?.setAttribute("data-active", "true");
-    render({ animate: true });
+    /* 打开时强制整块重画：收起 / 后台期间卡片和表格是被跳过的，这里补回来。 */
+    render({ animate: true, force: true });
     clampPanelPosition();
     schedulePanelClamp();
     refreshBalanceOnOpen();
@@ -3940,7 +4010,7 @@
     tooltip.style.top = `${Math.round(top)}px`;
   }
 
-  function render({ animate = false } = {}) {
+  function render({ animate = false, force = false } = {}) {
     if (!ownsPanel()) {
       retirePanel();
       return;
@@ -4005,6 +4075,20 @@
         `${formatTokens(totals.total || totals.input + totals.output)} tokens`
       );
       setText("miniCost", formatCost(totals.cost));
+      /*
+       * 收起成小窗、或者窗口切到后台时，界面没人看：mini 条上的数字已经更新了，
+       * 卡片 / 余额表 / 图表（还有那几张统计卡）统统跳过 —— 展开、或者切回前台
+       * 时再整块重画。这样面板在"只是挂着"的时候几乎不干活。
+       * 自动化测试在后台标签页里跑，用 window.__DSTU_FORCE_RENDER 关掉这条早退。
+       */
+      if (
+        !force &&
+        !window.__DSTU_FORCE_RENDER &&
+        (state.settings.panelMinimized || document.hidden)
+      ) {
+        updateLauncherBadge();
+        return;
+      }
 
       const currency = state.settings.balanceCurrency || "CNY";
       const latest = latestBalance();
@@ -4467,7 +4551,23 @@
         retirePanel();
         return;
       }
+      /*
+       * 应用流式输出时 DOM 一直在动，这个回调每帧都会被叫醒一次。
+       * ensureLauncher() 很便宜（两次 querySelector + 一次 getElementById），而且
+       * 必须每帧都跑：应用重绘会把入口按钮删掉、或者把顶栏整个换掉，按钮得随时
+       * 搬回正确的位置（顶栏 ←→ 右下角浮窗兜底）。真正贵的是 ensurePanel() 里
+       * 那串状态重建，所以只给那一半加早退。
+       */
       ensureLauncher();
+      const live = document.getElementById(PANEL_ID);
+      if (
+        live &&
+        live.dataset.dsuVersion === VERSION &&
+        state.ui?.panel === live &&
+        state.ui.body
+      ) {
+        return;
+      }
       ensurePanel();
     });
   }
@@ -4488,6 +4588,18 @@
      */
     scheduleBalanceAutoQuery();
     window.setTimeout(() => refreshBalanceOnOpen(), 1500);
+    /*
+     * 窗口切回前台时补一次渲染：后台期间助手是慢节奏、面板也不重画，
+     * 回来那一下要立刻是最新的，别等下一次同步。
+     */
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      render();
+      updateLauncherBadge();
+      if (state.ui?.panel && !state.ui.panel.hidden && !state.settings.panelMinimized) {
+        drawChart(chartBuckets(visibleRecords()));
+      }
+    });
   }
 
   loadState();

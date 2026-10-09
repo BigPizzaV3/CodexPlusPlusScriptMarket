@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-09-23T02:43:09Z",
+  "updated_at": "2026-10-09T07:58:30Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -272,8 +272,8 @@
     {
       "id": "deepseek-token-usage",
       "name": "DeepSeek Token Usage",
-      "description": "按 DeepSeek 官方费率逐条请求统计 token 用量与费用；按天/按月图表、峰谷时段计价、缓存命中拆分；面板可拖动缩放、可收成 mini 条；可选显示账户余额与每日余额消耗（按天逐笔累加、跨零点按小时分摊；助手会回读本机 balance.log 把缺口补成真实数据），余额只认查到的数字，全部由可选的本机助手提供（面板不收集 Key，也没有手动填余额的入口）。只观察不改写，响应正文按 provider/model 归属读取：DeepSeek 域名的请求，或 OpenAI 兼容 completions 路径且本次请求点名了 deepseek 模型的请求。",
-      "version": "1.19.11",
+      "description": "按 DeepSeek 官方费率逐条请求统计 token 用量与费用；按天/按月图表、峰谷时段计价、缓存命中拆分；面板可拖动缩放、可收成 mini 条；可选显示账户余额与每日余额消耗（顶栏还有一个小药丸入口，显示今日花费；面板没在看时不画图表、助手自动降频）（按天逐笔累加、跨零点按小时分摊；助手会回读本机 balance.log 把缺口补成真实数据），余额只认查到的数字，全部由可选的本机助手提供（面板不收集 Key，也没有手动填余额的入口）。只观察不改写，响应正文按 provider/model 归属读取：DeepSeek 域名的请求，或 OpenAI 兼容 completions 路径且本次请求点名了 deepseek 模型的请求。",
+      "version": "1.19.17",
       "author": "Saydness",
       "tags": [
         "codex",
@@ -286,7 +286,7 @@
       ],
       "homepage": "https://github.com/Saydness/codexpp-deepseek-token-usage",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/deepseek-token-usage.js",
-      "sha256": "734df009b58d3d5ba8d44ede2c1314f11cce99684adf8badb7cd2e1a2c7d2ecd",
+      "sha256": "7759f9538e9b0cf8dcc42e1686e7c09ee505a6a8b3edd3dfbb9d1d174c7f177d",
       "requirements": [
         "Codex++ 用户脚本环境",
         "Codex 会话中使用 DeepSeek 模型",

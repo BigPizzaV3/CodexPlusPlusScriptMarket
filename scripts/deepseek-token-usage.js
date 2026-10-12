@@ -212,6 +212,7 @@ const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
    * 才准动面板，另一份发现名字被抢走后就安静退休。
    */
   const instance = { api: null, retired: false, bindTag: {} };
+  let visibilityHandler = null;
 
   function ownsPanel() {
     if (instance.retired) return false;
@@ -229,6 +230,10 @@ const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
       /* 退不掉也不影响，下面的守卫已经不会再动面板。 */
     }
     state.observer = null;
+    if (visibilityHandler) {
+      document.removeEventListener("visibilitychange", visibilityHandler);
+      visibilityHandler = null;
+    }
     /* 退休以后不许再往 localStorage 写：否则会把接班那份的状态盖回旧的。 */
     if (state.saveTimer) {
       window.clearTimeout(state.saveTimer);
@@ -4560,11 +4565,14 @@ const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
        */
       ensureLauncher();
       const live = document.getElementById(PANEL_ID);
+      const body = state.ui?.body;
       if (
         live &&
         live.dataset.dsuVersion === VERSION &&
         state.ui?.panel === live &&
-        state.ui.body
+        body &&
+        body.isConnected &&
+        live.contains(body)
       ) {
         return;
       }
@@ -4592,14 +4600,19 @@ const SIDEBAR_BUTTON_ID = "deepseek-usage-sidebar-button";
      * 窗口切回前台时补一次渲染：后台期间助手是慢节奏、面板也不重画，
      * 回来那一下要立刻是最新的，别等下一次同步。
      */
-    document.addEventListener("visibilitychange", () => {
+    visibilityHandler = () => {
+      if (!ownsPanel()) {
+        retirePanel();
+        return;
+      }
       if (document.hidden) return;
       render();
       updateLauncherBadge();
       if (state.ui?.panel && !state.ui.panel.hidden && !state.settings.panelMinimized) {
         drawChart(chartBuckets(visibleRecords()));
       }
-    });
+    };
+    document.addEventListener("visibilitychange", visibilityHandler);
   }
 
   loadState();

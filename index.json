@@ -1,7 +1,36 @@
 {
   "version": 1,
-  "updated_at": "2026-10-12T17:05:13Z",
+  "updated_at": "2026-10-13T18:43:15Z",
   "scripts": [
+    {
+      "id": "codex-tps-meter",
+      "name": "Codex TPS Meter",
+      "description": "每轮对话实时显示 TPS、估算峰值与最低值，以及多次 API 调用首字耗时的最大、最小、平均值；本地保存历史统计，帮助观察异常速度与等待变化。",
+      "version": "2.1.0",
+      "author": "tohsakarat",
+      "tags": [
+        "codex",
+        "tps",
+        "ttft",
+        "performance",
+        "metrics",
+        "ui"
+      ],
+      "homepage": "https://github.com/tohsakarat/codex-tps-meter",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-tps-meter.js",
+      "sha256": "9ec185a762d916b5b8a7e97c9ad303791214da38db33665eb19996743ccd965f",
+      "requirements": [
+        "Codex++ 用户脚本环境及已开启的用户脚本总开关",
+        "渲染页提供 mcp-notification 通知和 data-content-search-turn-key 轮次标记"
+      ],
+      "limitations": [
+        "均速包含整轮工具等待；无 token 用量时使用文本估算，未公开思考无法估算",
+        "峰值和最低值使用一秒窗口文本估算，忽略无输出的窗口",
+        "首字耗时从轮次开始、上次调用或工具完成时间估算，不是精确上游 TTFT；仅统计有可观察首字的调用",
+        "异常 TPS 可作为限流、拥堵或路由变化的排查线索，不能单独证明限流或模型降智",
+        "只记录启用后完整观察到的新轮次；记录保存在本地 localStorage，不回填历史"
+      ]
+    },
     {
       "id": "codex-relay-balance",
       "name": "Codex Relay Balance",

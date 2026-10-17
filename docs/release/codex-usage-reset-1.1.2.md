@@ -1,5 +1,7 @@
 # Codex Usage & Resets 1.1.2
 
+> 后续真实消费验证和定位更新见 [1.1.3 验证说明](codex-usage-reset-1.1.3.md)。以下为 1.1.2 发布时的历史记录。
+
 修复首次点击“使用重置”后，数据过期或刷新导致列表重建、确认按钮退回初始状态的问题。确认状态按重置券 ID 保存在脚本实例中；关闭菜单、券失效或开始提交时清除。
 
 清单已同步版本和 SHA-256。`homepage` 指向本脚本的 [PR #96](https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket/pull/96)，可直接查看代码和审查记录。

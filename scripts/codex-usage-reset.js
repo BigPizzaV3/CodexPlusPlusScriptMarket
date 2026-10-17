@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Usage & Resets
 // @namespace    codex-plus-plus
-// @version      1.1.2
+// @version      1.1.3
 // @description  顶栏仅显示 5 小时剩余用量及重置时间，点击展开用量与重置卡片菜单。
 // @match        app://-/*
 // @run-at       document-start
@@ -11,7 +11,7 @@
   "use strict";
   const KEY = "__codexUsageReset";
   const ID = "codex-usage-reset";
-  const VERSION = "1.1.2";
+  const VERSION = "1.1.3";
   const USAGE = "/wham/usage";
   const CREDITS = "/wham/rate-limit-reset-credits";
 
@@ -247,7 +247,7 @@
     style = element("style"); style.id = `${ID}-style`;
     style.textContent = `
       #${ID},#${ID}-panel{font:12px/1.4 var(--font-sans,system-ui,sans-serif);color:var(--color-token-foreground,#222);-webkit-app-region:no-drag;box-sizing:border-box}
-      #${ID}{position:fixed;top:2px;right:140px;z-index:2147483000;display:flex;align-items:center;height:31px;max-width:calc(100vw - 16px);font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      #${ID}{position:fixed;top:2px;right:264px;z-index:2147483000;display:flex;align-items:center;height:31px;max-width:calc(100vw - 16px);font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
         --usage-button-border:var(--color-border,rgba(127,127,127,.24));--usage-button-border-strong:var(--color-border-strong,rgba(127,127,127,.38));
         --usage-button-foreground:var(--color-text-foreground,#202020);--usage-button-background:var(--color-background-control,var(--color-background-surface,rgba(127,127,127,.08)));--usage-button-hover:var(--color-background-control-hover,rgba(127,127,127,.15))}
       #${ID} button,#${ID}-panel button{font:inherit;color:inherit;border:1px solid transparent;border-radius:6px;background:transparent;cursor:pointer;padding:4px 6px;white-space:nowrap;-webkit-app-region:no-drag}
@@ -281,7 +281,9 @@
       html.electron-dark #${ID},html[data-theme=dark] #${ID}{--usage-button-border:rgba(255,255,255,.16);--usage-button-border-strong:rgba(255,255,255,.28);--usage-button-foreground:#f2f2f2;--usage-button-background:rgba(255,255,255,.055);--usage-button-hover:rgba(255,255,255,.11)}
       #${ID},html.electron-dark #${ID},html[data-theme=dark] #${ID}{background:transparent}
       @media(prefers-color-scheme:dark){html:not([data-theme=light]) #${ID}{background:transparent}}
-      #${ID} .window-button{box-sizing:border-box;height:31px;min-width:94px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:0 10px;border:1px solid var(--usage-button-border);border-radius:9px;color:var(--usage-button-foreground);background:var(--usage-button-background);box-shadow:none;cursor:default;font:inherit;font-size:12px;line-height:1;white-space:nowrap;user-select:none;outline:none;transition:background 120ms ease,border-color 120ms ease,transform 120ms ease}
+      #${ID} .window-button{box-sizing:border-box;height:31px;min-width:128px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:0 10px;border:1px solid var(--usage-button-border);border-radius:9px;color:var(--usage-button-foreground);background:var(--usage-button-background);box-shadow:none;cursor:default;font:inherit;font-size:12px;line-height:1;white-space:nowrap;user-select:none;outline:none;transition:background 120ms ease,border-color 120ms ease,transform 120ms ease}
+      #${ID}[data-mode="compact"] .window-button{min-width:0}
+      #${ID}[data-mode="compact"] .cur-time{display:none}
       #${ID} .window-button:hover,#${ID} .window-button:focus-visible,#${ID} .window-button[aria-expanded=true]{background:var(--usage-button-hover);border-color:var(--usage-button-border-strong)}
       #${ID} .window-button .cur-time{font-variant-numeric:tabular-nums;font-weight:600;letter-spacing:.01em}
     `;
@@ -380,25 +382,69 @@
     frame = 0; if (disposed || !root) return;
     if (!root.isConnected) document.body.appendChild(root);
     if (!panel.isConnected) document.body.appendChild(panel);
-    // Same 31px title-bar band as Daily Token Usage; fit around existing buttons.
+    // Prefer the default position, then the nearest clear position up to 128px to its left.
+    const end = Math.max(8, innerWidth - 132);
+    const visible = (node) => {
+      for (let current = node; current; current = current.parentElement) {
+        const style = getComputedStyle(current);
+        if (current.hidden || current.getAttribute("aria-hidden") === "true" ||
+          style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") return false;
+      }
+      return true;
+    };
+    const header = Array.from(document.querySelectorAll('[class*="ApplicationMenuTopBar"],.app-header-tint,header.draggable'))
+      .filter(visible)
+      .find((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.height > 0 && rect.top <= 4 && rect.bottom > 2 && rect.width >= innerWidth * .75;
+      });
     const obstacles = Array.from(document.querySelectorAll('button,[role="button"],#codex-plus-menu,#codex-daily-token-usage'))
-      .filter((n) => !root.contains(n) && !panel.contains(n))
+      .filter((n) => {
+        if (root.contains(n) || panel.contains(n) || !visible(n)) return false;
+        if (n.matches('[data-testid="app-shell-header-context-menu-surface"]')) return false;
+        if (n.closest('#codex-plus-menu,#codex-daily-token-usage') || header?.contains(n)) return true;
+        const style = getComputedStyle(n);
+        return style.position === "fixed" || style.position === "sticky";
+      })
       .map((n) => n.getBoundingClientRect())
-      .filter((r) => r.width > 0 && r.height > 0 && r.top < 32 && r.bottom > 2)
-      .map((r) => ({ left: Math.max(8, r.left - 6), right: Math.min(innerWidth - 132, r.right + 6) }))
-      .filter((r) => r.right > r.left).sort((a, b) => a.left - b.left);
-    const gaps = []; let start = 8; const end = Math.max(8, innerWidth - 140);
-    for (const r of obstacles) { if (r.left > start) gaps.push({ left: start, right: r.left }); start = Math.max(start, r.right); }
-    if (end > start) gaps.push({ left: start, right: end });
+      .filter((r) => r.width > 0 && r.height > 0 && r.height <= 96 && r.width < innerWidth * .85 && r.top < 32 && r.bottom > 2)
+      .map((r) => ({ left: Math.max(8, r.left - 6), right: Math.min(end, r.right + 6) }))
+      .filter((r) => r.right > r.left);
+    const fits = (left, width) => left >= 8 && left + width <= end &&
+      !obstacles.some((r) => r.left < left + width && r.right > left);
     let chosen = null;
-    for (const mode of ["full"]) {
+    let compactWidth = 0;
+    let compactDefaultLeft = 8;
+    for (const mode of ["full", "compact"]) {
       root.dataset.mode = mode;
       const width = root.getBoundingClientRect().width;
-      const gap = gaps.map((g) => ({ left: g.left, right: Math.min(end, g.right) }))
-        .filter((g) => g.right - g.left >= width).at(-1);
-      if (gap) { chosen = { left: gap.right - width, top: 2 }; break; }
+      const defaultLeft = innerWidth - 264 - width;
+      if (fits(defaultLeft, width)) {
+        chosen = { left: defaultLeft, top: 2 }; break;
+      }
+      const minLeft = Math.max(8, defaultLeft - 128);
+      const leftCandidates = [minLeft, ...obstacles.map((r) => r.left - width)]
+        .filter((left) => left >= minLeft && left < defaultLeft)
+        .sort((a, b) => b - a);
+      const nearestLeft = leftCandidates.find((left) => fits(left, width));
+      if (nearestLeft != null) {
+        chosen = { left: nearestLeft, top: 2 }; break;
+      }
+      if (mode === "compact") {
+        compactWidth = width;
+        compactDefaultLeft = defaultLeft;
+      }
     }
-    if (!chosen) chosen = { left: Math.max(8, innerWidth - root.getBoundingClientRect().width - 12), top: 36 };
+    if (!chosen) {
+      // Restrict horizontal avoidance to 128px around the compact default position.
+      const minLeft = Math.max(8, compactDefaultLeft - 128);
+      const maxLeft = Math.min(end - compactWidth, compactDefaultLeft + 128);
+      const candidates = [minLeft, maxLeft, ...obstacles.flatMap((r) => [r.left - compactWidth, r.right])]
+        .filter((left) => left >= minLeft && left <= maxLeft)
+        .sort((a, b) => Math.abs(a - compactDefaultLeft) - Math.abs(b - compactDefaultLeft));
+      const nearby = candidates.find((left) => fits(left, compactWidth));
+      chosen = { left: nearby ?? Math.max(8, Math.min(compactDefaultLeft, end - compactWidth)), top: 2 };
+    }
     root.style.left = `${Math.round(chosen.left)}px`; root.style.right = "auto"; root.style.top = `${chosen.top}px`;
     if (!panel.hidden) {
       const r = root.getBoundingClientRect();

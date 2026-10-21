@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TokenLens for Codex
 // @namespace    tokenlens-for-codex
-// @version      1.0.0
+// @version      1.0.1
 // @description  Codex++ throughput, tool, token, cache and usage status line.
 // @match        app://-/*
 // @run-at       document-start
@@ -153,6 +153,7 @@
           waiting: "等待本次模型调用数据",
         },
         seconds: "秒",
+        minutes: "分",
         unavailable: "--",
       };
     }
@@ -201,6 +202,7 @@
         waiting: "Waiting for model-call data",
       },
       seconds: "s",
+      minutes: "min",
       unavailable: "--",
     };
   }
@@ -1486,10 +1488,16 @@
   }
 
   function codexPlusUsageFormatDuration(value) {
-    if (!Number.isFinite(value)) return codexPlusUsageText().unavailable;
+    const text = codexPlusUsageText();
+    if (!Number.isFinite(value)) return text.unavailable;
     const seconds = Math.max(0, value) / 1000;
-    if (seconds > 0 && seconds < 0.1) return `<0.1 ${codexPlusUsageText().seconds}`;
-    return `${seconds >= 10 ? seconds.toFixed(0) : seconds.toFixed(1)} ${codexPlusUsageText().seconds}`;
+    if (seconds > 0 && seconds < 0.1) return `<0.1 ${text.seconds}`;
+    if (seconds < 10) return `${seconds.toFixed(1)} ${text.seconds}`;
+    const rounded = Math.round(seconds);
+    if (rounded < 60) return `${rounded} ${text.seconds}`;
+    const minutes = Math.floor(rounded / 60);
+    const remainder = String(rounded % 60).padStart(2, "0");
+    return `${minutes} ${text.minutes} ${remainder} ${text.seconds}`;
   }
 
   function codexPlusUsageFormatCount(value) {

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-21T06:48:24.853Z",
+  "updated_at": "2026-10-21T08:53:04.154Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -334,7 +334,7 @@
       "id": "tokenlens-for-codex",
       "name": "TokenLens for Codex",
       "description": "在 Codex++ 底栏显示实时 tok/s，并提供工具分类、上下文、Token、缓存和多时间范围用量统计。",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": "LingYingNX",
       "tags": [
         "codex",
@@ -347,7 +347,7 @@
       ],
       "homepage": "https://github.com/LingYingNX/TokenLens-for-Codex",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tokenlens-for-codex.js",
-      "sha256": "9b445c701b176099ee65e15d459907e16d6b843eec7ee7e0f1e74f3f62a7d543",
+      "sha256": "c921d53e7b42967c77dfccf7665360f3a23a044e9c2422ed740ade7e502022be",
       "requirements": [
         "Codex++ 用户脚本环境",
         "Codex Desktop 提供本地事件与会话记录"

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-17T09:46:14.920Z",
+  "updated_at": "2026-10-21T06:48:24.853Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -328,6 +328,34 @@
         "依赖 Codex 内部用量接口和请求通道，应用更新可能影响兼容性",
         "使用重置会消耗账号可用重置次数，需要二次点击确认",
         "时间使用本机时区，查询每分钟刷新"
+      ]
+    },
+    {
+      "id": "tokenlens-for-codex",
+      "name": "TokenLens for Codex",
+      "description": "在 Codex++ 底栏显示实时 tok/s，并提供工具分类、上下文、Token、缓存和多时间范围用量统计。",
+      "version": "1.0.0",
+      "author": "LingYingNX",
+      "tags": [
+        "codex",
+        "tokens",
+        "throughput",
+        "usage",
+        "cache",
+        "tools",
+        "ui"
+      ],
+      "homepage": "https://github.com/LingYingNX/TokenLens-for-Codex",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tokenlens-for-codex.js",
+      "sha256": "9b445c701b176099ee65e15d459907e16d6b843eec7ee7e0f1e74f3f62a7d543",
+      "requirements": [
+        "Codex++ 用户脚本环境",
+        "Codex Desktop 提供本地事件与会话记录"
+      ],
+      "limitations": [
+        "tok/s 来自本机 Codex 事件和已结算 Token 数据，不是供应商 API 性能指标",
+        "依赖 Codex 本地事件与会话目录结构，应用更新后可能需要适配",
+        "历史消耗覆盖 Codex 当前可访问的会话范围"
       ]
     }
   ]

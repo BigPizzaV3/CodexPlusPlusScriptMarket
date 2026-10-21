@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-21T08:53:04.154Z",
+  "updated_at": "2026-10-21T09:10:27.485Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -347,7 +347,7 @@
       ],
       "homepage": "https://github.com/LingYingNX/TokenLens-for-Codex",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tokenlens-for-codex.js",
-      "sha256": "c921d53e7b42967c77dfccf7665360f3a23a044e9c2422ed740ade7e502022be",
+      "sha256": "ace903d1be1aa692809d3b8ef9371fbc5c9c0af6dda2894aeae812a95ce66962",
       "requirements": [
         "Codex++ 用户脚本环境",
         "Codex Desktop 提供本地事件与会话记录"

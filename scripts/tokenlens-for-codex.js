@@ -43,10 +43,6 @@
   const codexPlusUsageModelItemTypes = new Set([
     "agentmessage", "plan", "reasoning", "usermessage", "hookprompt", "functioncalloutput",
   ]);
-  const codexPlusUsageToolCategoryOrder = [
-    "memory", "skills", "mcp", "hook", "command", "file", "imageView", "imageGeneration",
-    "webSearch", "agent", "dynamic", "review", "sleep", "contextCompaction", "other",
-  ];
   const codexPlusUsageEvents = [
     "turn/started",
     "turn/completed",
@@ -408,6 +404,32 @@
     return String(value || "").trim();
   }
 
+  function codexPlusUsageBaseName(value) {
+    const text = String(value || "").trim().replace(/[?#].*$/, "");
+    return text.split(/[\\/]/).filter(Boolean).pop() || text;
+  }
+
+  function codexPlusUsageCommandSummary(item) {
+    const command = Array.isArray(item?.command)
+      ? item.command.join(" ")
+      : codexPlusUsageFirstString(item, ["command"]);
+    const action = (item?.commandActions || item?.command_actions || [])
+      .map((entry) => codexPlusUsageFirstString(entry, ["command", "cmd"]))
+      .find(Boolean);
+    const firstLine = String(command || action || "").split(/\r?\n/).find((line) => line.trim()) || "";
+    return firstLine.replace(/\s+/g, " ").trim().slice(0, 72);
+  }
+
+  function codexPlusUsageFileSummary(item) {
+    const changes = item?.changes;
+    const paths = Array.isArray(changes)
+      ? changes.map((entry) => codexPlusUsageFirstString(entry, ["path", "file", "name"]))
+      : Object.keys(changes || {});
+    const names = [...new Set(paths.map(codexPlusUsageBaseName).filter(Boolean))];
+    if (!names.length) return "";
+    return names.length > 1 ? `${names[0]} 等 ${names.length} 个文件` : names[0];
+  }
+
   function codexPlusUsageToolKind(item) {
     const typeRaw = String(item?.type || "").trim();
     const type = codexPlusUsageItemType(typeRaw);
@@ -421,41 +443,51 @@
     const identity = [typeRaw, server, tool, namespace, plugin, script, label].join(" ").toLowerCase();
     const fallback = (tool || label || namespace || server || typeRaw || "tool").slice(0, 80);
     const detail = [server, tool].filter(Boolean).join(" · ").slice(0, 120);
-    const result = (key) => ({ key, fallback, detail });
+    const result = (key, name = "") => {
+      const parts = [codexPlusUsageToolLabel(key, fallback), String(name || "").trim()].filter(Boolean);
+      return { key, fallback, detail, label: parts.join(" · ").slice(0, 120) };
+    };
 
     if (/hindsight|memory|memories|knowledge.?base/.test(identity)
         || /(?:^|[\\/])\.codex[\\/]+memories(?:[\\/]|$)/i.test(command)) {
-      return result("memory");
+      return result("memory", [server, tool].filter(Boolean).join(" / "));
     }
     if (/skill\.md|(?:^|[\\/])\.(?:agents|codex)[\\/]+skills(?:[\\/]|$)/i.test(command)
         || /(?:^|[\s:/\\])skills?(?:$|[-_\s:/\\])/.test(identity)) {
-      return result("skills");
+      return result("skills", tool || label);
     }
-    if (type.startsWith("hook") || /\bhooks?\b/.test(identity)) return result("hook");
-    if (type === "mcptoolcall" || server) return result("mcp");
-    if (type === "commandexecution") return result("command");
-    if (type === "filechange" || type.includes("applypatch") || type.includes("filechange")) return result("file");
-    if (type === "imageview") return result("imageView");
-    if (type === "imagegeneration") return result("imageGeneration");
-    if (type === "websearch") return result("webSearch");
-    if (type === "collabagenttoolcall" || type === "subagentactivity") return result("agent");
-    if (type === "dynamictoolcall" || type === "functioncalloutput") return result("dynamic");
-    if (type === "enteredreviewmode" || type === "exitedreviewmode") return result("review");
-    if (type === "sleep") return result("sleep");
+    if (type.startsWith("hook") || /\bhooks?\b/.test(identity)) return result("hook", label || tool);
+    if (type === "mcptoolcall" || server) return result("mcp", [server, tool].filter(Boolean).join(" / "));
+    if (type === "commandexecution") return result("command", codexPlusUsageCommandSummary(item));
+    if (type === "filechange" || type.includes("applypatch") || type.includes("filechange")) {
+      return result("file", codexPlusUsageFileSummary(item) || tool || label);
+    }
+    if (type === "imageview") {
+      return result("imageView", codexPlusUsageBaseName(codexPlusUsageFirstString(item, ["path"])));
+    }
+    if (type === "imagegeneration") {
+      return result("imageGeneration", codexPlusUsageFirstString(item, ["revisedPrompt", "revised_prompt", "savedPath", "saved_path"]));
+    }
+    if (type === "websearch") return result("webSearch", codexPlusUsageFirstString(item, ["query"]));
+    if (type === "collabagenttoolcall" || type === "subagentactivity") {
+      return result("agent", tool || codexPlusUsageFirstString(item, ["prompt", "agentPath", "agent_path"]));
+    }
+    if (type === "dynamictoolcall" || type === "functioncalloutput") {
+      return result("dynamic", [namespace, tool].filter(Boolean).join(" / "));
+    }
+    if (type === "enteredreviewmode" || type === "exitedreviewmode") {
+      return result("review", codexPlusUsageFirstString(item, ["review"]).split(/\r?\n/)[0]);
+    }
+    if (type === "sleep") return result("sleep", codexPlusUsageFirstString(item, ["durationMs", "duration_ms"]));
     if (type === "contextcompaction") return result("contextCompaction");
 
     const key = `tool:${(fallback || "other").toLowerCase()}`.slice(0, 100);
-    return { key, fallback, detail };
+    return { key, fallback, detail, label: fallback || codexPlusUsageToolLabel("other", "tool") };
   }
 
   function codexPlusUsageToolLabel(categoryKey, fallback) {
     const labels = codexPlusUsageText().labels.toolKinds;
     return labels[categoryKey] || fallback || labels.other;
-  }
-
-  function codexPlusUsageToolOrder(categoryKey) {
-    const index = codexPlusUsageToolCategoryOrder.indexOf(categoryKey);
-    return index < 0 ? codexPlusUsageToolCategoryOrder.length : index;
   }
 
   function codexPlusUsageMergedDuration(intervals) {
@@ -555,6 +587,7 @@
       id: String(id || `${kind.key}:${turn.toolDetails.length}`),
       categoryKey: kind.key,
       fallback: kind.fallback,
+      label: kind.label,
       detail: kind.detail,
       startedAt: start != null && end > start ? start : null,
       endedAt: start != null && end > start ? end : null,
@@ -580,9 +613,12 @@
     if (method === "hook/started" || method === "hook/completed") {
       const run = data.run || {};
       const id = `hook:${run.id || `${run.eventName || "hook"}:${run.startedAt || at}`}`;
+      const hookName = codexPlusUsageFirstString(run, ["eventName", "event_name"]);
+      const hookHandler = codexPlusUsageFirstString(run, ["handlerType", "handler_type"]);
       const kind = {
         key: "hook",
         fallback: "Hook",
+        label: [codexPlusUsageToolLabel("hook", "Hook"), hookName, hookHandler].filter(Boolean).join(" · "),
         detail: [run.eventName, run.handlerType].filter(Boolean).join(" · "),
       };
       if (method === "hook/started") {
@@ -635,15 +671,23 @@
         for (const [index, entry] of (item.content || []).entries()) {
           if (entry?.type !== "skill") continue;
           const id = `skill:${item.id}:${entry.path || entry.name || index}`;
-          codexPlusUsageRecordTool(turn, id, { key: "skills", fallback: "Skills", detail: entry.name || "" });
+          const name = String(entry.name || codexPlusUsageBaseName(entry.path) || "Skills").trim();
+          codexPlusUsageRecordTool(turn, id, {
+            key: "skills",
+            fallback: "Skills",
+            label: `${codexPlusUsageToolLabel("skills", "Skills")} · ${name}`,
+            detail: entry.path || "",
+          });
         }
       }
       if (codexPlusUsageItemType(item?.type) === "hookprompt") {
         for (const [index, fragment] of (item.fragments || []).entries()) {
           const id = `hook:${fragment.hookRunId || fragment.hook_run_id || `${item.id}:${index}`}`;
+          const text = String(fragment.text || "").replace(/\s+/g, " ").trim().slice(0, 48);
           codexPlusUsageRecordTool(turn, id, {
             key: "hook",
             fallback: "Hook",
+            label: [codexPlusUsageToolLabel("hook", "Hook"), text].filter(Boolean).join(" · "),
             detail: String(fragment.text || "").slice(0, 120),
           });
         }
@@ -745,34 +789,55 @@
     const otherMs = Math.max(0, turnMs - (ttftMs || 0) - decodeMs - toolMs);
     const speedOutput = turn.speedSamples.reduce((total, sample) => total + sample.outputTokens, 0);
     const speedDuration = turn.speedSamples.reduce((total, sample) => total + sample.latencyMs, 0);
-    const toolGroups = new Map();
-    const addToolDetail = (detail, detailEnd = end) => {
+    const toolCalls = new Map();
+    const addToolCall = (detail, detailEnd = end) => {
       if (!detail) return;
+      const id = String(detail.id || `${detail.categoryKey || "other"}:${toolCalls.size}`);
       const categoryKey = String(detail.categoryKey || "other");
-      if (!toolGroups.has(categoryKey)) {
-        toolGroups.set(categoryKey, { ids: new Set(), intervals: [], fallback: "", details: new Set() });
+      const fallback = String(detail.fallback || "");
+      const label = String(detail.label || codexPlusUsageToolLabel(categoryKey, fallback)).trim();
+      const timed = Number.isFinite(detail.startedAt)
+        && Number.isFinite(detailEnd)
+        && detailEnd > detail.startedAt;
+      let call = toolCalls.get(id);
+      if (!call) {
+        call = { id, categoryKey, fallback, label, intervals: [], details: new Set(), timed: false };
+        toolCalls.set(id, call);
       }
-      const group = toolGroups.get(categoryKey);
-      group.ids.add(String(detail.id || `${categoryKey}:${group.ids.size}`));
-      group.fallback ||= String(detail.fallback || "");
-      if (detail.detail && group.details.size < 6) group.details.add(String(detail.detail));
-      if (Number.isFinite(detail.startedAt) && Number.isFinite(detailEnd) && detailEnd > detail.startedAt) {
-        group.intervals.push([detail.startedAt, detailEnd]);
+      if (!call.label || (timed && !call.timed)) call.label = label || call.label;
+      if (timed) {
+        call.intervals.push([detail.startedAt, detailEnd]);
+        call.timed = true;
       }
+      if (detail.detail && call.details.size < 6) call.details.add(String(detail.detail));
     };
-    for (const detail of turn.toolDetails) addToolDetail(detail, detail.endedAt);
-    for (const [id, tool] of turn.activeTools) addToolDetail({ ...tool, id }, end);
-    const toolDetails = [...toolGroups]
-      .map(([categoryKey, group]) => ({
-        categoryKey,
-        label: codexPlusUsageToolLabel(categoryKey, group.fallback),
+    for (const detail of turn.toolDetails) addToolCall(detail, detail.endedAt);
+    for (const [id, tool] of turn.activeTools) addToolCall({ ...tool, id }, end);
+
+    const toolGroups = new Map();
+    for (const call of toolCalls.values()) {
+      const key = `${call.categoryKey}:${call.label}`;
+      if (!toolGroups.has(key)) {
+        toolGroups.set(key, { ids: new Set(), intervals: [], categoryKey: call.categoryKey, label: call.label, details: new Set() });
+      }
+      const group = toolGroups.get(key);
+      group.ids.add(call.id);
+      group.intervals.push(...call.intervals);
+      for (const detail of call.details) {
+        if (group.details.size < 6) group.details.add(detail);
+      }
+    }
+    const toolDetails = [...toolGroups.values()]
+      .map((group) => ({
+        categoryKey: group.categoryKey,
+        label: group.label,
         detail: [...group.details].join(" / "),
         count: group.ids.size,
         durationMs: codexPlusUsageMergedDuration(group.intervals),
       }))
       .filter((detail) => detail.count > 0 || detail.durationMs > 0)
-      .sort((left, right) => codexPlusUsageToolOrder(left.categoryKey) - codexPlusUsageToolOrder(right.categoryKey)
-        || right.durationMs - left.durationMs
+      .sort((left, right) => right.durationMs - left.durationMs
+        || right.count - left.count
         || left.label.localeCompare(right.label));
     const contextPercent = turn.contextWindow > 0 && turn.contextTokens != null
       ? codexPlusUsageClamp(turn.contextTokens / turn.contextWindow * 100, 0, 100)

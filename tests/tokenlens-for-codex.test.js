@@ -26,6 +26,8 @@ test("TokenLens market entry matches the published script", () => {
   assert.equal(entry.sha256, crypto.createHash("sha256").update(source).digest("hex"));
   assert.match(source, /\/\/ @version\s+1\.0\.1(?:\r?\n)/);
   assert.match(source, /\/\/ @match\s+app:\/\/-\/\*(?:\r?\n)/);
+  assert.match(source, /label:\s*kind\.label/);
+  assert.match(source, /right\.durationMs - left\.durationMs/);
   assert.doesNotMatch(source, /[A-Z]:\\Users\\/i);
   assert.doesNotThrow(() => new Function(source));
 });

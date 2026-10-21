@@ -28,6 +28,8 @@ test("TokenLens market entry matches the published script", () => {
   assert.match(source, /\/\/ @match\s+app:\/\/-\/\*(?:\r?\n)/);
   assert.match(source, /label:\s*kind\.label/);
   assert.match(source, /right\.durationMs - left\.durationMs/);
+  assert.match(source, /activeSkills/);
+  assert.match(source, /visible:\s*false/);
   assert.doesNotMatch(source, /[A-Z]:\\Users\\/i);
   assert.doesNotThrow(() => new Function(source));
 });

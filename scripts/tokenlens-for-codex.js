@@ -430,6 +430,32 @@
     return names.length > 1 ? `${names[0]} 等 ${names.length} 个文件` : names[0];
   }
 
+  function codexPlusUsageSkillNames(item) {
+    const names = new Set();
+    for (const entry of item?.content || []) {
+      if (entry?.type === "skill") {
+        const name = String(entry.name || codexPlusUsageBaseName(entry.path) || "").trim();
+        if (name) names.add(name);
+      }
+      if (entry?.type !== "text" || typeof entry.text !== "string") continue;
+      for (const match of entry.text.matchAll(/([A-Za-z0-9_.-]+)[\\/]SKILL\.md/gi)) {
+        if (match[1]) names.add(match[1]);
+      }
+    }
+    return [...names];
+  }
+
+  function codexPlusUsageCommandKind(turn, item) {
+    const skill = String(turn?.activeSkills?.[0] || "").trim();
+    if (!skill) return { ...codexPlusUsageToolKind(item), visible: false };
+    return {
+      key: "skills",
+      fallback: "Skills",
+      label: `${codexPlusUsageToolLabel("skills", "Skills")} · ${skill}`,
+      detail: codexPlusUsageCommandSummary(item),
+    };
+  }
+
   function codexPlusUsageToolKind(item) {
     const typeRaw = String(item?.type || "").trim();
     const type = codexPlusUsageItemType(typeRaw);
@@ -551,6 +577,7 @@
       decodeMs: 0,
       speedSamples: [],
       speedIntervalStartedAt: Number.isFinite(startedAt) ? startedAt : Date.now(),
+      activeSkills: [],
       historySeeded: false,
       observedFromStart: false,
       lastHistorySample: null,
@@ -583,15 +610,17 @@
     let end = codexPlusUsageNumber(endedAt);
     if (!(end > start) && duration > 0 && end != null) start = end - duration;
     if (start != null && end > start) turn.toolIntervals.push([start, end]);
-    turn.toolDetails.push({
-      id: String(id || `${kind.key}:${turn.toolDetails.length}`),
-      categoryKey: kind.key,
-      fallback: kind.fallback,
-      label: kind.label,
-      detail: kind.detail,
-      startedAt: start != null && end > start ? start : null,
-      endedAt: start != null && end > start ? end : null,
-    });
+    if (kind.visible !== false) {
+      turn.toolDetails.push({
+        id: String(id || `${kind.key}:${turn.toolDetails.length}`),
+        categoryKey: kind.key,
+        fallback: kind.fallback,
+        label: kind.label,
+        detail: kind.detail,
+        startedAt: start != null && end > start ? start : null,
+        endedAt: start != null && end > start ? end : null,
+      });
+    }
   }
 
   function codexPlusUsageApplyEvent(turn, method, payload, now) {
@@ -647,7 +676,10 @@
       if (item?.id && codexPlusUsageIsToolItem(item.type)) {
         codexPlusUsageFlushDecode(turn, at);
         if (!turn.activeTools.has(item.id)) {
-          turn.activeTools.set(item.id, { ...codexPlusUsageToolKind(item), startedAt: at });
+          const kind = codexPlusUsageItemType(item.type) === "commandexecution"
+            ? codexPlusUsageCommandKind(turn, item)
+            : codexPlusUsageToolKind(item);
+          turn.activeTools.set(item.id, { ...kind, startedAt: at });
         }
       }
       return turn;
@@ -657,10 +689,13 @@
       const item = data.item;
       if (item?.id && codexPlusUsageIsToolItem(item.type)) {
         const active = turn.activeTools.get(item.id);
+        const kind = codexPlusUsageItemType(item.type) === "commandexecution"
+          ? codexPlusUsageCommandKind(turn, item)
+          : codexPlusUsageToolKind(item);
         codexPlusUsageRecordTool(
           turn,
           item.id,
-          codexPlusUsageToolKind(item),
+          kind,
           active?.startedAt,
           at,
           item.durationMs ?? item.duration_ms,
@@ -668,17 +703,7 @@
         turn.activeTools.delete(item.id);
       }
       if (codexPlusUsageItemType(item?.type) === "usermessage") {
-        for (const [index, entry] of (item.content || []).entries()) {
-          if (entry?.type !== "skill") continue;
-          const id = `skill:${item.id}:${entry.path || entry.name || index}`;
-          const name = String(entry.name || codexPlusUsageBaseName(entry.path) || "Skills").trim();
-          codexPlusUsageRecordTool(turn, id, {
-            key: "skills",
-            fallback: "Skills",
-            label: `${codexPlusUsageToolLabel("skills", "Skills")} · ${name}`,
-            detail: entry.path || "",
-          });
-        }
+        turn.activeSkills = codexPlusUsageSkillNames(item);
       }
       if (codexPlusUsageItemType(item?.type) === "hookprompt") {
         for (const [index, fragment] of (item.fragments || []).entries()) {

@@ -334,7 +334,7 @@
       "id": "tokenlens-for-codex",
       "name": "TokenLens for Codex",
       "description": "在 Codex++ 底栏显示实时 tok/s，并提供工具分类、上下文、Token、缓存和多时间范围用量统计。",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "LingYingNX",
       "tags": [
         "codex",
@@ -347,7 +347,7 @@
       ],
       "homepage": "https://github.com/LingYingNX/TokenLens-for-Codex",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tokenlens-for-codex.js",
-      "sha256": "f4d206b67f898c4035dd29b61a9dffab099e18877427730f3a8790082d8a494b",
+      "sha256": "ff725df3863ac8df4c466254280008940393f8506432c5a87e8d97adb2a2e26d",
       "requirements": [
         "Codex++ 用户脚本环境",
         "Codex Desktop 提供本地事件与会话记录"

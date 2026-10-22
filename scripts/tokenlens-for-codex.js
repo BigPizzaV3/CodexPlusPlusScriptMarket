@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TokenLens for Codex
 // @namespace    tokenlens-for-codex
-// @version      1.0.1
+// @version      1.0.2
 // @description  Codex++ throughput, tool, token, cache and usage status line.
 // @match        app://-/*
 // @run-at       document-start
@@ -12,9 +12,35 @@
   const registerCodexPlusExtensionSelector = () => {};
   const visibleElement = (node) => !!node && ((node.getClientRects?.().length || 0) > 0 || node.offsetWidth > 0 || node.offsetHeight > 0);
   const codexPlusBackendSettingsLoaded = true;
-  const codexPlusSettings = () => ({ usageStatusLine: true });
-  window.__codexPlusUsageStatusLineRuntime?.dispose?.();
-  document.getElementById("codex-plus-usage-statusline")?.remove();
+  // 宿主「用量状态栏」开关是唯一真值；先按默认值渲染，读回后立即纠正。
+  let codexPlusUsageStatusLineEnabled = true;
+  const codexPlusSettings = () => ({ usageStatusLine: codexPlusUsageStatusLineEnabled });
+  // shortcut: 只在初始化与宿主开关回调时读设置，管理端直接改配置后需刷新页面。
+  const codexPlusRefreshUsageStatusLineSetting = () => {
+    const bridge = window.__codexSessionDeleteBridge;
+    if (typeof bridge !== "function") return;
+    Promise.resolve(bridge("/settings/get", {}))
+      .then((value) => {
+        if (typeof value?.codexAppUsageStatusLine !== "boolean") return;
+        if (value.codexAppUsageStatusLine === codexPlusUsageStatusLineEnabled) return;
+        codexPlusUsageStatusLineEnabled = value.codexAppUsageStatusLine;
+        window.__codexPlusThroughputStatusLineRuntime?.sync?.();
+      })
+      .catch(() => {});
+  };
+  // 内置栏要继续活着：宿主的开关回调就是打给它的 sync 全局。
+  let codexPlusHostUsageSync = globalThis.__CODEX_PLUS_USAGE_STATUSLINE_SYNC__;
+  const codexPlusUsageStatusLineSync = () => {
+    codexPlusHostUsageSync?.();
+    codexPlusRefreshUsageStatusLineSetting();
+  };
+  const codexPlusInstallUsageStatusLineSync = () => {
+    const current = globalThis.__CODEX_PLUS_USAGE_STATUSLINE_SYNC__;
+    if (current === codexPlusUsageStatusLineSync) return;
+    codexPlusHostUsageSync = current;
+    globalThis.__CODEX_PLUS_USAGE_STATUSLINE_SYNC__ = codexPlusUsageStatusLineSync;
+  };
+  codexPlusInstallUsageStatusLineSync();
   /**
    * 输入框下方吞吐状态栏。
    *
@@ -1816,6 +1842,8 @@
   }
 
   function codexPlusUsageSyncPlacement() {
+    // 宿主重注入会覆盖 sync 全局，这里补挂一次，保证开关仍然能通知到本脚本。
+    codexPlusInstallUsageStatusLineSync();
     const card = codexPlusUsageEnabled() ? codexPlusUsageComposerCard() : null;
     const threadId = codexPlusUsageThreadId(card);
     if (!card || !threadId) {
@@ -1950,9 +1978,13 @@
       codexPlusUsageState.globalUsagePromise = null;
       codexPlusUsageState.lastFingerprint = "";
       globalThis.__CODEX_PLUS_THROUGHPUT_STATUSLINE_SYNC__ = undefined;
+      if (globalThis.__CODEX_PLUS_USAGE_STATUSLINE_SYNC__ === codexPlusUsageStatusLineSync) {
+        globalThis.__CODEX_PLUS_USAGE_STATUSLINE_SYNC__ = codexPlusHostUsageSync;
+      }
     },
   };
   globalThis.__CODEX_PLUS_THROUGHPUT_STATUSLINE_SYNC__ = () => codexPlusUsageSchedule(0);
+  codexPlusRefreshUsageStatusLineSetting();
 
   window.codexPlus?.onCleanup?.(() => window.__codexPlusThroughputStatusLineRuntime?.dispose?.());
 })();

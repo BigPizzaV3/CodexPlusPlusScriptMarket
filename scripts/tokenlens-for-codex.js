@@ -115,6 +115,8 @@
     globalUsagePromise: null,
     globalUsageSamples: [],
     globalUsageScanned: false,
+    globalUsageByThread: new Map(),
+    globalUsageTruncated: false,
     globalAppServicesPromise: null,
     nativeMessageHandler: null,
     nativeViewHandler: null,
@@ -162,6 +164,7 @@
           today: "今天消耗",
           threeDay: "近三天消耗",
           week: "近7天消耗",
+          partial: "部分",
           custom: "区间消耗",
           start: "起始",
           end: "截止",
@@ -211,6 +214,7 @@
         today: "Today",
         threeDay: "Last 3 days",
         week: "Last 7 days",
+        partial: "partial",
         custom: "Range",
         start: "Start",
         end: "End",
@@ -292,25 +296,6 @@
       .codex-plus-throughput-popover-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;color:var(--color-token-text-tertiary,rgba(200,200,210,.62));font-size:11px}
     `;
     document.head?.appendChild(style);
-  }
-
-  function codexPlusUsageIcon(shapes) {
-    const svg = document.createElementNS(codexPlusUsageSvgNs, "svg");
-    svg.setAttribute("viewBox", "0 0 16 16");
-    svg.setAttribute("width", "13");
-    svg.setAttribute("height", "13");
-    svg.setAttribute("fill", "none");
-    svg.setAttribute("stroke", "currentColor");
-    svg.setAttribute("stroke-width", "1.4");
-    svg.setAttribute("stroke-linecap", "round");
-    svg.setAttribute("stroke-linejoin", "round");
-    svg.setAttribute("aria-hidden", "true");
-    for (const shape of shapes) {
-      const node = document.createElementNS(codexPlusUsageSvgNs, shape.tag);
-      Object.entries(shape.attrs).forEach(([key, value]) => node.setAttribute(key, value));
-      svg.appendChild(node);
-    }
-    return svg;
   }
 
   function codexPlusUsageFilledIcon(pathData, viewBox, width, height) {
@@ -608,6 +593,7 @@
       observedFromStart: false,
       lastHistorySample: null,
       skipMatchingUsage: false,
+      appliedTotals: new Set(),
       toolIntervals: [],
       toolDetails: [],
       activeTools: new Map(),
@@ -759,6 +745,11 @@
       if (contextWindow && contextWindow > 0) turn.contextWindow = contextWindow;
       const contextTokens = previous.total ?? current.total;
       if (contextTokens != null) turn.contextTokens = Math.max(turn.contextTokens || 0, contextTokens);
+      // 同一累计值已经计入过就整条丢弃，重放的旧通知不再重复累加。
+      if (current.total != null && turn.appliedTotals?.has(current.total)) {
+        turn.speedIntervalStartedAt = at;
+        return turn;
+      }
       const samples = [
         ["inputTokens", "totalInputSeen", current.input, previous.input],
         ["cachedInputTokens", "totalCachedInputSeen", current.cached, previous.cached],
@@ -771,6 +762,7 @@
         for (const [, seenField, currentValue] of samples) {
           turn[seenField] = currentValue;
         }
+        if (current.total != null) turn.appliedTotals?.add(current.total);
         turn.skipMatchingUsage = false;
         turn.lastHistorySample = null;
         turn.speedIntervalStartedAt = at;
@@ -793,6 +785,10 @@
           changed = true;
         }
         turn[seenField] = current;
+      }
+      if (current.total != null && turn.appliedTotals) {
+        turn.appliedTotals.add(current.total);
+        if (turn.appliedTotals.size > 256) turn.appliedTotals.delete(turn.appliedTotals.values().next().value);
       }
       if (changed) {
         turn.usageSamples += 1;
@@ -923,11 +919,19 @@
     const rows = Array.isArray(result?.history) ? result.history : [];
     const samples = [];
     const seen = new Set();
+    const cumulatives = new Set();
     for (const row of rows) {
       const observedAt = Date.parse(row?.observed_at || row?.observedAt || row?.timestamp || row?.created_at || "");
       const usage = codexPlusUsageTokenTotals(row?.usage || row?.tokenUsage || row?.token_usage || row);
       if (!Number.isFinite(observedAt) || !usage) continue;
       const turnId = String(row?.turn_id || row?.turnId || "");
+      // 重放或重复的 token_count 会换个时间戳再来一次，认累计值不认时间戳。
+      // shortcut: 宿主缺 total_token_usage 时 contextUsed 会退回本次用量，极端情况下会误判重复。
+      const cumulative = codexPlusUsageNumber(row?.usage?.contextUsed ?? row?.usage?.context_used);
+      if (cumulative != null) {
+        if (cumulatives.has(cumulative)) continue;
+        cumulatives.add(cumulative);
+      }
       const key = [observedAt, turnId, usage.input, usage.cached, usage.output, usage.total].join("|");
       if (seen.has(key)) continue;
       seen.add(key);
@@ -1146,12 +1150,12 @@
       }
     }
     const minimum = codexPlusUsageBeijingDayStart(Date.now()) - 6 * 24 * 60 * 60 * 1000;
-    return [...ids]
+    const recent = [...ids]
       .map((id) => ({ id, updatedAt: codexPlusUsageThreadUpdatedAt(entries.get(id) || { id }) }))
       .filter((entry) => entry.updatedAt >= minimum)
-      .sort((left, right) => right.updatedAt - left.updatedAt)
-      .slice(0, 200)
-      .map((entry) => entry.id);
+      .sort((left, right) => right.updatedAt - left.updatedAt);
+    codexPlusUsageState.globalUsageTruncated = recent.length > 200;
+    return recent.slice(0, 200);
   }
 
   async function codexPlusUsageMapLimit(items, limit, mapper) {
@@ -1168,18 +1172,29 @@
   }
 
   async function codexPlusUsageScanGlobalSessions() {
-    const threadIds = await codexPlusUsageRecentThreadIds();
-    if (!threadIds.length || typeof window.codexPlus?.call !== "function") {
+    const threads = await codexPlusUsageRecentThreadIds();
+    if (!threads.length || typeof window.codexPlus?.call !== "function") {
       return { samples: [], threadsRead: 0 };
     }
     let threadsRead = 0;
     const seen = new Set();
     const samples = [];
-    const results = await codexPlusUsageMapLimit(threadIds, 2, async (threadId) => {
+    const cachedByThread = codexPlusUsageState.globalUsageByThread;
+    for (const key of cachedByThread.keys()) {
+      if (!threads.some((thread) => thread.id === key)) cachedByThread.delete(key);
+    }
+    const results = await codexPlusUsageMapLimit(threads, 2, async ({ id: threadId, updatedAt }) => {
+      const cached = cachedByThread.get(threadId);
+      if (cached && cached.updatedAt === updatedAt) {
+        threadsRead += 1;
+        return cached.samples;
+      }
       try {
         const result = await window.codexPlus.call("/thread-usage-history", { session_id: threadId });
         threadsRead += 1;
-        return codexPlusUsageHistorySamples(result).map((sample) => ({ ...sample, threadId }));
+        const threadSamples = codexPlusUsageHistorySamples(result).map((sample) => ({ ...sample, threadId }));
+        cachedByThread.set(threadId, { updatedAt, samples: threadSamples });
+        return threadSamples;
       } catch {
         return [];
       }
@@ -1256,7 +1271,8 @@
     if (codexPlusUsageState.range === "task") {
       return { label: text.labels.task, value: snapshot?.usage?.total ?? null };
     }
-    const label = text.labels[codexPlusUsageState.range] || text.labels.custom;
+    const base = text.labels[codexPlusUsageState.range] || text.labels.custom;
+    const label = codexPlusUsageState.globalUsageTruncated ? `${base}（${text.labels.partial}）` : base;
     return { label, value: codexPlusUsageGlobalTotal(codexPlusUsageState.range) };
   }
 
@@ -1428,10 +1444,9 @@
     return host ? node.parentElement === host : node.previousElementSibling === card;
   }
 
-  function codexPlusUsageEnsureNode(card) {
+  function codexPlusUsageEnsureNode(card, footerHost = codexPlusUsageComposerFooterHost(card)) {
     const fallbackHost = card?.parentElement;
     if (!fallbackHost) return null;
-    const footerHost = codexPlusUsageComposerFooterHost(card);
     codexPlusUsageState.card = card;
     let node = codexPlusUsageState.node;
     if (node && codexPlusUsageNodePlaced(node, card, footerHost)) return node;
@@ -1856,7 +1871,7 @@
     const changed = threadChanged
       || !codexPlusUsageState.node?.isConnected
       || !codexPlusUsageNodePlaced(codexPlusUsageState.node, card, footerHost);
-    const node = codexPlusUsageEnsureNode(card);
+    const node = codexPlusUsageEnsureNode(card, footerHost);
     if (!node) return null;
     if (changed) {
       codexPlusUsageState.threadId = threadId;

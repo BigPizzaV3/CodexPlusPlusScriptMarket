@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TokenLens for Codex
 // @namespace    tokenlens-for-codex
-// @version      1.0.2
+// @version      1.0.3
 // @description  Codex++ throughput, tool, token, cache and usage status line.
 // @match        app://-/*
 // @run-at       document-start
@@ -9,9 +9,7 @@
 
 /* Codex++ external extension: turn token throughput status line. */
 (() => {
-  const registerCodexPlusExtensionSelector = () => {};
   const visibleElement = (node) => !!node && ((node.getClientRects?.().length || 0) > 0 || node.offsetWidth > 0 || node.offsetHeight > 0);
-  const codexPlusBackendSettingsLoaded = true;
   // 宿主「用量状态栏」开关是唯一真值；先按默认值渲染，读回后立即纠正。
   let codexPlusUsageStatusLineEnabled = true;
   const codexPlusSettings = () => ({ usageStatusLine: codexPlusUsageStatusLineEnabled });
@@ -44,28 +42,31 @@
   /**
    * 输入框下方吞吐状态栏。
    *
-   * 主界面只使用已结算模型调用的输出与耗时，工具执行时间从调用区间中扣除。
+   * 主界面沿用 DSH 口径：累计已结算输出 token，再除以累计解码时间。
    * 数据来自 Codex app-server 的本地通知，不读取会话正文，也不请求服务商：
    * - 首个非空助手或推理增量为首 token 时间；
    * - 助手消息或计划条目完成时结束当前解码区间；
    * - 工具条目开始与完成之间的并集计为工具耗时；
    * - token 用量按线程累计输出增量计入当前轮；
-   * - 中途安装时从当前线程 rollout 回填当前轮并去重。
+   * - 中途安装时从宿主历史接口回填当前轮并去重。
    *
    * 悬停速度值可查看首 token、工具耗时以及本轮 token 用量。
    */
-  registerCodexPlusExtensionSelector('[data-codex-plus-ext="user-throughput-statusline"]');
   window.__codexPlusThroughputStatusLineRuntime?.dispose?.();
 
   const codexPlusUsageStatusLineId = "codex-plus-throughput-statusline";
   const codexPlusUsagePopoverId = "codex-plus-throughput-popover";
   const codexPlusUsageStyleId = "codex-plus-throughput-statusline-style";
-  const codexPlusUsageVersion = 20;
+  const codexPlusUsageVersion = 41;
+  const codexPlusUsageThemeKey = "tokenlens-theme";
   const codexPlusUsageGlobalApiKey = "__codexDailyTokenUsage";
   const codexPlusUsageGlobalRefreshMs = 5 * 60 * 1000;
   const codexPlusUsageActiveTickMs = 1000;
   const codexPlusUsageIdleTickMs = 4000;
+  const codexPlusUsageLiveContextRefreshMs = 2000;
   const codexPlusUsageMaxTurns = 32;
+  const codexPlusUsageMaxLiveSamples = 512;
+  const codexPlusUsageMaxChartBars = 200;
   const codexPlusUsageModelItemTypes = new Set([
     "agentmessage", "plan", "reasoning", "usermessage", "hookprompt", "functioncalloutput",
   ]);
@@ -93,6 +94,9 @@
     popoverParts: null,
     threadId: "",
     turns: new Map(),
+    liveContextByThread: new Map(),
+    liveContextFetchedAt: new Map(),
+    liveContextPromises: new Map(),
     lastFingerprint: "",
     observer: null,
     dispatcher: null,
@@ -100,6 +104,7 @@
     hideTimer: 0,
     toolExpanded: false,
     tokenExpanded: false,
+    theme: codexPlusUsageReadTheme(),
     range: "task",
     customStart: "",
     customEnd: "",
@@ -113,11 +118,7 @@
     globalUsageLoading: false,
     globalUsageError: "",
     globalUsagePromise: null,
-    globalUsageSamples: [],
-    globalUsageScanned: false,
-    globalUsageByThread: new Map(),
-    globalUsageTruncated: false,
-    globalAppServicesPromise: null,
+    globalUsageCoverage: { available: 0, total: 0 },
     nativeMessageHandler: null,
     nativeViewHandler: null,
     resizeHandler: null,
@@ -162,9 +163,12 @@
           hitRate: "缓存命中",
           task: "任务消耗",
           today: "今天消耗",
-          threeDay: "近三天消耗",
+          yesterday: "昨天消耗",
           week: "近7天消耗",
-          partial: "部分",
+          presetTask: "任务",
+          presetToday: "今天",
+          presetYesterday: "昨天",
+          presetWeek: "近7天",
           custom: "区间消耗",
           start: "起始",
           end: "截止",
@@ -176,7 +180,15 @@
           running: "实时统计",
           completed: "本轮已完成",
           waiting: "等待本次模型调用数据",
+          themeDark: "切换到亮色主题",
+          themeLight: "切换到暗色主题",
+          turnCalls: "本轮调用：",
+          totalCalls: "总次数",
+          averageSpeed: "平均速度",
         },
+        calls: (value) => value + "次",
+        rounds: (value) => value + "轮",
+        wan: (value) => value + "万",
         seconds: "秒",
         minutes: "分",
         unavailable: "--",
@@ -212,9 +224,12 @@
         hitRate: "Cache hit",
         task: "Turn usage",
         today: "Today",
-        threeDay: "Last 3 days",
+        yesterday: "Yesterday",
         week: "Last 7 days",
-        partial: "partial",
+        presetTask: "Task",
+        presetToday: "Today",
+        presetYesterday: "Yesterday",
+        presetWeek: "7 days",
         custom: "Range",
         start: "Start",
         end: "End",
@@ -226,16 +241,63 @@
         running: "Live",
         completed: "Turn completed",
         waiting: "Waiting for model-call data",
+        themeDark: "Switch to light theme",
+        themeLight: "Switch to dark theme",
+        turnCalls: "Calls this turn: ",
+        totalCalls: "Total calls",
+        averageSpeed: "avg speed",
       },
+      calls: (value) => value + (value === 1 ? " call" : " calls"),
+      rounds: (value) => value + (value === 1 ? " turn" : " turns"),
+      wan: (value) => (value * 10) + "k",
       seconds: "s",
       minutes: "min",
       unavailable: "--",
     };
   }
 
+  function codexPlusUsageNormalizeTheme(value) {
+    return value === "light" ? "light" : "dark";
+  }
+
+  function codexPlusUsageReadTheme() {
+    try {
+      return codexPlusUsageNormalizeTheme(localStorage.getItem(codexPlusUsageThemeKey));
+    } catch {
+      return "dark";
+    }
+  }
+
+  function codexPlusUsageWriteTheme(theme) {
+    try {
+      localStorage.setItem(codexPlusUsageThemeKey, theme);
+    } catch {
+    }
+  }
+
+  function codexPlusUsageApplyTheme(theme) {
+    const next = codexPlusUsageNormalizeTheme(theme);
+    codexPlusUsageState.theme = next;
+    const popover = codexPlusUsageState.popover;
+    if (popover) popover.dataset.theme = next;
+    const toggle = codexPlusUsageState.popoverParts?.themeToggle;
+    if (!toggle) return;
+    const light = next === "light";
+    const labels = codexPlusUsageText().labels;
+    const label = light ? labels.themeLight : labels.themeDark;
+    toggle.setAttribute("aria-checked", String(light));
+    toggle.setAttribute("aria-label", label);
+    toggle.title = label;
+  }
+
+  function codexPlusUsageSetTheme(theme) {
+    const next = codexPlusUsageNormalizeTheme(theme);
+    codexPlusUsageWriteTheme(next);
+    codexPlusUsageApplyTheme(next);
+  }
+
   function codexPlusUsageInstallStyle() {
     const existing = document.getElementById(codexPlusUsageStyleId);
-    if (existing?.dataset.version === String(codexPlusUsageVersion)) return;
     existing?.remove();
     const style = document.createElement("style");
     style.id = codexPlusUsageStyleId;
@@ -255,45 +317,145 @@
       #${codexPlusUsageStatusLineId} .codex-plus-usage-speed [data-role="needle"]{transform-box:view-box;transform-origin:592.842105px 575.157895px;transition:transform .3s cubic-bezier(.22,1,.36,1);will-change:transform}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-hit{display:inline-flex;align-items:center;gap:3px;opacity:1;white-space:nowrap}
       #${codexPlusUsageStatusLineId} .codex-plus-usage-hit::before{content:"·";margin-right:5px;opacity:.55}
-      #codex-plus-throughput-popover{position:fixed;z-index:2147483400;box-sizing:border-box;width:min(326px,calc(100vw - 24px));max-height:min(76vh,560px);overflow:auto;padding:14px;border:1px solid color-mix(in srgb,var(--color-token-text-primary,#dfdfdf) 12%,transparent);border-radius:8px;background:var(--color-token-bg-primary,#202020);color:var(--color-token-text-primary,#ededed);box-shadow:0 14px 38px rgba(0,0,0,.32);font:12px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums;pointer-events:auto;scrollbar-width:thin}
+      #codex-plus-throughput-popover{position:fixed;z-index:2147483400;box-sizing:border-box;width:min(280px,calc(100vw - 24px));max-height:min(76vh,560px);overflow:auto;padding:12px 10px 10px;border:1px solid #28243a;border-radius:4px;background:#181524;color:#e2e8f0;box-shadow:0 14px 38px rgba(0,0,0,.32);font:12px/1.45 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;font-variant-numeric:tabular-nums;pointer-events:auto;scrollbar-width:thin;color-scheme:dark;transition:background-color .15s ease,border-color .15s ease,color .15s ease}
       #codex-plus-throughput-popover[hidden]{display:none}
-      .codex-plus-throughput-popover-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px}
-      .codex-plus-throughput-popover-title{font-size:14px;font-weight:600;color:var(--color-token-text-primary,#f3f3f3)}
-      .codex-plus-throughput-popover-value{font-size:15px;font-weight:650;color:var(--color-token-text-primary,#f3f3f3);white-space:nowrap}
-      .codex-plus-throughput-context{display:flex;align-items:center;gap:9px;margin:12px 0 14px}
-      .codex-plus-throughput-context-track{flex:1;height:8px;overflow:hidden;border-radius:999px;background:color-mix(in srgb,currentColor 9%,transparent)}
-      .codex-plus-throughput-context-fill{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#2563eb,#60a5fa,#8aa8ff,#c4b5fd);transition:width .18s ease}
-      .codex-plus-throughput-context-value{min-width:68px;color:#8aa8ff;font-size:11px;font-weight:600;text-align:right;white-space:nowrap}
-      .codex-plus-throughput-popover-rows{display:grid;gap:7px}
-      .codex-plus-throughput-popover-row{display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:8px;box-sizing:border-box;min-height:22px}
-      .codex-plus-throughput-popover-row[data-interactive="true"]{margin:-2px -4px;padding:2px 4px;border:0;border-radius:5px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+      .codex-plus-throughput-popover-head{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px;min-height:20px;margin-bottom:8px;line-height:normal}
+      .codex-plus-throughput-popover-head-left{display:flex;align-items:center;min-width:0;gap:6px}
+      .codex-plus-throughput-popover-head-right{display:flex;align-items:baseline;justify-content:flex-start;gap:4px;min-width:0;overflow:hidden;text-align:left;white-space:nowrap}
+      .codex-plus-throughput-popover-title{font-size:13px;font-weight:700;color:#f1f5f9}
+      .codex-plus-throughput-popover-value{font-size:15px;font-weight:800;color:#fff;white-space:nowrap}
+      .codex-plus-throughput-average-separator{color:#6f668d;font-size:12px;font-weight:700}
+      .codex-plus-throughput-average-label{color:#8c84a8;font-size:10.5px;font-weight:500}
+      .codex-plus-throughput-average-value{color:#fff;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}
+      .codex-plus-throughput-theme-toggle{display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;width:34px;height:18px;padding:0;border:0;border-radius:9px;background:transparent;color:inherit;cursor:pointer;outline:none}
+      .codex-plus-throughput-theme-toggle:focus-visible{outline:2px solid #60a5fa;outline-offset:2px}
+      .codex-plus-throughput-theme-track{position:relative;display:flex;box-sizing:border-box;align-items:center;justify-content:space-between;width:34px;height:18px;padding:0 4px;border:1px solid #3c3557;border-radius:9px;background:#211c33;color:#8f86b1;transition:background-color .15s ease,border-color .15s ease}
+      .codex-plus-throughput-theme-icon{position:relative;z-index:1;display:flex;width:9px;height:9px}
+      .codex-plus-throughput-theme-icon svg{display:block;width:9px;height:9px;stroke:currentColor;stroke-width:2.4;fill:none;stroke-linecap:round;stroke-linejoin:round}
+      .codex-plus-throughput-theme-thumb{position:absolute;z-index:0;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:#38bdf8;box-shadow:0 0 5px rgba(56,189,248,.55);transition:transform .18s ease,background-color .15s ease}
+      #codex-plus-throughput-popover[data-theme="dark"] .codex-plus-throughput-theme-moon{color:#e0f2fe}
+      #codex-plus-throughput-popover[data-theme="dark"] .codex-plus-throughput-theme-thumb{transform:translateX(16px)}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-theme-sun{color:#1d4ed8}
+      .codex-plus-throughput-context{display:flex;align-items:center;gap:7px;margin:8px 0 10px}
+      .codex-plus-throughput-context-track{flex:1;height:6px;overflow:hidden;border-radius:2px;background:#2a263c}
+      .codex-plus-throughput-context-fill{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#2563eb,#3b82f6,#818cf8);transition:width .18s ease}
+      .codex-plus-throughput-context-value{min-width:68px;color:#60a5fa;font-size:10.5px;font-weight:700;line-height:normal;text-align:right;white-space:nowrap}
+      .codex-plus-throughput-popover-rows{display:grid;gap:0}
+      .codex-plus-throughput-popover-row{display:grid;grid-template-columns:5px minmax(0,1fr) auto;align-items:center;gap:6px;box-sizing:border-box;width:100%;min-height:23px;padding:3.5px 2px;line-height:normal}
+      .codex-plus-throughput-popover-row[data-interactive="true"]{margin:0;border:0;border-radius:2px;background:transparent;color:inherit;font:inherit;line-height:normal;text-align:left;cursor:pointer}
       .codex-plus-throughput-popover-row[data-interactive="true"]:hover{background:color-mix(in srgb,currentColor 7%,transparent)}
       .codex-plus-throughput-popover-row[data-interactive="true"]:focus-visible{outline:2px solid color-mix(in srgb,currentColor 28%,transparent);outline-offset:0}
       .codex-plus-throughput-popover-row[data-interactive="true"]:disabled{cursor:default;opacity:.72}
       .codex-plus-throughput-popover-row[data-interactive="true"]:disabled:hover{background:transparent}
-      .codex-plus-throughput-popover-dot{width:6px;height:6px;border-radius:50%;background:#60a5fa}
-      .codex-plus-throughput-popover-row[data-row="tool"] .codex-plus-throughput-popover-dot{background:#93c5fd}
-      .codex-plus-throughput-popover-label{min-width:0;color:var(--color-token-text-secondary,rgba(210,210,220,.78));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .codex-plus-throughput-popover-dot{width:5px;height:5px;border-radius:50%;background:#38bdf8;box-shadow:0 0 5px rgba(56,189,248,.85)}
+      .codex-plus-throughput-popover-row[data-row="tool"] .codex-plus-throughput-popover-dot{background:#38bdf8}
+      .codex-plus-throughput-popover-label{min-width:0;color:#cbd5e1;font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       .codex-plus-throughput-popover-number-group{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}
-      .codex-plus-throughput-popover-number{color:var(--color-token-text-primary,#ededed);font-weight:550;white-space:nowrap}
-      .codex-plus-throughput-popover-arrow{width:6px;height:6px;margin-top:-2px;border-right:1.4px solid currentColor;border-bottom:1.4px solid currentColor;transform:rotate(45deg);transition:transform .16s ease;opacity:.62}
+      .codex-plus-throughput-popover-number{color:#fff;font-size:12px;font-weight:700;white-space:nowrap}
+      .codex-plus-throughput-popover-arrow{width:7px;height:7px;margin-top:-2px;border-right:1.6px solid currentColor;border-bottom:1.6px solid currentColor;transform:rotate(45deg);transition:transform .2s ease;opacity:.72}
       .codex-plus-throughput-popover-row[aria-expanded="true"] .codex-plus-throughput-popover-arrow{margin-top:3px;transform:rotate(225deg)}
-      .codex-plus-throughput-popover-rule{height:1px;margin:13px 0 11px;background:color-mix(in srgb,currentColor 10%,transparent)}
-      .codex-plus-throughput-popover-panel{display:grid;gap:5px;margin:4px 0 2px 14px;padding:6px 0 2px}
+      .codex-plus-throughput-popover-rule{height:1px;margin:5px 0;background:#262137}
+      .codex-plus-throughput-popover-panel{display:block;box-sizing:border-box;margin:2px 0 4px;padding:5px 6px;border:1px solid #28233d;border-radius:3px;background:#141120;font-size:10.5px;line-height:normal}
       .codex-plus-throughput-popover-panel[hidden]{display:none}
-      .codex-plus-throughput-tool-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;color:var(--color-token-text-tertiary,rgba(200,200,210,.68));font-size:11px}
+      .codex-plus-throughput-tool-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;padding:2.5px 0;border-bottom:1px dashed rgba(255,255,255,.05);color:#94a3b8;font-size:10.5px;line-height:normal}
+      .codex-plus-throughput-tool-row:last-child{border-bottom:0}
       .codex-plus-throughput-tool-row span{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .codex-plus-throughput-tool-row span:last-child{color:var(--color-token-text-secondary,rgba(210,210,220,.86));font-weight:600}
-      .codex-plus-throughput-presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;padding:2px;border-radius:6px;background:color-mix(in srgb,currentColor 7%,transparent)}
-      .codex-plus-throughput-preset{min-width:0;height:24px;padding:0 4px;border:0;border-radius:4px;background:transparent;color:var(--color-token-text-secondary,rgba(210,210,220,.78));font:inherit;font-size:11px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .codex-plus-throughput-preset:hover{background:color-mix(in srgb,currentColor 7%,transparent)}
-      .codex-plus-throughput-preset[aria-pressed="true"]{background:color-mix(in srgb,var(--color-token-text-primary,#ededed) 12%,transparent);color:var(--color-token-text-primary,#f3f3f3);font-weight:650}
+      .codex-plus-throughput-tool-row span:last-child{color:#cbd5e1;font-weight:600}
+      .codex-plus-throughput-presets{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;margin-bottom:4px;padding:0;border-radius:0;background:transparent}
+      .codex-plus-throughput-preset{min-width:0;height:auto;padding:2.5px 0;border:1px solid #312b4d;border-radius:2px;background:#1f1a32;color:#cbd5e1;font:inherit;font-size:9.5px;line-height:normal;text-align:center;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .codex-plus-throughput-preset:hover{background:#27203d}
+      .codex-plus-throughput-preset[aria-pressed="true"]{border-color:#60a5fa;background:#3b82f6;color:#fff;font-weight:700}
       .codex-plus-throughput-preset:focus-visible{outline:2px solid color-mix(in srgb,currentColor 28%,transparent);outline-offset:0}
-      .codex-plus-throughput-custom{display:grid;gap:4px;margin-top:2px}
-      .codex-plus-throughput-time{display:grid;grid-template-columns:30px minmax(0,1fr);align-items:center;gap:5px;color:var(--color-token-text-tertiary,rgba(200,200,210,.68));font-size:10.5px}
-      .codex-plus-throughput-time input{box-sizing:border-box;width:100%;min-width:0;height:26px;padding:2px 5px;border:1px solid color-mix(in srgb,currentColor 12%,transparent);border-radius:5px;background:color-mix(in srgb,currentColor 4%,transparent);color:var(--color-token-text-primary,#ededed);font:inherit;font-size:10.5px;color-scheme:dark light}
+      .codex-plus-throughput-custom{display:grid;gap:3px;margin-top:0}
+      .codex-plus-throughput-time{display:grid;grid-template-columns:minmax(0,1fr) 130px;align-items:center;gap:5px;min-height:19px;color:#94a3b8;font-size:9.5px;line-height:normal}
+      .codex-plus-throughput-time input{box-sizing:border-box;width:130px;min-width:0;min-height:19px;padding:1.5px 3px;border:1px solid #332d50;border-radius:2px;background:#191528;color:#f1f5f9;font:inherit;font-size:9px;line-height:normal;color-scheme:dark light;outline:none}
       .codex-plus-throughput-time input:focus{outline:2px solid color-mix(in srgb,currentColor 28%,transparent);outline-offset:0}
+      .codex-plus-throughput-analytics{box-sizing:border-box;margin-top:6px;padding-top:6px;border-top:1px solid #28233d}
+      .codex-plus-throughput-turn-status{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;padding:0 1px 4px;color:#e2e8f0;font-size:11.4px;line-height:1}
+      .codex-plus-throughput-turn-left,.codex-plus-throughput-turn-right{display:flex;align-items:baseline;gap:2px}
+      .codex-plus-throughput-turn-label{color:#8c84a8;font-weight:500}
+      .codex-plus-throughput-turn-call{color:#38bdf8;font-weight:700;font-variant-numeric:tabular-nums}
+      .codex-plus-throughput-turn-slash{color:#554e70;margin:0 1px;font-weight:700}
+      .codex-plus-throughput-turn-round{color:#cbd5e1;font-weight:700;font-variant-numeric:tabular-nums}
+      .codex-plus-throughput-turn-total{color:#fff;font-weight:700;font-variant-numeric:tabular-nums}
+      .codex-plus-throughput-top{display:flex;align-items:baseline;justify-content:space-between;width:100%;padding:0 1px 7px;font-size:11.04px;line-height:1;white-space:nowrap}
+      .codex-plus-throughput-top-segment{display:flex;align-items:baseline;gap:1.5px;font-variant-numeric:tabular-nums}
+      .codex-plus-throughput-top-label{font-weight:700}
+      .codex-plus-throughput-top-segment:nth-child(1) .codex-plus-throughput-top-label{color:#fbbf24}
+      .codex-plus-throughput-top-segment:nth-child(2) .codex-plus-throughput-top-label{color:#94a3b8}
+      .codex-plus-throughput-top-segment:nth-child(3) .codex-plus-throughput-top-label{color:#f59e0b}
+      .codex-plus-throughput-top-value{color:#fff;font-weight:700}
+      .codex-plus-throughput-top-value[data-field="top1Tokens"]{color:#fde68a}
+      .codex-plus-throughput-top-value[data-field="top2Tokens"]{color:#cbd5e1}
+      .codex-plus-throughput-top-value[data-field="top3Tokens"]{color:#fca5a5}
+      .codex-plus-throughput-chart{display:flex;width:100%;height:78px;position:relative}
+      .codex-plus-throughput-axis-y{width:22px;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-start;padding-bottom:11px;color:#b8b2cf;font-size:8.5px;font-weight:700;line-height:normal;font-variant-numeric:tabular-nums;white-space:nowrap;user-select:none}
+      .codex-plus-throughput-chart-main{flex:1;min-width:0;height:100%;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:#3b3554 transparent}
+      .codex-plus-throughput-chart-main::-webkit-scrollbar{height:3px}
+      .codex-plus-throughput-chart-main::-webkit-scrollbar-thumb{border-radius:2px;background:#3b3554}
+      .codex-plus-throughput-chart-main::-webkit-scrollbar-track{background:transparent}
+      .codex-plus-throughput-chart-track{display:flex;flex-direction:column;box-sizing:border-box;min-width:100%;height:100%}
+      .codex-plus-throughput-bars{display:grid;flex:1;grid-template-columns:repeat(var(--chart-count,20),minmax(0,1fr));min-height:0;align-items:end;gap:1.5px;padding:0;position:relative;background:repeating-linear-gradient(0deg,transparent,transparent 16px,rgba(255,255,255,.02) 16px,rgba(255,255,255,.02) 17px)}
+      .codex-plus-throughput-bar-col{display:flex;min-width:0;height:100%;flex-direction:column;justify-content:flex-end;align-items:center;position:relative;cursor:pointer}
+      .codex-plus-throughput-bar{width:100%;border-radius:1px 1px 0 0;background:linear-gradient(180deg,#38bdf8,#2563eb);transition:filter .12s ease}
+      .codex-plus-throughput-bar-col:hover .codex-plus-throughput-bar{filter:brightness(1.35)}
+      .codex-plus-throughput-bar-col.is-top1 .codex-plus-throughput-bar{background:linear-gradient(180deg,#f59e0b,#d97706)}
+      .codex-plus-throughput-bar-col.is-top2 .codex-plus-throughput-bar{background:linear-gradient(180deg,#94a3b8,#64748b)}
+      .codex-plus-throughput-bar-col.is-top3 .codex-plus-throughput-bar{background:linear-gradient(180deg,#d97706,#b45309)}
+      .codex-plus-throughput-bar-col.is-current .codex-plus-throughput-bar{background:linear-gradient(180deg,#a855f7,#6366f1)}
+      .codex-plus-throughput-bar-tooltip{position:absolute;bottom:calc(100% + 2px);left:50%;transform:translateX(-50%);z-index:20;padding:1.5px 3px;border:1px solid #3d345c;border-radius:2px;background:#090710;color:#38bdf8;font-size:7.5px;font-weight:700;white-space:nowrap;pointer-events:none;opacity:0;visibility:hidden}
+      .codex-plus-throughput-bar-col:hover .codex-plus-throughput-bar-tooltip{opacity:1;visibility:visible}
+      .codex-plus-throughput-bar-col:nth-child(-n+4) .codex-plus-throughput-bar-tooltip{left:0;transform:none}
+      .codex-plus-throughput-bar-col:nth-last-child(-n+4) .codex-plus-throughput-bar-tooltip{left:auto;right:0;transform:none}
+      .codex-plus-throughput-bar-col[data-empty="true"]{cursor:default}
+      .codex-plus-throughput-bar-col[data-empty="true"] .codex-plus-throughput-bar-tooltip{display:none}
+      .codex-plus-throughput-axis-x{display:grid;grid-template-columns:repeat(var(--chart-count,20),minmax(0,1fr));gap:1.5px;height:11px;align-items:center;padding:0}
+      .codex-plus-throughput-x-index{min-width:0;text-align:center;color:#b8b2cf;font-size:8.5px;font-weight:700;font-variant-numeric:tabular-nums}
+      .codex-plus-throughput-x-index.current{color:#c084fc;font-weight:700}
       .codex-plus-throughput-popover-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;color:var(--color-token-text-tertiary,rgba(200,200,210,.62));font-size:11px}
+      #codex-plus-throughput-popover[data-theme="light"]{border-color:#d5dbe6;background:#f7f8fb;color:#1f2937;box-shadow:0 14px 38px rgba(15,23,42,.16);color-scheme:light}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-popover-title{color:#111827}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-popover-value{color:#0f172a}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-average-separator{color:#94a3b8}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-average-label{color:#64748b}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-average-value{color:#0f172a}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-theme-track{border-color:#bfc9d8;background:#e7edf5}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-theme-icon{color:#64748b}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-theme-thumb{background:#2563eb;box-shadow:0 1px 4px rgba(37,99,235,.32)}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-context-track{background:#dfe5ee}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-context-value{color:#2563eb}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-popover-row[data-interactive="true"]:hover{background:rgba(37,99,235,.06)}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-popover-dot{background:#2563eb;box-shadow:none}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-popover-label{color:#475569}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-popover-number{color:#111827}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-popover-rule{background:#e1e6ee}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-popover-panel{border-color:#dbe1ea;background:#fff}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-tool-row{border-bottom-color:rgba(15,23,42,.07);color:#64748b}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-tool-row span:last-child{color:#334155}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-preset{border-color:#cbd5e1;background:#fff;color:#334155}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-preset:hover{background:#eef4fb}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-preset[aria-pressed="true"]{border-color:#2563eb;background:#e8f0fe;color:#1d4ed8}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-time{color:#64748b}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-time input{border-color:#cbd5e1;background:#fff;color:#111827;color-scheme:light}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-analytics{border-top-color:#dfe5ee}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-turn-status{color:#334155}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-turn-label{color:#64748b}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-turn-call{color:#2563eb}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-turn-slash{color:#94a3b8}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-turn-round{color:#334155}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-turn-total{color:#0f172a}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-top-segment:nth-child(1) .codex-plus-throughput-top-label{color:#b45309}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-top-segment:nth-child(2) .codex-plus-throughput-top-label{color:#64748b}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-top-segment:nth-child(3) .codex-plus-throughput-top-label{color:#c2410c}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-top-value{color:#0f172a}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-top-value[data-field="top1Tokens"]{color:#b45309}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-top-value[data-field="top2Tokens"]{color:#475569}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-top-value[data-field="top3Tokens"]{color:#b91c1c}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-axis-y,
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-x-index{color:#475569}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-x-index.current{color:#7c3aed}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-bars{background:repeating-linear-gradient(0deg,transparent,transparent 16px,rgba(15,23,42,.055) 16px,rgba(15,23,42,.055) 17px)}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-bar-tooltip{border-color:#cbd5e1;background:#fff;color:#0369a1;box-shadow:0 2px 8px rgba(15,23,42,.12)}
     `;
     document.head?.appendChild(style);
   }
@@ -549,17 +711,6 @@
     return total + end - start;
   }
 
-  function codexPlusUsageToolDurationBetween(turn, start, end) {
-    if (!(end > start)) return 0;
-    const intervals = turn?.toolIntervals?.slice?.() || [];
-    for (const tool of turn?.activeTools?.values?.() || []) {
-      if (Number.isFinite(tool?.startedAt)) intervals.push([tool.startedAt, end]);
-    }
-    return codexPlusUsageMergedDuration(intervals
-      .filter((interval) => Array.isArray(interval) && interval[1] > start && interval[0] < end)
-      .map((interval) => [Math.max(start, interval[0]), Math.min(end, interval[1])]));
-  }
-
   function codexPlusUsageSameTotals(left, right) {
     if (!left || !right) return false;
     return ["input", "cached", "output", "total"].every((key) => left[key] === right[key]);
@@ -577,6 +728,7 @@
       cachedInputTokens: 0,
       totalTokens: 0,
       usageSamples: 0,
+      lastCallTokens: null,
       totalOutputSeen: Number.isFinite(totalOutputSeen) ? totalOutputSeen : null,
       totalInputSeen: Number.isFinite(totalUsageSeen?.input) ? totalUsageSeen.input : null,
       totalCachedInputSeen: Number.isFinite(totalUsageSeen?.cached) ? totalUsageSeen.cached : null,
@@ -586,14 +738,14 @@
       firstTokenAt: null,
       decodeStartedAt: null,
       decodeMs: 0,
-      speedSamples: [],
-      speedIntervalStartedAt: Number.isFinite(startedAt) ? startedAt : Date.now(),
+      decodeOutputTokens: 0,
       activeSkills: [],
       historySeeded: false,
       observedFromStart: false,
       lastHistorySample: null,
       skipMatchingUsage: false,
       appliedTotals: new Set(),
+      callSamples: [],
       toolIntervals: [],
       toolDetails: [],
       activeTools: new Map(),
@@ -613,6 +765,32 @@
       codexPlusUsageRecordTool(turn, id, tool, tool?.startedAt, at);
     }
     turn.activeTools.clear();
+  }
+
+  function codexPlusUsageCallSample(turn, previous, deltas, at, current) {
+    const value = (key) => {
+      const lastCall = Number(previous?.[key]);
+      if (Number.isFinite(lastCall) && lastCall > 0) return lastCall;
+      return Math.max(0, Number(deltas?.[key]) || 0);
+    };
+    const sample = {
+      turnId: String(turn?.turnId || ""),
+      observedAt: Number.isFinite(at) ? at : Date.now(),
+      input: value("input"),
+      cached: value("cached"),
+      output: value("output"),
+      total: value("total"),
+      contextTokens: Number(current?.total) > 0 ? current.total : Number(previous?.total) || 0,
+    };
+    return sample.total > 0 ? sample : null;
+  }
+
+  function codexPlusUsageRememberCallSample(turn, sample) {
+    if (!turn || !sample) return;
+    turn.callSamples.push(sample);
+    if (turn.callSamples.length > codexPlusUsageMaxLiveSamples) {
+      turn.callSamples.splice(0, turn.callSamples.length - codexPlusUsageMaxLiveSamples);
+    }
   }
 
   function codexPlusUsageRecordTool(turn, id, kind, startedAt, endedAt, durationMs = null) {
@@ -744,10 +922,9 @@
       const contextWindow = codexPlusUsageNumber(usage.modelContextWindow ?? usage.model_context_window);
       if (contextWindow && contextWindow > 0) turn.contextWindow = contextWindow;
       const contextTokens = previous.total ?? current.total;
-      if (contextTokens != null) turn.contextTokens = Math.max(turn.contextTokens || 0, contextTokens);
+      if (contextTokens != null) turn.contextTokens = contextTokens;
       // 同一累计值已经计入过就整条丢弃，重放的旧通知不再重复累加。
       if (current.total != null && turn.appliedTotals?.has(current.total)) {
-        turn.speedIntervalStartedAt = at;
         return turn;
       }
       const samples = [
@@ -765,14 +942,11 @@
         if (current.total != null) turn.appliedTotals?.add(current.total);
         turn.skipMatchingUsage = false;
         turn.lastHistorySample = null;
-        turn.speedIntervalStartedAt = at;
         return turn;
       }
-      const intervalStartedAt = Number.isFinite(turn.speedIntervalStartedAt)
-        ? turn.speedIntervalStartedAt
-        : turn.startedAt;
       let changed = false;
       let outputDelta = 0;
+      const deltas = { input: 0, cached: 0, output: 0, total: 0 };
       for (const [field, seenField, current, lastValue] of samples) {
         if (current == null) continue;
         if (turn[seenField] == null || current < turn[seenField]) {
@@ -781,6 +955,7 @@
         const delta = Math.max(0, current - turn[seenField]);
         if (delta > 0) {
           turn[field] += delta;
+          deltas[field] += delta;
           if (field === "outputTokens") outputDelta = delta;
           changed = true;
         }
@@ -792,17 +967,17 @@
       }
       if (changed) {
         turn.usageSamples += 1;
+        codexPlusUsageRememberCallSample(
+          turn,
+          codexPlusUsageCallSample(turn, previous, deltas, at, current),
+        );
+        const lastCallTokens = previous.total > 0 ? previous.total : outputDelta;
+        if (lastCallTokens > 0) turn.lastCallTokens = lastCallTokens;
         const output = previous.output > 0 ? previous.output : outputDelta;
-        const toolMs = codexPlusUsageToolDurationBetween(turn, intervalStartedAt, at);
-        const latencyMs = Math.max(0, at - intervalStartedAt - toolMs);
-        if (output > 0 && latencyMs >= 250) {
-          turn.speedSamples.push({ outputTokens: output, latencyMs });
-          if (turn.speedSamples.length > 24) turn.speedSamples.shift();
-        }
+        if (output > 0 && (turn.decodeMs > 0 || turn.decodeStartedAt != null)) turn.decodeOutputTokens += output;
       }
       turn.skipMatchingUsage = false;
       turn.lastHistorySample = null;
-      turn.speedIntervalStartedAt = at;
       return turn;
     }
 
@@ -820,6 +995,64 @@
     return turn;
   }
 
+  function codexPlusUsageDecodeSpeed(outputTokens, decodeMs) {
+    return outputTokens > 0 && decodeMs > 0 ? outputTokens / (decodeMs / 1000) : null;
+  }
+
+  function codexPlusUsageAverageSpeed(decodeOutputTokens, decodeMs) {
+    return codexPlusUsageDecodeSpeed(decodeOutputTokens, decodeMs);
+  }
+
+  function codexPlusUsageFormatSpeed(value) {
+    const clamped = Math.max(0, Number(value) || 0);
+    return clamped >= 10 ? String(Math.round(clamped)) : String(Math.round(clamped * 10) / 10);
+  }
+
+  function codexPlusUsageContextSnapshot(turn, liveContext) {
+    const currentWindow = codexPlusUsageNumber(
+      liveContext?.contextWindow
+      ?? liveContext?.modelContextWindow
+      ?? liveContext?.context_window,
+    );
+    const currentTokens = codexPlusUsageNumber(
+      liveContext?.contextTokens
+      ?? liveContext?.contextUsed
+      ?? liveContext?.context_used
+      ?? liveContext?.totalTokens,
+    );
+    const window = currentWindow > 0 ? currentWindow : turn?.contextWindow;
+    const tokens = currentTokens ?? codexPlusUsageNumber(turn?.contextTokens);
+    const percent = window > 0 && tokens != null
+      ? codexPlusUsageClamp(tokens / window * 100, 0, 100)
+      : null;
+    return { percent, window, tokens };
+  }
+
+  function codexPlusUsageLatestLiveContext(events) {
+    if (!Array.isArray(events)) return null;
+    let contextTokens = null;
+    let contextWindow = null;
+    for (const event of events) {
+      const tokens = codexPlusUsageNumber(
+        event?.total_tokens
+        ?? event?.totalTokens
+        ?? event?.context_tokens
+        ?? event?.contextTokens,
+      );
+      const window = codexPlusUsageNumber(
+        event?.context_window
+        ?? event?.contextWindow
+        ?? event?.model_context_window
+        ?? event?.modelContextWindow,
+      );
+      if (tokens != null) contextTokens = tokens;
+      if (window > 0) contextWindow = window;
+    }
+    return contextTokens != null || contextWindow != null
+      ? { contextTokens, contextWindow }
+      : null;
+  }
+
   function codexPlusUsageTurnSnapshot(turn, now) {
     if (!turn) return null;
     const at = Number.isFinite(now) ? now : Date.now();
@@ -834,8 +1067,6 @@
     const toolMs = codexPlusUsageMergedDuration(intervals);
     const ttftMs = turn.firstTokenAt == null ? null : codexPlusUsageClamp(turn.firstTokenAt - turn.startedAt, 0, turnMs);
     const otherMs = Math.max(0, turnMs - (ttftMs || 0) - decodeMs - toolMs);
-    const speedOutput = turn.speedSamples.reduce((total, sample) => total + sample.outputTokens, 0);
-    const speedDuration = turn.speedSamples.reduce((total, sample) => total + sample.latencyMs, 0);
     const toolCalls = new Map();
     const addToolCall = (detail, detailEnd = end) => {
       if (!detail) return;
@@ -886,11 +1117,16 @@
       .sort((left, right) => right.durationMs - left.durationMs
         || right.count - left.count
         || left.label.localeCompare(right.label));
-    const contextPercent = turn.contextWindow > 0 && turn.contextTokens != null
-      ? codexPlusUsageClamp(turn.contextTokens / turn.contextWindow * 100, 0, 100)
-      : null;
+    const context = codexPlusUsageContextSnapshot(
+      turn,
+      codexPlusUsageState.liveContextByThread.get(turn.threadId),
+    );
     return {
-      speed: speedDuration > 0 && speedOutput > 0 ? speedOutput / (speedDuration / 1000) : null,
+      speed: codexPlusUsageDecodeSpeed(turn.decodeOutputTokens, decodeMs),
+      averageSpeed: codexPlusUsageAverageSpeed(
+        turn.decodeOutputTokens,
+        decodeMs,
+      ),
       ttftMs,
       decodeMs,
       toolMs,
@@ -899,8 +1135,10 @@
       startedAt: turn.startedAt,
       endedAt: end,
       outputTokens: turn.outputTokens,
-      contextPercent,
-      contextWindow: turn.contextWindow,
+      lastCallTokens: turn.lastCallTokens,
+      callSamples: turn.callSamples.slice(-codexPlusUsageMaxLiveSamples),
+      contextPercent: context.percent,
+      contextWindow: context.window,
       toolDetails,
       usage: {
         input: turn.inputTokens,
@@ -941,7 +1179,32 @@
         ?? row?.usage?.modelContextWindow
         ?? row?.usage?.model_context_window,
       );
-      samples.push({ observedAt, turnId, ...usage, contextTokens: usage.total, contextWindow });
+      samples.push({ observedAt, turnId, ...usage, contextTokens: cumulative ?? usage.total, contextWindow });
+    }
+    return samples.sort((left, right) => left.observedAt - right.observedAt);
+  }
+
+  function codexPlusUsageMergeHistorySamples(...collections) {
+    const samples = [];
+    const seen = new Set();
+    for (const collection of collections) {
+      for (const sample of Array.isArray(collection) ? collection : []) {
+        const turnId = String(sample?.turnId || "");
+        const cumulative = codexPlusUsageNumber(sample?.contextTokens ?? sample?.contextUsed);
+        const key = cumulative != null
+          ? [turnId, cumulative, sample.input, sample.cached, sample.output, sample.total].join("|")
+          : [
+            turnId,
+            Number.isFinite(sample?.observedAt) ? sample.observedAt : "",
+            sample?.input,
+            sample?.cached,
+            sample?.output,
+            sample?.total,
+          ].join("|");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        samples.push(sample);
+      }
     }
     return samples.sort((left, right) => left.observedAt - right.observedAt);
   }
@@ -975,6 +1238,7 @@
     turn.lastHistorySample = { ...attempts[attempts.length - 1] };
     turn.skipMatchingUsage = true;
     const latest = attempts[attempts.length - 1];
+    if (latest.total > 0) turn.lastCallTokens = latest.total;
     if (latest.contextTokens != null) turn.contextTokens = latest.contextTokens;
     if (latest.contextWindow && latest.contextWindow > 0) turn.contextWindow = latest.contextWindow;
     if (!live || live.turnId !== turnId) {
@@ -982,7 +1246,6 @@
       turn.completedAt = attempts[attempts.length - 1].observedAt;
       turn.lastEventAt = turn.completedAt;
       turn.status = "completed";
-      turn.speedIntervalStartedAt = turn.completedAt;
     }
     codexPlusUsageRememberTurn(turn);
   }
@@ -1014,7 +1277,7 @@
     const dayMs = 24 * 60 * 60 * 1000;
     const today = codexPlusUsageBeijingDayStart(now);
     if (range === "today") return { start: today, end: now };
-    if (range === "threeDay") return { start: today - 2 * dayMs, end: now };
+    if (range === "yesterday") return { start: today - dayMs, end: today - 1 };
     if (range === "week") return { start: today - 6 * dayMs, end: now };
     if (range === "custom") {
       const start = codexPlusUsageBeijingDate(codexPlusUsageState.customStart);
@@ -1026,7 +1289,7 @@
   }
 
   function codexPlusUsageIsGlobalRange(range) {
-    return range === "today" || range === "threeDay" || range === "week";
+    return range === "today" || range === "yesterday" || range === "week" || range === "custom";
   }
 
   function codexPlusUsageBeijingDateKey(value) {
@@ -1035,203 +1298,36 @@
     return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
   }
 
-  function codexPlusUsageAbsoluteUrl(value) {
-    try {
-      return new URL(String(value || ""), document.baseURI || location.href).href;
-    } catch {
-      return "";
+  function codexPlusUsageGlobalDateKeys(startAt, endAt) {
+    if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || endAt < startAt) return [];
+    const dayMs = 24 * 60 * 60 * 1000;
+    let cursor = codexPlusUsageBeijingDayStart(startAt);
+    const last = codexPlusUsageBeijingDayStart(endAt);
+    const keys = [];
+    while (cursor <= last && keys.length < 370) {
+      keys.push(codexPlusUsageBeijingDateKey(cursor));
+      cursor += dayMs;
     }
+    return keys;
   }
 
-  function codexPlusUsageLoadedAssetUrls() {
-    const urls = new Set();
-    for (const node of document.querySelectorAll("script[src],link[href]")) {
-      const url = codexPlusUsageAbsoluteUrl(node.src || node.href);
-      if (/\/assets\/.+\.js(?:$|\?)/.test(url)) urls.add(url);
-    }
-    try {
-      for (const entry of performance.getEntriesByType?.("resource") || []) {
-        const url = codexPlusUsageAbsoluteUrl(entry.name);
-        if (/\/assets\/.+\.js(?:$|\?)/.test(url)) urls.add(url);
-      }
-    } catch {
-    }
-    return [...urls];
-  }
-
-  async function codexPlusUsageResolveAppServices() {
-    if (codexPlusUsageState.globalAppServicesPromise) return codexPlusUsageState.globalAppServicesPromise;
-    codexPlusUsageState.globalAppServicesPromise = (async () => {
-      const urls = codexPlusUsageLoadedAssetUrls().filter((url) => /\/assets\/rpc-[^/]+\.js(?:$|\?)/.test(url));
-      for (const url of urls) {
-        try {
-          const moduleExports = await import(/* @vite-ignore */ url);
-          if (moduleExports?.appServices?.localThreadCatalog) return moduleExports.appServices;
-        } catch {
-        }
-      }
-      return null;
-    })();
-    return codexPlusUsageState.globalAppServicesPromise;
-  }
-
-  function codexPlusUsageThreadTimestamp(value) {
-    if (typeof value === "number") return value < 1e12 ? value * 1000 : value;
-    const parsed = Date.parse(String(value || ""));
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-
-  function codexPlusUsageUuidTime(value) {
-    const compact = String(value || "").replace(/-/g, "");
-    if (!/^[0-9a-f]{12}/i.test(compact) || compact[12]?.toLowerCase() !== "7") return 0;
-    return Number.parseInt(compact.slice(0, 12), 16) || 0;
-  }
-
-  function codexPlusUsageThreadIdentity(entry) {
-    return codexPlusUsageNormalizeThreadId(
-      entry?.id || entry?.threadId || entry?.thread_id || entry?.conversationId || entry?.conversation_id,
-    );
-  }
-
-  function codexPlusUsageThreadUpdatedAt(entry) {
-    return codexPlusUsageThreadTimestamp(
-      entry?.updatedAt
-      ?? entry?.updated_at
-      ?? entry?.lastUpdatedAt
-      ?? entry?.last_updated_at
-      ?? entry?.sourceUpdatedAt
-      ?? entry?.sourceRecencyAt
-      ?? entry?.createdAt
-      ?? entry?.created_at,
-    ) || codexPlusUsageUuidTime(codexPlusUsageThreadIdentity(entry));
-  }
-
-  function codexPlusUsageBootstrapThreadIds(bootstrap) {
-    const ids = new Set();
-    for (const entry of bootstrap?.catalogEntries || []) {
-      const id = codexPlusUsageThreadIdentity(entry);
-      if (id) ids.add(id);
-    }
-    const trackedKeys = new Set(["projectless-thread-ids", "thread-workspace-root-hints", "thread-project-assignments"]);
-    for (const entry of bootstrap?.globalStateEntries || []) {
-      if (!trackedKeys.has(entry?.key)) continue;
-      const values = Array.isArray(entry.value) ? entry.value : Object.keys(entry.value || {});
-      for (const value of values) {
-        const id = codexPlusUsageNormalizeThreadId(value);
-        if (id) ids.add(id);
-      }
-    }
-    return [...ids];
-  }
-
-  async function codexPlusUsageRecentThreadIds() {
-    const services = await codexPlusUsageResolveAppServices();
-    const bootstrap = await window.electronBridge?.getInitialSidebarBootstrap?.();
-    if (!services?.localThreadCatalog || !bootstrap) return [];
-    const ids = new Set(codexPlusUsageBootstrapThreadIds(bootstrap));
-    const entries = new Map();
-    for (const entry of bootstrap.catalogEntries || []) {
-      const id = codexPlusUsageThreadIdentity(entry);
-      if (id) entries.set(id, entry);
-    }
-    const allIds = [...ids];
-    for (let offset = 0; offset < allIds.length; offset += 100) {
-      const refs = allIds.slice(offset, offset + 100).map((threadId) => ({ hostId: "local", threadId }));
-      try {
-        const rows = await services.localThreadCatalog.readEntries(refs);
-        for (const entry of rows || []) {
-          const id = codexPlusUsageThreadIdentity(entry);
-          if (id) {
-            ids.add(id);
-            entries.set(id, entry);
-          }
-        }
-      } catch {
-      }
-    }
-    const minimum = codexPlusUsageBeijingDayStart(Date.now()) - 6 * 24 * 60 * 60 * 1000;
-    const recent = [...ids]
-      .map((id) => ({ id, updatedAt: codexPlusUsageThreadUpdatedAt(entries.get(id) || { id }) }))
-      .filter((entry) => entry.updatedAt >= minimum)
-      .sort((left, right) => right.updatedAt - left.updatedAt);
-    codexPlusUsageState.globalUsageTruncated = recent.length > 200;
-    return recent.slice(0, 200);
-  }
-
-  async function codexPlusUsageMapLimit(items, limit, mapper) {
-    const results = new Array(items.length);
-    let index = 0;
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
-      while (index < items.length) {
-        const current = index;
-        index += 1;
-        results[current] = await mapper(items[current]);
-      }
-    }));
-    return results;
-  }
-
-  async function codexPlusUsageScanGlobalSessions() {
-    const threads = await codexPlusUsageRecentThreadIds();
-    if (!threads.length || typeof window.codexPlus?.call !== "function") {
-      return { samples: [], threadsRead: 0 };
-    }
-    let threadsRead = 0;
-    const seen = new Set();
-    const samples = [];
-    const cachedByThread = codexPlusUsageState.globalUsageByThread;
-    for (const key of cachedByThread.keys()) {
-      if (!threads.some((thread) => thread.id === key)) cachedByThread.delete(key);
-    }
-    const results = await codexPlusUsageMapLimit(threads, 2, async ({ id: threadId, updatedAt }) => {
-      const cached = cachedByThread.get(threadId);
-      if (cached && cached.updatedAt === updatedAt) {
-        threadsRead += 1;
-        return cached.samples;
-      }
-      try {
-        const result = await window.codexPlus.call("/thread-usage-history", { session_id: threadId });
-        threadsRead += 1;
-        const threadSamples = codexPlusUsageHistorySamples(result).map((sample) => ({ ...sample, threadId }));
-        cachedByThread.set(threadId, { updatedAt, samples: threadSamples });
-        return threadSamples;
-      } catch {
-        return [];
-      }
-    });
-    for (const threadSamples of results) {
-      for (const sample of threadSamples) {
-        const key = [sample.threadId, sample.turnId, sample.observedAt, sample.input, sample.cached, sample.output, sample.total].join("|");
-        if (seen.has(key)) continue;
-        seen.add(key);
-        samples.push(sample);
-      }
-    }
-    samples.sort((left, right) => left.observedAt - right.observedAt);
-    return { samples, threadsRead };
-  }
-
-  function codexPlusUsageGlobalTotal(range, now = Date.now()) {
+  function codexPlusUsageGlobalTotal(range, now = Date.now(), api = window[codexPlusUsageGlobalApiKey]) {
     const bounds = codexPlusUsageRangeBounds(range, now);
     if (!bounds) return null;
-    if (codexPlusUsageState.globalUsageScanned) {
-      return codexPlusUsageState.globalUsageSamples
-        .filter((sample) => sample.observedAt >= bounds.start && sample.observedAt <= bounds.end)
-        .reduce((total, sample) => total + sample.total, 0);
-    }
     if (!codexPlusUsageIsGlobalRange(range)) return null;
-    const api = window[codexPlusUsageGlobalApiKey];
     if (typeof api?.getSnapshot !== "function") return null;
-    const dayMs = 24 * 60 * 60 * 1000;
-    const count = range === "today" ? 1 : range === "threeDay" ? 3 : 7;
-    const today = codexPlusUsageBeijingDayStart(now);
+    const keys = codexPlusUsageGlobalDateKeys(bounds.start, bounds.end);
+    if (!keys.length) return null;
     let total = 0;
-    for (let index = 0; index < count; index += 1) {
-      const snapshot = api.getSnapshot(codexPlusUsageBeijingDateKey(today - index * dayMs));
-      if (!Number.isFinite(snapshot?.total)) return null;
+    let available = 0;
+    for (const key of keys) {
+      const snapshot = api.getSnapshot(key);
+      if (snapshot?.dateKey !== key || !Number.isFinite(snapshot?.total)) continue;
+      available += 1;
       total += snapshot.total;
     }
-    return total;
+    codexPlusUsageState.globalUsageCoverage = { available, total: keys.length };
+    return available ? total : null;
   }
 
   async function codexPlusUsageRefreshGlobalUsage(force = false) {
@@ -1240,20 +1336,10 @@
     codexPlusUsageState.globalUsageLoading = true;
     codexPlusUsageState.globalUsageError = "";
     codexPlusUsageState.globalUsagePromise = (async () => {
-      try {
-        const scan = await codexPlusUsageScanGlobalSessions();
-        if (!scan.threadsRead) throw new Error("未找到可读取的 Codex 会话");
-        codexPlusUsageState.globalUsageSamples = scan.samples;
-        codexPlusUsageState.globalUsageScanned = true;
-        codexPlusUsageState.globalUsageFetchedAt = Date.now();
-      } catch (scanError) {
-        const api = window[codexPlusUsageGlobalApiKey];
-        if (typeof api?.runHistoryBackfill !== "function") throw scanError;
-        await api.runHistoryBackfill();
-        codexPlusUsageState.globalUsageSamples = [];
-        codexPlusUsageState.globalUsageScanned = false;
-        codexPlusUsageState.globalUsageFetchedAt = Date.now();
-      }
+      const api = window[codexPlusUsageGlobalApiKey];
+      if (typeof api?.getSnapshot !== "function") throw new Error("未找到每日消耗数据源");
+      if (typeof api.runHistoryBackfill === "function") await api.runHistoryBackfill();
+      codexPlusUsageState.globalUsageFetchedAt = Date.now();
     })().catch((error) => {
       codexPlusUsageState.globalUsageError = String(error?.message || error);
     }).finally(() => {
@@ -1271,9 +1357,60 @@
     if (codexPlusUsageState.range === "task") {
       return { label: text.labels.task, value: snapshot?.usage?.total ?? null };
     }
+    const value = codexPlusUsageGlobalTotal(codexPlusUsageState.range);
     const base = text.labels[codexPlusUsageState.range] || text.labels.custom;
-    const label = codexPlusUsageState.globalUsageTruncated ? `${base}（${text.labels.partial}）` : base;
-    return { label, value: codexPlusUsageGlobalTotal(codexPlusUsageState.range) };
+    const coverage = codexPlusUsageState.globalUsageCoverage;
+    return {
+      label: coverage.total > coverage.available
+        ? `${base}（${coverage.available}/${coverage.total}）`
+        : base,
+      value,
+    };
+  }
+
+  function codexPlusUsageTrimMap(map, maximum, keepKey = "") {
+    for (const key of map.keys()) {
+      if (map.size <= maximum) break;
+      if (key !== keepKey) map.delete(key);
+    }
+  }
+
+  function codexPlusUsageRefreshLiveContext(threadId, force = false) {
+    const id = codexPlusUsageNormalizeThreadId(threadId);
+    const bridge = window.__codexSessionDeleteBridge;
+    if (!id || typeof bridge !== "function" || codexPlusUsageState.disposed) {
+      return Promise.resolve(false);
+    }
+    const existing = codexPlusUsageState.liveContextPromises.get(id);
+    if (existing) return existing;
+    const fetchedAt = codexPlusUsageState.liveContextFetchedAt.get(id) || 0;
+    if (!force && Date.now() - fetchedAt < codexPlusUsageLiveContextRefreshMs) {
+      return Promise.resolve(false);
+    }
+    codexPlusUsageState.liveContextFetchedAt.set(id, Date.now());
+    const promise = Promise.resolve(bridge("/thread-usage-live", { session_id: id }))
+      .then((result) => {
+        if (codexPlusUsageState.disposed || result?.status !== "ok") return false;
+        const live = codexPlusUsageLatestLiveContext(result.events);
+        if (!live) return false;
+        const previous = codexPlusUsageState.liveContextByThread.get(id) || {};
+        codexPlusUsageState.liveContextByThread.set(id, {
+          contextTokens: live.contextTokens ?? previous.contextTokens,
+          contextWindow: live.contextWindow > 0 ? live.contextWindow : previous.contextWindow,
+        });
+        codexPlusUsageTrimMap(codexPlusUsageState.liveContextByThread, codexPlusUsageMaxTurns, id);
+        codexPlusUsageTrimMap(codexPlusUsageState.liveContextFetchedAt, codexPlusUsageMaxTurns, id);
+        const turn = codexPlusUsageState.turns.get(id);
+        if (turn) {
+          if (live.contextTokens != null) turn.contextTokens = live.contextTokens;
+          if (live.contextWindow > 0) turn.contextWindow = live.contextWindow;
+        }
+        return true;
+      })
+      .catch(() => false)
+      .finally(() => codexPlusUsageState.liveContextPromises.delete(id));
+    codexPlusUsageState.liveContextPromises.set(id, promise);
+    return promise;
   }
 
   async function codexPlusUsageLoadHistory(force = false) {
@@ -1290,8 +1427,10 @@
       try {
         const result = await window.codexPlus.call("/thread-usage-history", { session_id: threadId });
         if (codexPlusUsageState.disposed || codexPlusUsageState.threadId !== threadId) return;
+        const latestSamples = codexPlusUsageHistorySamples(result);
         codexPlusUsageState.historyThreadId = threadId;
-        codexPlusUsageState.historySamples = codexPlusUsageHistorySamples(result);
+        // shortcut: /thread-usage-history 只返回最新 rollout 分段，完整分段历史需宿主提供接口。
+        codexPlusUsageState.historySamples = latestSamples;
         codexPlusUsageState.historyFetchedAt = Date.now();
         codexPlusUsageSeedHistoryTurn(threadId);
       } catch (error) {
@@ -1502,6 +1641,38 @@
     return parts;
   }
 
+  function codexPlusUsageEnsureChartColumns(parts, count) {
+    const desired = Math.max(20, Math.round(Number(count) || 0));
+    while (parts.bars.length < desired) {
+      const index = parts.bars.length;
+      const col = document.createElement("div");
+      col.className = "codex-plus-throughput-bar-col";
+      const tooltip = document.createElement("span");
+      tooltip.className = "codex-plus-throughput-bar-tooltip";
+      const stick = document.createElement("div");
+      stick.className = "codex-plus-throughput-bar";
+      col.append(tooltip, stick);
+      parts.barsHost.appendChild(col);
+      parts.bars.push({ col, tooltip, stick });
+
+      const xLabel = document.createElement("div");
+      xLabel.className = "codex-plus-throughput-x-index";
+      parts.xAxisHost.appendChild(xLabel);
+      parts.xLabels.push(xLabel);
+    }
+    while (parts.bars.length > desired) {
+      parts.bars.pop()?.col.remove();
+      parts.xLabels.pop()?.remove();
+    }
+    parts.xLabels.forEach((label, index) => {
+      const position = index + 1;
+      label.textContent = (position === 1 || position % 5 === 0) ? String(position) : "·";
+    });
+    parts.chartTrack.style.setProperty("--chart-count", String(desired));
+    parts.chartTrack.style.width = `${desired / 20 * 100}%`;
+    return desired;
+  }
+
   function codexPlusUsageBuildPopover() {
     if (codexPlusUsageState.popover) return codexPlusUsageState.popoverParts;
     const popover = document.createElement("div");
@@ -1511,8 +1682,22 @@
     popover.hidden = true;
     popover.innerHTML = `
       <div class="codex-plus-throughput-popover-head">
-        <span class="codex-plus-throughput-popover-title" data-label="title"></span>
-        <span class="codex-plus-throughput-popover-value" data-role="value"></span>
+        <div class="codex-plus-throughput-popover-head-left">
+          <button class="codex-plus-throughput-theme-toggle" type="button" role="switch" aria-checked="false" data-role="theme-toggle">
+            <span class="codex-plus-throughput-theme-track" aria-hidden="true">
+              <span class="codex-plus-throughput-theme-icon codex-plus-throughput-theme-sun"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></span>
+              <span class="codex-plus-throughput-theme-thumb"></span>
+              <span class="codex-plus-throughput-theme-icon codex-plus-throughput-theme-moon"><svg viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></span>
+            </span>
+          </button>
+          <span class="codex-plus-throughput-popover-title" data-label="title"></span>
+        </div>
+        <div class="codex-plus-throughput-popover-head-right">
+          <span class="codex-plus-throughput-popover-value" data-role="value"></span>
+          <span class="codex-plus-throughput-average-separator">/</span>
+          <span class="codex-plus-throughput-average-label" data-label="averageSpeed"></span>
+          <span class="codex-plus-throughput-average-value" data-role="average-value"></span>
+        </div>
       </div>
       <div class="codex-plus-throughput-context">
         <div class="codex-plus-throughput-context-track" aria-hidden="true"><span class="codex-plus-throughput-context-fill" data-role="context-fill"></span></div>
@@ -1540,18 +1725,41 @@
       </div>
       <div class="codex-plus-throughput-popover-panel" data-role="range-panel" hidden>
         <div class="codex-plus-throughput-presets">
-          <button class="codex-plus-throughput-preset" type="button" data-range="task" data-label="task" aria-pressed="true"></button>
-          <button class="codex-plus-throughput-preset" type="button" data-range="today" data-label="today" aria-pressed="false"></button>
-          <button class="codex-plus-throughput-preset" type="button" data-range="threeDay" data-label="threeDay" aria-pressed="false"></button>
-          <button class="codex-plus-throughput-preset" type="button" data-range="week" data-label="week" aria-pressed="false"></button>
+          <button class="codex-plus-throughput-preset" type="button" data-range="task" data-label="presetTask" aria-pressed="true"></button>
+          <button class="codex-plus-throughput-preset" type="button" data-range="today" data-label="presetToday" aria-pressed="false"></button>
+          <button class="codex-plus-throughput-preset" type="button" data-range="yesterday" data-label="presetYesterday" aria-pressed="false"></button>
+          <button class="codex-plus-throughput-preset" type="button" data-range="week" data-label="presetWeek" aria-pressed="false"></button>
         </div>
         <div class="codex-plus-throughput-custom">
           <label class="codex-plus-throughput-time"><span data-label="start"></span><input type="datetime-local" step="60" data-role="custom-start"></label>
           <label class="codex-plus-throughput-time"><span data-label="end"></span><input type="datetime-local" step="60" data-role="custom-end"></label>
         </div>
       </div>
-      <div class="codex-plus-throughput-popover-rule"></div>
-      <div class="codex-plus-throughput-popover-footer"><span data-role="status"></span><span data-field="samples"></span></div>
+      <div class="codex-plus-throughput-analytics">
+        <div class="codex-plus-throughput-turn-status">
+          <div class="codex-plus-throughput-turn-left">
+            <span class="codex-plus-throughput-turn-label" data-label="turnCalls"></span><span class="codex-plus-throughput-turn-call" data-field="turnCalls"></span>
+            <span class="codex-plus-throughput-turn-slash">/</span><span class="codex-plus-throughput-turn-round" data-field="turns"></span>
+          </div>
+          <div class="codex-plus-throughput-turn-right">
+            <span class="codex-plus-throughput-turn-label" data-label="totalCalls"></span><span class="codex-plus-throughput-turn-total" data-field="totalCalls"></span>
+          </div>
+        </div>
+        <div class="codex-plus-throughput-top">
+          <span class="codex-plus-throughput-top-segment"><span class="codex-plus-throughput-top-label">top1:</span><span class="codex-plus-throughput-top-value" data-field="top1Tokens"></span></span>
+          <span class="codex-plus-throughput-top-segment"><span class="codex-plus-throughput-top-label">top2:</span><span class="codex-plus-throughput-top-value" data-field="top2Tokens"></span></span>
+          <span class="codex-plus-throughput-top-segment"><span class="codex-plus-throughput-top-label">top3:</span><span class="codex-plus-throughput-top-value" data-field="top3Tokens"></span></span>
+        </div>
+        <div class="codex-plus-throughput-chart">
+          <div class="codex-plus-throughput-axis-y"><span data-field="yTop"></span><span data-field="yMid"></span><span>0</span></div>
+          <div class="codex-plus-throughput-chart-main" data-role="chart-scroll">
+            <div class="codex-plus-throughput-chart-track" data-role="chart-track">
+              <div class="codex-plus-throughput-bars" data-role="bars"></div>
+              <div class="codex-plus-throughput-axis-x" data-role="x-axis"></div>
+            </div>
+          </div>
+        </div>
+      </div>
     `;
     document.body.appendChild(popover);
     const labels = popover.querySelectorAll("[data-label]");
@@ -1563,7 +1771,10 @@
     const parts = {
       popover,
       value: popover.querySelector('[data-role="value"]'),
-      status: popover.querySelector('[data-role="status"]'),
+      averageValue: popover.querySelector('[data-role="average-value"]'),
+      themeToggle: popover.querySelector('[data-role="theme-toggle"]'),
+      chartScroll: popover.querySelector('[data-role="chart-scroll"]'),
+      chartTrack: popover.querySelector('[data-role="chart-track"]'),
       contextFill: popover.querySelector('[data-role="context-fill"]'),
       toolToggle: popover.querySelector('[data-role="tool-toggle"]'),
       toolPanel: popover.querySelector('[data-role="tool-panel"]'),
@@ -1574,7 +1785,14 @@
       customStart: popover.querySelector('[data-role="custom-start"]'),
       customEnd: popover.querySelector('[data-role="custom-end"]'),
       fields: Object.fromEntries([...popover.querySelectorAll("[data-field]")].map((node) => [node.dataset.field, node])),
+      bars: [],
+      xLabels: [],
     };
+    const barsHost = popover.querySelector('[data-role="bars"]');
+    const xAxisHost = popover.querySelector('[data-role="x-axis"]');
+    parts.barsHost = barsHost;
+    parts.xAxisHost = xAxisHost;
+    codexPlusUsageEnsureChartColumns(parts, 20);
     const now = new Date();
     now.setMinutes(0, 0, 0);
     const initialStart = new Date(now.getTime() - 4 * 60 * 60 * 1000);
@@ -1584,6 +1802,9 @@
     parts.customEnd.value = codexPlusUsageState.customEnd;
     parts.customStart.setAttribute("aria-label", text.labels.start);
     parts.customEnd.setAttribute("aria-label", text.labels.end);
+    parts.themeToggle.addEventListener("click", () => {
+      codexPlusUsageSetTheme(codexPlusUsageState.theme === "light" ? "dark" : "light");
+    });
     parts.toolToggle.addEventListener("click", () => {
       codexPlusUsageState.toolExpanded = !codexPlusUsageState.toolExpanded;
       codexPlusUsageUpdatePopover(codexPlusUsageTurnSnapshot(codexPlusUsageState.turns.get(codexPlusUsageState.threadId), Date.now()));
@@ -1615,6 +1836,7 @@
     popover.addEventListener("pointerleave", () => codexPlusUsageHidePopoverSoon());
     codexPlusUsageState.popover = popover;
     codexPlusUsageState.popoverParts = parts;
+    codexPlusUsageApplyTheme(codexPlusUsageState.theme);
     return parts;
   }
 
@@ -1643,8 +1865,20 @@
     return Number.isFinite(value) ? `${(Math.max(0, value) * 100).toFixed(1)}%` : codexPlusUsageText().unavailable;
   }
 
-  function codexPlusUsageFormatContext(value) {
-    return Number.isFinite(value) ? `${Math.max(0, value).toFixed(1)}%` : codexPlusUsageText().unavailable;
+  function codexPlusUsageFormatTokenWindow(value) {
+    if (!Number.isFinite(value) || value <= 0) return codexPlusUsageText().unavailable;
+    if (value >= 1_000_000) {
+      return `${Number((value / 1_000_000).toFixed(1))}M`;
+    }
+    return `${Number((value / 1_000).toFixed(1))}K`;
+  }
+
+  function codexPlusUsageFormatContext(percent, window) {
+    if (!Number.isFinite(percent)) return codexPlusUsageText().unavailable;
+    const percentText = `${Number(Math.max(0, percent).toFixed(1))}%`;
+    return window > 0
+      ? `${percentText}/${codexPlusUsageFormatTokenWindow(window)}`
+      : percentText;
   }
 
   function codexPlusUsageRenderToolDetails(snapshot) {
@@ -1680,6 +1914,184 @@
     }
   }
 
+  function codexPlusUsageTurnGroups(samples, snapshot, liveTurnId = "", now = Date.now(), aggregation = "sum") {
+    const groups = new Map();
+    const liveKey = String(liveTurnId || (snapshot ? "live" : ""));
+    const maximum = aggregation === "max";
+    for (const sample of Array.isArray(samples) ? samples : []) {
+      const at = Number.isFinite(sample?.observedAt) ? sample.observedAt : now;
+      const key = String(sample?.turnId || ("sample:" + at));
+      const group = groups.get(key) || { turnId: key, calls: 0, tokens: 0, lastAt: 0 };
+      group.calls += 1;
+      const tokens = Number.isFinite(sample?.total) ? sample.total : 0;
+      group.tokens = maximum ? Math.max(group.tokens, tokens) : group.tokens + tokens;
+      group.lastAt = Math.max(group.lastAt, at);
+      groups.set(key, group);
+    }
+    if (liveKey && snapshot) {
+      const current = groups.get(liveKey) || { turnId: liveKey, calls: 0, tokens: 0, lastAt: now };
+      current.calls = Math.max(current.calls, Number.isFinite(snapshot.samples) ? snapshot.samples : 0);
+      if (maximum && current.tokens <= 0 && (snapshot.samples ?? 0) <= 1) {
+        current.tokens = Math.max(0, Number(snapshot.usage?.total) || 0);
+      } else if (!maximum) {
+        current.tokens = Math.max(current.tokens, Number.isFinite(snapshot.usage?.total) ? snapshot.usage.total : 0);
+      }
+      current.lastAt = Math.max(current.lastAt, now);
+      groups.set(liveKey, current);
+    }
+    return [...groups.values()].sort((left, right) => left.lastAt - right.lastAt);
+  }
+
+  function codexPlusUsageSampleKey(sample, index = 0) {
+    const observedAt = Number.isFinite(sample?.observedAt) ? sample.observedAt : "";
+    return [
+      String(sample?.turnId || ""),
+      observedAt,
+      sample?.input ?? "",
+      sample?.cached ?? "",
+      sample?.output ?? "",
+      sample?.total ?? "",
+    ].join("|") || `sample:${index}`;
+  }
+
+  function codexPlusUsageChartCalls(samples, snapshot, liveTurnId = "", now = Date.now()) {
+    const mergedSamples = codexPlusUsageMergeHistorySamples(samples, snapshot?.callSamples);
+    const calls = mergedSamples
+      .map((sample, index) => {
+        const tokens = Number(sample?.total);
+        if (!Number.isFinite(tokens) || tokens <= 0) return null;
+        return {
+          id: codexPlusUsageSampleKey(sample, index),
+          turnId: String(sample?.turnId || `sample:${index}`),
+          tokens,
+          observedAt: Number.isFinite(sample?.observedAt) ? sample.observedAt : now,
+          isCurrent: false,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => left.observedAt - right.observedAt || left.id.localeCompare(right.id));
+    if (!snapshot) return calls;
+
+    const liveKey = String(liveTurnId || "live");
+    const lastCallTokens = Number.isFinite(snapshot.lastCallTokens) && snapshot.lastCallTokens > 0
+      ? snapshot.lastCallTokens
+      : (snapshot.samples ?? 0) <= 1 ? Number(snapshot.usage?.total) : null;
+    if (!Number.isFinite(lastCallTokens) || lastCallTokens <= 0) return calls;
+
+    let latest = null;
+    for (let index = calls.length - 1; index >= 0; index -= 1) {
+      if (calls[index].turnId === liveKey) {
+        latest = calls[index];
+        break;
+      }
+    }
+    if (latest && latest.tokens === lastCallTokens) {
+      latest.isCurrent = true;
+    } else {
+      calls.push({
+        id: `live:${liveKey}:${snapshot.samples ?? 0}:${lastCallTokens}`,
+        turnId: liveKey,
+        tokens: lastCallTokens,
+        observedAt: now,
+        isCurrent: true,
+      });
+    }
+    return calls.sort((left, right) => left.observedAt - right.observedAt || left.id.localeCompare(right.id));
+  }
+
+  function codexPlusUsageChartWindow(calls) {
+    // shortcut: 图表最多渲染最近 200 次，TOP 排行仍使用完整样本。
+    return (Array.isArray(calls) ? calls : []).slice(-codexPlusUsageMaxChartBars);
+  }
+
+  function codexPlusUsageChartScale(value) {
+    const base = 100000;
+    let top = base;
+    const maximum = Number(value);
+    while (Number.isFinite(maximum) && maximum > top) top *= 2;
+    return { top, mid: top / 2 };
+  }
+
+  function codexPlusUsageWanNumber(value) {
+    const wan = Math.max(0, value) / 10000;
+    return Math.round(wan * (wan >= 10 ? 100 : 10)) / (wan >= 10 ? 100 : 10);
+  }
+
+  function codexPlusUsageFormatWan(value) {
+    const text = codexPlusUsageText();
+    if (!Number.isFinite(value)) return text.unavailable;
+    return text.wan(codexPlusUsageWanNumber(value));
+  }
+
+  function codexPlusUsageTopCalls(samples, snapshot, liveTurnId = "", now = Date.now()) {
+    return codexPlusUsageChartCalls(samples, snapshot, liveTurnId, now)
+      .sort((left, right) => right.tokens - left.tokens
+        || right.observedAt - left.observedAt
+        || left.id.localeCompare(right.id));
+  }
+
+  function codexPlusUsageRenderAnalytics(snapshot) {
+    const parts = codexPlusUsageState.popoverParts;
+    if (!parts?.bars?.length) return;
+    const text = codexPlusUsageText();
+    const liveTurn = codexPlusUsageState.turns.get(codexPlusUsageState.threadId);
+    const groups = codexPlusUsageTurnGroups(
+      codexPlusUsageState.historySamples,
+      snapshot,
+      liveTurn?.turnId || "",
+      Date.now(),
+      "max",
+    );
+    const totalCalls = groups.reduce((total, group) => total + group.calls, 0);
+    parts.fields.turnCalls.textContent = snapshot ? text.calls(codexPlusUsageFormatCount(snapshot.samples)) : text.unavailable;
+    parts.fields.turns.textContent = text.rounds(groups.length);
+    parts.fields.totalCalls.textContent = codexPlusUsageFormatCount(totalCalls);
+    const rankedCalls = codexPlusUsageTopCalls(
+      codexPlusUsageState.historySamples,
+      snapshot,
+      liveTurn?.turnId || "",
+    );
+    for (let index = 0; index < 3; index += 1) {
+      const item = rankedCalls[index];
+      const number = index + 1;
+      parts.fields["top" + number + "Tokens"].textContent = item ? codexPlusUsageFormatWan(item.tokens) : text.unavailable;
+    }
+    const calls = codexPlusUsageChartCalls(
+      codexPlusUsageState.historySamples,
+      snapshot,
+      liveTurn?.turnId || "",
+    );
+    const renderedCalls = codexPlusUsageChartWindow(calls);
+    const renderCount = codexPlusUsageEnsureChartColumns(parts, renderedCalls.length);
+    const scale = codexPlusUsageChartScale(
+      renderedCalls.reduce((maximum, item) => Math.max(maximum, item.tokens), 0),
+    );
+    parts.fields.yTop.textContent = codexPlusUsageFormatWan(scale.top);
+    parts.fields.yMid.textContent = codexPlusUsageFormatWan(scale.mid);
+    const topIds = [rankedCalls[0]?.id, rankedCalls[1]?.id, rankedCalls[2]?.id];
+    for (let index = 0; index < renderCount; index += 1) {
+      const item = renderedCalls[index] || null;
+      const ref = parts.bars[index];
+      const height = item && item.tokens > 0
+        ? Math.max(2, Math.round(item.tokens / scale.top * 90))
+        : 0;
+      ref.stick.style.height = height + "%";
+      const classes = ["codex-plus-throughput-bar-col"];
+      if (item && item.id === topIds[0]) classes.push("is-top1");
+      else if (item && item.id === topIds[1]) classes.push("is-top2");
+      else if (item && item.id === topIds[2]) classes.push("is-top3");
+      if (item?.isCurrent) classes.push("is-current");
+      ref.col.className = classes.join(" ");
+      ref.col.dataset.empty = item ? "false" : "true";
+      const summary = item
+        ? codexPlusUsageFormatWan(item.tokens)
+        : "";
+      ref.tooltip.textContent = summary;
+      ref.col.title = summary;
+      parts.xLabels[index].classList.toggle("current", !!item?.isCurrent);
+    }
+  }
+
   function codexPlusUsageUpdatePopover(snapshot) {
     const parts = codexPlusUsageState.popoverParts;
     if (!parts) return;
@@ -1689,10 +2101,20 @@
       ? text.speed(unavailable)
       : text.speed(Math.max(0, Math.round(snapshot.speed)));
     parts.value.textContent = value;
-    parts.contextFill.style.width = `${snapshot?.contextPercent == null ? 0 : snapshot.contextPercent}%`;
-    parts.fields.context.textContent = `${codexPlusUsageFormatContext(snapshot?.contextPercent)} ${text.labels.context}`;
-    parts.fields.context.title = snapshot?.contextWindow > 0
-      ? `${text.labels.contextWindow} ${codexPlusUsageFormatCount(snapshot.contextWindow)}`
+    parts.averageValue.textContent = snapshot?.averageSpeed == null
+      ? unavailable
+      : codexPlusUsageFormatSpeed(snapshot.averageSpeed);
+    const context = codexPlusUsageContextSnapshot(
+      codexPlusUsageState.turns.get(codexPlusUsageState.threadId),
+      codexPlusUsageState.liveContextByThread.get(codexPlusUsageState.threadId),
+    );
+    parts.contextFill.style.width = `${context.percent == null ? 0 : context.percent}%`;
+    parts.fields.context.textContent = codexPlusUsageFormatContext(
+      context.percent,
+      context.window,
+    );
+    parts.fields.context.title = context.window > 0
+      ? `${text.labels.contextWindow} ${codexPlusUsageFormatCount(context.window)}`
       : "";
     parts.toolToggle.disabled = !snapshot?.toolDetails?.length;
     parts.fields.tool.textContent = codexPlusUsageFormatDuration(snapshot?.toolMs);
@@ -1729,12 +2151,7 @@
     if (document.activeElement !== parts.customStart) parts.customStart.value = codexPlusUsageState.customStart;
     if (document.activeElement !== parts.customEnd) parts.customEnd.value = codexPlusUsageState.customEnd;
     codexPlusUsageRenderToolDetails(snapshot);
-    parts.fields.samples.textContent = snapshot
-      ? `${text.labels.samples} ${codexPlusUsageFormatCount(snapshot.samples)}`
-      : `${text.labels.samples} ${unavailable}`;
-    parts.status.textContent = !snapshot
-      ? text.labels.waiting
-      : (snapshot.completed ? text.labels.completed : text.labels.running);
+    codexPlusUsageRenderAnalytics(snapshot);
     parts.popover.setAttribute("aria-label", `${text.labels.title}：${value}，${parts.fields.context.textContent}`);
     if (!parts.popover.hidden) codexPlusUsagePositionPopover();
   }
@@ -1819,24 +2236,65 @@
     codexPlusUsageState.lastFingerprint = "";
   }
 
+  function codexPlusUsageRenderFingerprint(snapshot, context) {
+    if (!snapshot) {
+      return [
+        "empty",
+        context.percent,
+        context.window,
+        codexPlusUsageState.range,
+        codexPlusUsageState.historyLoading,
+        codexPlusUsageState.historyError,
+        codexPlusUsageState.globalUsageLoading,
+        codexPlusUsageState.globalUsageError,
+        codexPlusUsageState.globalUsageCoverage.available,
+        codexPlusUsageState.globalUsageCoverage.total,
+      ].join("|");
+    }
+    const speed = snapshot.speed == null ? "--" : codexPlusUsageFormatSpeed(snapshot.speed);
+    const hitRate = codexPlusUsageFormatPercent(snapshot.usage?.hitRate);
+    const consumption = codexPlusUsageSelectedConsumption(snapshot);
+    const toolDetails = (snapshot.toolDetails || []).map((detail) => `${detail.label}:${detail.durationMs}`).join(",");
+    return [
+      speed,
+      snapshot.averageSpeed,
+      snapshot.turnMs,
+      context.percent,
+      context.window,
+      snapshot.toolMs,
+      toolDetails,
+      snapshot.usage?.input,
+      snapshot.usage?.output,
+      snapshot.usage?.cached,
+      snapshot.usage?.hitRate,
+      hitRate,
+      consumption.label,
+      consumption.value,
+      codexPlusUsageState.range,
+      codexPlusUsageState.historyLoading,
+      codexPlusUsageState.historyError,
+      codexPlusUsageState.globalUsageLoading,
+      codexPlusUsageState.globalUsageError,
+      codexPlusUsageState.historyFetchedAt,
+      codexPlusUsageState.toolExpanded,
+      codexPlusUsageState.tokenExpanded,
+      snapshot.samples,
+      snapshot.completed,
+    ].join("|");
+  }
+
   function codexPlusUsageRender(snapshot) {
     const node = codexPlusUsageState.node;
     if (!node?.isConnected) return;
     const parts = codexPlusUsageState.parts || codexPlusUsageBuild(node);
     const text = codexPlusUsageText();
-    const speed = snapshot?.speed == null ? "--" : String(Math.max(0, Math.round(snapshot.speed)));
+    const speed = snapshot?.speed == null ? "--" : codexPlusUsageFormatSpeed(snapshot.speed);
     const hitRate = codexPlusUsageFormatPercent(snapshot?.usage?.hitRate);
-    const consumption = codexPlusUsageSelectedConsumption(snapshot);
-    const toolDetails = (snapshot?.toolDetails || []).map((detail) => `${detail.label}:${detail.durationMs}`).join(",");
-    const fingerprint = snapshot
-      ? [
-        speed, snapshot.contextPercent, snapshot.toolMs, toolDetails,
-        snapshot.usage?.input, snapshot.usage?.output, snapshot.usage?.cached, snapshot.usage?.hitRate,
-        consumption.value, codexPlusUsageState.range, codexPlusUsageState.historyLoading,
-        codexPlusUsageState.historyFetchedAt, codexPlusUsageState.toolExpanded,
-        codexPlusUsageState.tokenExpanded, snapshot.samples, snapshot.completed,
-      ].join("|")
-      : "empty";
+    const context = codexPlusUsageContextSnapshot(
+      codexPlusUsageState.turns.get(codexPlusUsageState.threadId),
+      codexPlusUsageState.liveContextByThread.get(codexPlusUsageState.threadId),
+    );
+    const fingerprint = codexPlusUsageRenderFingerprint(snapshot, context);
     if (fingerprint !== codexPlusUsageState.lastFingerprint) {
       codexPlusUsageState.lastFingerprint = fingerprint;
       parts.speed.value.textContent = text.speed(speed);
@@ -1852,7 +2310,6 @@
 
   function codexPlusUsageEnabled() {
     return !codexPlusUsageState.disposed
-      && codexPlusBackendSettingsLoaded
       && codexPlusSettings().usageStatusLine === true;
   }
 
@@ -1890,7 +2347,7 @@
     }
     codexPlusUsageShow(node);
     codexPlusUsageRender(codexPlusUsageTurnSnapshot(codexPlusUsageState.turns.get(threadId), Date.now()));
-    return { card, threadId, changed };
+    return { card, threadId, changed, threadChanged };
   }
 
   function codexPlusUsageObserve() {
@@ -1934,6 +2391,15 @@
     const placement = codexPlusUsageSyncPlacement();
     const turn = placement ? codexPlusUsageState.turns.get(placement.threadId) : null;
     codexPlusUsageRender(codexPlusUsageTurnSnapshot(turn, Date.now()));
+    if (placement) {
+      void codexPlusUsageRefreshLiveContext(placement.threadId, placement.threadChanged).then((updated) => {
+        if (!updated || codexPlusUsageState.disposed || codexPlusUsageState.threadId !== placement.threadId) return;
+        codexPlusUsageRender(codexPlusUsageTurnSnapshot(
+          codexPlusUsageState.turns.get(placement.threadId),
+          Date.now(),
+        ));
+      });
+    }
     codexPlusUsageSchedule(turn && turn.completedAt == null && !document.hidden
       ? codexPlusUsageActiveTickMs
       : codexPlusUsageIdleTickMs);
@@ -1979,18 +2445,19 @@
       codexPlusUsageState.node?.remove();
       codexPlusUsageState.popover?.remove();
       codexPlusUsageState.turns.clear();
+      codexPlusUsageState.liveContextByThread.clear();
+      codexPlusUsageState.liveContextFetchedAt.clear();
+      codexPlusUsageState.liveContextPromises.clear();
       codexPlusUsageState.node = null;
       codexPlusUsageState.card = null;
       codexPlusUsageState.parts = null;
       codexPlusUsageState.popover = null;
       codexPlusUsageState.popoverParts = null;
-      codexPlusUsageState.globalUsageSamples = [];
-      codexPlusUsageState.globalUsageScanned = false;
-      codexPlusUsageState.globalAppServicesPromise = null;
       codexPlusUsageState.globalUsageFetchedAt = 0;
       codexPlusUsageState.globalUsageLoading = false;
       codexPlusUsageState.globalUsageError = "";
       codexPlusUsageState.globalUsagePromise = null;
+      codexPlusUsageState.globalUsageCoverage = { available: 0, total: 0 };
       codexPlusUsageState.lastFingerprint = "";
       globalThis.__CODEX_PLUS_THROUGHPUT_STATUSLINE_SYNC__ = undefined;
       if (globalThis.__CODEX_PLUS_USAGE_STATUSLINE_SYNC__ === codexPlusUsageStatusLineSync) {

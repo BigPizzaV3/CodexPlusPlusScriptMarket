@@ -16,7 +16,7 @@ test("TokenLens market entry matches the published script", () => {
 
   assert.equal(entries.length, 1);
   const entry = entries[0];
-  assert.equal(entry.version, "1.0.2");
+  assert.equal(entry.version, "1.0.3");
   assert.equal(entry.author, "LingYingNX");
   assert.equal(entry.homepage, "https://github.com/LingYingNX/TokenLens-for-Codex");
   assert.equal(
@@ -24,13 +24,18 @@ test("TokenLens market entry matches the published script", () => {
     "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tokenlens-for-codex.js",
   );
   assert.equal(entry.sha256, crypto.createHash("sha256").update(source).digest("hex"));
-  assert.match(source, /\/\/ @version\s+1\.0\.2(?:\r?\n)/);
+  assert.match(source, /\/\/ @version\s+1\.0\.3(?:\r?\n)/);
   assert.match(source, /\/\/ @match\s+app:\/\/-\/\*(?:\r?\n)/);
   assert.match(source, /label:\s*kind\.label/);
   assert.match(source, /right\.durationMs - left\.durationMs/);
   assert.match(source, /activeSkills/);
   assert.match(source, /visible:\s*false/);
+  assert.match(source, /__codexDailyTokenUsage/);
+  assert.match(source, /codexPlusUsageMaxChartBars\s*=\s*200/);
+  assert.match(source, /const base = 100000/);
+  assert.match(source, /codexPlusUsageAverageSpeed/);
   assert.doesNotMatch(source, /__codexPlusUsageStatusLineRuntime\?\.dispose/);
+  assert.doesNotMatch(source, /workspaceFiles/);
   assert.match(source, /\/settings\/get/);
   assert.doesNotMatch(source, /[A-Z]:\\Users\\/i);
   assert.doesNotThrow(() => new Function(source));

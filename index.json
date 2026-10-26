@@ -200,24 +200,6 @@
       "sha256": "a047592791a2836fd1d665c7b0a8ca8f64a8924ee4b2a08f09e3c52b12dec5b1"
     },
     {
-      "id": "codex-bundled-plugin-doctor",
-      "name": "Codex Bundled Plugin Doctor",
-      "description": "诊断并修复 Codex Desktop 的 bundled 插件异常，如 Chrome / Computer Use 消失、marketplace.json 缺失、设置页 unavailable。",
-      "version": "0.1.0",
-      "author": "BigPizzaV3",
-      "tags": [
-        "codex",
-        "plugins",
-        "repair",
-        "windows",
-        "diagnostic",
-        "doctor"
-      ],
-      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
-      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-bundled-plugin-doctor.js",
-      "sha256": "4c2eac259c62d007ec84ed925886ac79a2f5c520acb67c42f419e707934563ff"
-    },
-    {
       "id": "codex-live-token-cost",
       "name": "Codex Live Token Cost",
       "description": "实时查看输入框上方的 Token 消耗，本地解锁官方个人资料页，并追踪历史用量与使用趋势。",
@@ -286,7 +268,7 @@
       ],
       "homepage": "https://github.com/Saydness/codexpp-deepseek-token-usage",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/deepseek-token-usage.js",
-      "sha256": "7759f9538e9b0cf8dcc42e1686e7c09ee505a6a8b3edd3dfbb9d1d174c7f177d",
+      "sha256": "a2a375d0ab4fb9f01ef467b0a069334f0f9d46e6cfdcf2ded6e9e02f5655882c",
       "requirements": [
         "Codex++ 用户脚本环境",
         "Codex 会话中使用 DeepSeek 模型",

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-23T09:19:50.179Z",
+  "updated_at": "2026-10-26T12:51:20.000Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -365,6 +365,30 @@
         "优先使用官方翻译，仅补全已核对的设置页漏译，不翻译聊天内容、代码或输入框",
         "补全仅针对简体中文；自动检测解析为简体中文时也会生效，其他语言保留应用原文",
         "请勿同时启用旧版同名脚本，以免旧版无条件中文替换干扰语言切换"
+      ]
+    },
+    {
+      "id": "codex-rtl-text",
+      "name": "Codex RTL Text",
+      "description": "阿拉伯语、希伯来语、波斯语等从右往左书写的文字，在对话和输入框里按段落自动从右往左显示并靠右对齐；中英文段落与代码保持不变。",
+      "version": "0.1.0",
+      "author": "BigPizzaV3",
+      "tags": [
+        "codex",
+        "rtl",
+        "i18n",
+        "ui"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-rtl-text.js",
+      "sha256": "5fde293ba18499ab48325e68f91d33dd0a4679d2cced3b3effd53babe4bff537",
+      "requirements": [
+        "Codex++ 用户脚本环境"
+      ],
+      "limitations": [
+        "只调整对话内容、用户气泡与输入框，不把整个界面翻转成从右往左",
+        "每段的方向由该段第一个有方向的字符决定，以英文开头的阿拉伯语段落会按从左往右显示",
+        "依赖 Codex 对话与输入框的页面结构，应用更新可能影响兼容性"
       ]
     }
   ]

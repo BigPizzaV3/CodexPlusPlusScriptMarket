@@ -357,6 +357,33 @@
         "依赖 Codex 本地事件与会话目录结构，应用更新后可能需要适配",
         "历史消耗覆盖 Codex 当前可访问的会话范围，覆盖不足时界面显示可用天数"
       ]
+    },
+    {
+      "id": "codex-native-navigation",
+      "name": "Codex 原生导航与中文补全",
+      "description": "开启 Codex 内置侧边栏导航功能，以及启用和补全中文界面。中文补全跟随 Codex 当前语言，仅在简体中文界面生效；切换 English 时恢复英文。",
+      "version": "3.2.0",
+      "author": "Codex++ Community",
+      "tags": [
+        "codex",
+        "navigation",
+        "sidebar",
+        "i18n",
+        "zh-CN"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-native-navigation.js",
+      "sha256": "f422524e40c0a50c0f03c916eb9312080169cd391962c21b7ce67bc68008f773",
+      "requirements": [
+        "Codex++ 用户脚本环境",
+        "支持原生侧边栏导航及国际化的 Codex 桌面版"
+      ],
+      "limitations": [
+        "依赖 Codex 内部功能开关与设置页面结构，应用更新可能影响兼容性",
+        "优先使用官方翻译，仅补全已核对的设置页漏译，不翻译聊天内容、代码或输入框",
+        "补全仅针对简体中文；自动检测解析为简体中文时也会生效，其他语言保留应用原文",
+        "请勿同时启用旧版同名脚本，以免旧版无条件中文替换干扰语言切换"
+      ]
     }
   ]
 }

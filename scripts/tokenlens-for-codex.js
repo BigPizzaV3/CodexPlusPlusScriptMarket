@@ -1,12 +1,3 @@
-// ==UserScript==
-// @name         TokenLens for Codex
-// @namespace    tokenlens-for-codex
-// @version      1.0.3
-// @description  Codex++ throughput, tool, token, cache and usage status line.
-// @match        app://-/*
-// @run-at       document-start
-// ==/UserScript==
-
 /* Codex++ external extension: turn token throughput status line. */
 (() => {
   const visibleElement = (node) => !!node && ((node.getClientRects?.().length || 0) > 0 || node.offsetWidth > 0 || node.offsetHeight > 0);
@@ -42,10 +33,12 @@
   /**
    * 输入框下方吞吐状态栏。
    *
-   * 主界面沿用 DSH 口径：累计已结算输出 token，再除以累计解码时间。
+   * 主指标按自有口径：本轮输出 token 除以扣除首 token 等待与工具执行后的模型窗口。
+   * 平均速度按每次已结算调用的速率去掉一个最高、一个最低后再平均。
    * 数据来自 Codex app-server 的本地通知，不读取会话正文，也不请求服务商：
    * - 首个非空助手或推理增量为首 token 时间；
-   * - 助手消息或计划条目完成时结束当前解码区间；
+   * - 首个输出 delta 开始解码，工具开始或消息完成时结束解码区间；
+   * - token 用量通知与刚结束的解码区间配对结算，通知延迟不计入时长；
    * - 工具条目开始与完成之间的并集计为工具耗时；
    * - token 用量按线程累计输出增量计入当前轮；
    * - 中途安装时从宿主历史接口回填当前轮并去重。
@@ -57,7 +50,7 @@
   const codexPlusUsageStatusLineId = "codex-plus-throughput-statusline";
   const codexPlusUsagePopoverId = "codex-plus-throughput-popover";
   const codexPlusUsageStyleId = "codex-plus-throughput-statusline-style";
-  const codexPlusUsageVersion = 41;
+  const codexPlusUsageVersion = 42;
   const codexPlusUsageThemeKey = "tokenlens-theme";
   const codexPlusUsageGlobalApiKey = "__codexDailyTokenUsage";
   const codexPlusUsageGlobalRefreshMs = 5 * 60 * 1000;
@@ -67,6 +60,8 @@
   const codexPlusUsageMaxTurns = 32;
   const codexPlusUsageMaxLiveSamples = 512;
   const codexPlusUsageMaxChartBars = 200;
+  // 模型真实峰值约 400 tok/s，仪表盘满偏刻度按此对齐。
+  const codexPlusUsageSpeedPeak = 400;
   const codexPlusUsageModelItemTypes = new Set([
     "agentmessage", "plan", "reasoning", "usermessage", "hookprompt", "functioncalloutput",
   ]);
@@ -738,7 +733,9 @@
       firstTokenAt: null,
       decodeStartedAt: null,
       decodeMs: 0,
-      decodeOutputTokens: 0,
+      pendingDecodeMs: 0,
+      pendingOutput: 0,
+      settledCalls: [],
       activeSkills: [],
       historySeeded: false,
       observedFromStart: false,
@@ -755,8 +752,22 @@
 
   function codexPlusUsageFlushDecode(turn, at) {
     if (!turn || turn.decodeStartedAt == null) return;
-    turn.decodeMs += Math.max(0, at - turn.decodeStartedAt);
+    const duration = Math.max(0, at - turn.decodeStartedAt);
+    turn.decodeMs += duration;
+    turn.pendingDecodeMs += duration;
     turn.decodeStartedAt = null;
+    codexPlusUsageSettleCall(turn);
+  }
+
+  // 输出 token 与它的解码时长要成对结算；用量通知晚于调用结束也不会拉低分母。
+  function codexPlusUsageSettleCall(turn) {
+    if (!turn || !(turn.pendingDecodeMs > 0) || !(turn.pendingOutput > 0)) return;
+    turn.settledCalls.push({ output: turn.pendingOutput, decodeMs: turn.pendingDecodeMs });
+    if (turn.settledCalls.length > codexPlusUsageMaxLiveSamples) {
+      turn.settledCalls.splice(0, turn.settledCalls.length - codexPlusUsageMaxLiveSamples);
+    }
+    turn.pendingDecodeMs = 0;
+    turn.pendingOutput = 0;
   }
 
   function codexPlusUsageCloseActiveTools(turn, at) {
@@ -796,10 +807,14 @@
   function codexPlusUsageRecordTool(turn, id, kind, startedAt, endedAt, durationMs = null) {
     if (!turn || !kind) return;
     const duration = codexPlusUsageNumber(durationMs);
-    let start = codexPlusUsageNumber(startedAt);
-    let end = codexPlusUsageNumber(endedAt);
-    if (!(end > start) && duration > 0 && end != null) start = end - duration;
-    if (start != null && end > start) turn.toolIntervals.push([start, end]);
+    // Number(null) === 0，必须显式排除空值，否则会把 1970 当成工具起点。
+    let start = startedAt == null ? null : codexPlusUsageNumber(startedAt);
+    const end = endedAt == null ? null : codexPlusUsageNumber(endedAt);
+    // 宿主给出的实测时长最可信：即使有 startedAt 也用它对齐，避免事件间隔充当耗时。
+    if (duration > 0 && end != null) start = end - duration;
+    // 起点未知则只记可见明细，不把未知跨度算成工具耗时，否则会跨过整段思考时间。
+    const valid = start != null && end > start;
+    if (valid) turn.toolIntervals.push([start, end]);
     if (kind.visible !== false) {
       turn.toolDetails.push({
         id: String(id || `${kind.key}:${turn.toolDetails.length}`),
@@ -807,8 +822,8 @@
         fallback: kind.fallback,
         label: kind.label,
         detail: kind.detail,
-        startedAt: start != null && end > start ? start : null,
-        endedAt: start != null && end > start ? end : null,
+        startedAt: valid ? start : null,
+        endedAt: valid ? end : null,
       });
     }
   }
@@ -974,7 +989,10 @@
         const lastCallTokens = previous.total > 0 ? previous.total : outputDelta;
         if (lastCallTokens > 0) turn.lastCallTokens = lastCallTokens;
         const output = previous.output > 0 ? previous.output : outputDelta;
-        if (output > 0 && (turn.decodeMs > 0 || turn.decodeStartedAt != null)) turn.decodeOutputTokens += output;
+        if (output > 0) {
+          turn.pendingOutput += output;
+          codexPlusUsageSettleCall(turn);
+        }
       }
       turn.skipMatchingUsage = false;
       turn.lastHistorySample = null;
@@ -999,8 +1017,59 @@
     return outputTokens > 0 && decodeMs > 0 ? outputTokens / (decodeMs / 1000) : null;
   }
 
-  function codexPlusUsageAverageSpeed(decodeOutputTokens, decodeMs) {
-    return codexPlusUsageDecodeSpeed(decodeOutputTokens, decodeMs);
+  function codexPlusUsageSettledSpeed(calls) {
+    let output = 0;
+    let decodeMs = 0;
+    for (const call of Array.isArray(calls) ? calls : []) {
+      const tokens = codexPlusUsageNumber(call?.output);
+      const duration = codexPlusUsageNumber(call?.decodeMs);
+      if (tokens > 0 && duration > 0) {
+        output += tokens;
+        decodeMs += duration;
+      }
+    }
+    return codexPlusUsageDecodeSpeed(output, decodeMs);
+  }
+
+  // 主指标口径：模型可见窗口吞吐。分母 = 轮时长 − 首 token 等待 − 工具执行，只衡量模型真正在产出的时间。
+  function codexPlusUsageModelWindowSpeed(turn, now) {
+    if (!turn) return null;
+    // 历史回填没有事件时间轴，算出的窗口不可信，直接显示 --。
+    if (turn.historySeeded && turn.firstTokenAt == null) return null;
+    const end = turn.completedAt ?? (Number.isFinite(now) ? now : Date.now());
+    const wallMs = Math.max(0, end - turn.startedAt);
+    const ttftMs = turn.firstTokenAt == null
+      ? 0
+      : codexPlusUsageClamp(turn.firstTokenAt - turn.startedAt, 0, wallMs);
+    // 进行中的工具也要扣掉，否则工具跑多久速度就掉多久。
+    const intervals = turn.toolIntervals.slice();
+    for (const tool of turn.activeTools?.values?.() ?? []) {
+      if (Number.isFinite(tool?.startedAt)) intervals.push([tool.startedAt, end]);
+    }
+    const toolMs = codexPlusUsageMergedDuration(intervals);
+    const windowMs = Math.max(0, wallMs - ttftMs - Math.min(toolMs, wallMs - ttftMs));
+    // 没有任何窗口数据时退回已结算累计，避免无 delta 会话显示 --。
+    const speed = codexPlusUsageDecodeSpeed(turn.outputTokens, windowMs)
+      ?? codexPlusUsageSettledSpeed(turn.settledCalls);
+    // 统计窗口刚跨过一个工具时可能只剩几毫秒；真实峰值约 400 tok/s，超出即视为分母失真。
+    return speed == null ? null : Math.min(speed, codexPlusUsageSpeedPeak);
+  }
+
+  function codexPlusUsageAverageSpeed(calls) {
+    const rates = (Array.isArray(calls) ? calls : [])
+      .map((call) => codexPlusUsageDecodeSpeed(
+        codexPlusUsageNumber(call?.output),
+        codexPlusUsageNumber(call?.decodeMs),
+      ))
+      // 超过已知峰值的样本由事件截断产生，不进入平均值。
+      .filter((rate) => rate != null && rate <= codexPlusUsageSpeedPeak);
+    if (!rates.length) return null;
+    if (rates.length <= 2) {
+      return rates.reduce((total, rate) => total + rate, 0) / rates.length;
+    }
+    const sorted = rates.slice().sort((left, right) => left - right);
+    const trimmed = sorted.slice(1, -1);
+    return trimmed.reduce((total, rate) => total + rate, 0) / trimmed.length;
   }
 
   function codexPlusUsageFormatSpeed(value) {
@@ -1122,11 +1191,8 @@
       codexPlusUsageState.liveContextByThread.get(turn.threadId),
     );
     return {
-      speed: codexPlusUsageDecodeSpeed(turn.decodeOutputTokens, decodeMs),
-      averageSpeed: codexPlusUsageAverageSpeed(
-        turn.decodeOutputTokens,
-        decodeMs,
-      ),
+      speed: codexPlusUsageModelWindowSpeed(turn, end),
+      averageSpeed: codexPlusUsageAverageSpeed(turn.settledCalls),
       ttftMs,
       decodeMs,
       toolMs,
@@ -1673,6 +1739,12 @@
     return desired;
   }
 
+  function codexPlusUsagePinChartToLatest(parts) {
+    const scroll = parts?.chartScroll;
+    if (!scroll) return;
+    scroll.scrollLeft = scroll.scrollWidth;
+  }
+
   function codexPlusUsageBuildPopover() {
     if (codexPlusUsageState.popover) return codexPlusUsageState.popoverParts;
     const popover = document.createElement("div");
@@ -1858,7 +1930,11 @@
   }
 
   function codexPlusUsageFormatM(value) {
-    return Number.isFinite(value) ? `${(Math.max(0, value) / 1_000_000).toFixed(2)} M` : codexPlusUsageText().unavailable;
+    if (!Number.isFinite(value)) return codexPlusUsageText().unavailable;
+    const tokens = Math.max(0, value);
+    // 小量保留有效数字，避免 1096 tokens 显示成 0.00 M。
+    if (tokens < 10_000) return String(Math.round(tokens));
+    return `${(tokens / 1_000_000).toFixed(2)} M`;
   }
 
   function codexPlusUsageFormatPercent(value) {
@@ -2090,6 +2166,7 @@
       ref.col.title = summary;
       parts.xLabels[index].classList.toggle("current", !!item?.isCurrent);
     }
+    codexPlusUsagePinChartToLatest(parts);
   }
 
   function codexPlusUsageUpdatePopover(snapshot) {
@@ -2206,6 +2283,7 @@
       codexPlusUsageTurnSnapshot(codexPlusUsageState.turns.get(codexPlusUsageState.threadId), Date.now()),
     );
     parts.popover.hidden = false;
+    codexPlusUsagePinChartToLatest(parts);
     codexPlusUsagePositionPopover();
   }
 
@@ -2299,7 +2377,7 @@
       codexPlusUsageState.lastFingerprint = fingerprint;
       parts.speed.value.textContent = text.speed(speed);
       parts.speed.hitRateValue.textContent = hitRate;
-      const needleRatio = codexPlusUsageClamp((snapshot?.speed || 0) / 300, 0, 1);
+      const needleRatio = codexPlusUsageClamp((snapshot?.speed || 0) / codexPlusUsageSpeedPeak, 0, 1);
       parts.speed.needle.style.transform = `rotate(${-75 + needleRatio * 150}deg)`;
       node.dataset.state = snapshot?.completed ? "completed" : "running";
       node.setAttribute("aria-label", `${text.aria}：${text.speed(speed)}，${text.labels.hitRate} ${hitRate}`);

@@ -243,7 +243,6 @@ GOOD OUTPUT EXAMPLE:
       };
       const receive = (event) => {
         if (
-          event.source !== window ||
           event.data?.type !== "fetch-response" ||
           event.data.requestId !== requestId
         )
@@ -269,35 +268,111 @@ GOOD OUTPUT EXAMPLE:
       }
     });
   }
+  const BRIDGE_PROBE_TIMEOUT = 3000;
+  function bridgeFailureText(value, depth = 0) {
+    if (depth > 4 || value == null) return "";
+    if (typeof value === "string") {
+      if (value.length < 4000 && /^\s*[{[]/.test(value)) {
+        try {
+          return bridgeFailureText(JSON.parse(value), depth + 1);
+        } catch {
+          /* 普通错误文本 */
+        }
+      }
+      return value;
+    }
+    if (typeof value !== "object") return "";
+    return [value.message, value.error, value.code]
+      .map((part) => bridgeFailureText(part, depth + 1))
+      .join(" ");
+  }
   const unsupportedRoute = (value) =>
-    /unknown bridge path|未开放.*路由|未知.*bridge/i.test(String(value || ""));
+    /unknown bridge path|未开放.*路由|未知.*bridge/i.test(
+      bridgeFailureText(value),
+    );
+  async function checkBridge(bridge, signal) {
+    if (signal.aborted) throw abortError();
+    const probe = new AbortController();
+    const abort = () => probe.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, BRIDGE_PROBE_TIMEOUT);
+    try {
+      // 只检查本地桥接连通性；不携带模型地址、密钥或用户提示词。
+      const result = await raceAbort(
+        Promise.resolve().then(() => {
+          if (probe.signal.aborted) throw abortError();
+          return bridge.call(window, "/user-scripts/list", {});
+        }),
+        probe.signal,
+      );
+      if (signal.aborted) throw abortError();
+      const healthy =
+        result &&
+        typeof result === "object" &&
+        !Array.isArray(result) &&
+        (result.status === "ok" ||
+          (!result.status && Array.isArray(result.scripts))) &&
+        !result.error;
+      return healthy ? "ready" : "invalid";
+    } catch (error) {
+      if (signal.aborted) throw abortError();
+      return probe.signal.aborted ? "timeout" : "failed";
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+    }
+  }
   async function transport(payload, signal) {
     if (signal.aborted) throw abortError();
-    if (typeof window.__codexSessionDeleteBridge === "function") {
-      let result,
-        unsupported = false;
-      try {
-        result = await raceAbort(
-          window.__codexSessionDeleteBridge("/llm-proxy", {
-            ...payload,
-            timeout_ms: 60000,
-          }),
-          signal,
-        );
-      } catch (error) {
-        if (signal.aborted) throw abortError();
-        unsupported = unsupportedRoute(error?.message);
-        if (!unsupported)
-          throw new Error("LLM 请求通道失败，请检查宿主版本和网络");
-      }
+    const bridge = window.__codexSessionDeleteBridge;
+    if (typeof bridge === "function") {
+      const health = await checkBridge(bridge, signal);
       if (signal.aborted) throw abortError();
-      if (!unsupported) {
-        if (result?.status === "ok") return decode(result);
-        if (!result || typeof result !== "object")
-          throw new Error("LLM 请求通道返回了无效响应，未重复发送请求");
-        unsupported = unsupportedRoute(result.message || result.error);
-        if (!unsupported)
-          throw new Error("LLM 请求失败，请检查 API 地址和网络");
+      if (health === "ready") {
+        let result,
+          unsupported = false;
+        try {
+          result = await raceAbort(
+            Promise.resolve().then(() => {
+              if (signal.aborted) throw abortError();
+              return bridge.call(window, "/llm-proxy", {
+                ...payload,
+                timeout_ms: 60000,
+              });
+            }),
+            signal,
+          );
+        } catch (error) {
+          if (signal.aborted) throw abortError();
+          unsupported = unsupportedRoute(error);
+          if (!unsupported)
+            throw new Error(
+              "LLM Bridge 请求失败，未自动重发；请检查宿主连接及网络",
+            );
+        }
+        if (signal.aborted) throw abortError();
+        if (!unsupported) {
+          if (result?.status === "ok") return decode(result);
+          if (!result || typeof result !== "object")
+            throw new Error("LLM Bridge 返回了无效响应，未重复发送请求");
+          if (Number(result.http_status) > 0)
+            throw httpError(Number(result.http_status));
+          unsupported = unsupportedRoute(result);
+          if (!unsupported)
+            throw new Error(
+              "LLM Bridge 请求失败，未自动重发；请检查 API 地址及宿主连接",
+            );
+        }
+      } else {
+        const reason =
+          health === "timeout"
+            ? "Codex++ Bridge 检查超时（3 秒）"
+            : "Codex++ Bridge 检查未通过";
+        if (typeof window.electronBridge?.sendMessageFromView !== "function") {
+          throw new Error(
+            reason + "，尚未发送模型请求；当前没有可用的 Electron 通道",
+          );
+        }
       }
     }
     return electronRequest(payload, signal);
@@ -399,12 +474,13 @@ GOOD OUTPUT EXAMPLE:
     }, 60000);
     return current;
   }
-  const errorText = (error, current) =>
-    current?.timeout
-      ? "请求超时（60 秒），可重试"
-      : error?.name === "AbortError"
-        ? "已取消请求"
-        : error?.message || "请求失败";
+  function errorText(error, current) {
+    if (current?.timeout)
+      return "请求超时（60 秒），请检查网络及 API 配置；未自动重发";
+    return error?.name === "AbortError"
+      ? "已取消请求"
+      : error?.message || "请求失败";
+  }
   let discoveryNeeded = true,
     discoverySession = "";
   const EDITORS =

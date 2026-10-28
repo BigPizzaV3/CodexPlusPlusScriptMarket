@@ -400,7 +400,7 @@
       "tags": ["prompt", "productivity", "llm", "openai", "anthropic"],
       "homepage": "https://github.com/Meowv/prompt",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/prompt-enhancement.js",
-      "sha256": "c982930243d7a1c07ae836ee14766b1afd1d8a76ae1231673d1564fc0238b3bf",
+      "sha256": "a82b334616d7443792c11186d65c4e03494e577a7f8f76e39bf9b3e64aa50227",
       "requirements": [
         "Codex++ 用户脚本环境",
         "支持 OpenAI 兼容或 Anthropic 协议的模型 API、API Key 和模型 ID"

@@ -50,10 +50,14 @@
   const codexPlusUsageStatusLineId = "codex-plus-throughput-statusline";
   const codexPlusUsagePopoverId = "codex-plus-throughput-popover";
   const codexPlusUsageStyleId = "codex-plus-throughput-statusline-style";
-  const codexPlusUsageVersion = 42;
+  const codexPlusUsageVersion = 43;
   const codexPlusUsageThemeKey = "tokenlens-theme";
   const codexPlusUsageGlobalApiKey = "__codexDailyTokenUsage";
-  const codexPlusUsageGlobalRefreshMs = 5 * 60 * 1000;
+  const codexPlusUsageMagpieUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=7d&agent=codex&limit=1";
+  const codexPlusUsageMagpieTodayUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=today&agent=codex&limit=1";
+  const codexPlusUsageMagpieTaskUsageUrlPrefix = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=7d&agent=codex&limit=1&q=";
+  const codexPlusUsageMagpieRefreshMs = 2000;
+  const codexPlusUsageMagpieTimeoutMs = 3000;
   const codexPlusUsageActiveTickMs = 1000;
   const codexPlusUsageIdleTickMs = 4000;
   const codexPlusUsageLiveContextRefreshMs = 2000;
@@ -109,11 +113,18 @@
     historyLoading: false,
     historyError: "",
     historyPromise: null,
-    globalUsageFetchedAt: 0,
     globalUsageLoading: false,
     globalUsageError: "",
     globalUsagePromise: null,
+    globalUsageAggregate: null,
     globalUsageCoverage: { available: 0, total: 0 },
+    globalUsageSourceCoverage: { magpie: 0, daily: 0 },
+    magpieUsage: { fetchedAt: 0, snapshots: new Map(), sessions: new Map() },
+    magpieUsageLastAttemptAt: 0,
+    magpieUsageMaxAgeMs: 30_000,
+    magpieUsagePromise: null,
+    magpieUsageError: "",
+    appServicesPromise: null,
     nativeMessageHandler: null,
     nativeViewHandler: null,
     resizeHandler: null,
@@ -160,6 +171,9 @@
           today: "今天消耗",
           yesterday: "昨天消耗",
           week: "近7天消耗",
+          magpieLive: "Magpie 本地实时源 · 每 2 秒刷新 · Codex 全部任务",
+          taskMagpieLive: "当前任务已与 Magpie 请求累计对齐 · 近 7 天 · 每 2 秒刷新",
+          localFallback: "本地日报回退",
           presetTask: "任务",
           presetToday: "今天",
           presetYesterday: "昨天",
@@ -221,6 +235,9 @@
         today: "Today",
         yesterday: "Yesterday",
         week: "Last 7 days",
+        magpieLive: "Magpie local live source · refreshes every 2 seconds · all Codex tasks",
+        taskMagpieLive: "Current task is aligned to the Magpie request total · last 7 days · refreshes every 2 seconds",
+        localFallback: "Local daily fallback",
         presetTask: "Task",
         presetToday: "Today",
         presetYesterday: "Yesterday",
@@ -531,6 +548,15 @@
     const id = String(value || "").replace(/^local:/, "").trim();
     if (!id || id === "__proto__" || id === "prototype" || id === "constructor") return "";
     return /^[A-Za-z0-9_.-]{8,128}$/.test(id) ? id : "";
+  }
+
+  function codexPlusUsageUuidV7Timestamp(value) {
+    const compact = String(value || "").replace(/-/g, "");
+    if (!/^[0-9a-f]{12}/i.test(compact)) return null;
+    const timestamp = Number.parseInt(compact.slice(0, 12), 16);
+    return Number.isSafeInteger(timestamp) && timestamp >= 1_000_000_000_000
+      ? timestamp
+      : null;
   }
 
   function codexPlusUsageEventData(payload) {
@@ -1364,6 +1390,317 @@
     return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
   }
 
+  function codexPlusUsageMagpieDateKey(value) {
+    const timestamp = Date.parse(String(value || ""));
+    return Number.isFinite(timestamp) ? codexPlusUsageBeijingDateKey(timestamp) : "";
+  }
+
+  function codexPlusUsageMagpieSnapshotFromValues(source, dateKey = "") {
+    if (!dateKey || !source || typeof source !== "object") return null;
+    const input = codexPlusUsageNumber(source.input) ?? 0;
+    const output = codexPlusUsageNumber(source.output) ?? 0;
+    const cached = codexPlusUsageNumber(source.cache_read) ?? codexPlusUsageNumber(source.cached) ?? 0;
+    return {
+      dateKey,
+      input,
+      output,
+      cached,
+      reasoning: codexPlusUsageNumber(source.reasoning) ?? 0,
+      total: input + cached + output,
+      calls: codexPlusUsageNumber(source.calls) ?? 0,
+      cost: codexPlusUsageNumber(source.cost) ?? 0,
+      source: "magpie",
+    };
+  }
+
+  function codexPlusUsageMagpieSnapshots(payload) {
+    const snapshots = new Map();
+    for (const row of Array.isArray(payload?.series) ? payload.series : []) {
+      const dateKey = codexPlusUsageMagpieDateKey(row?.time);
+      const snapshot = codexPlusUsageMagpieSnapshotFromValues(row, dateKey);
+      if (snapshot) snapshots.set(dateKey, snapshot);
+    }
+    return snapshots;
+  }
+
+  function codexPlusUsageMagpieSessions(payload) {
+    const sessions = new Map();
+    for (const row of Array.isArray(payload?.sessions) ? payload.sessions : []) {
+      const id = codexPlusUsageNormalizeThreadId(row?.id);
+      if (!id) continue;
+      const input = codexPlusUsageNumber(row?.input) ?? 0;
+      const output = codexPlusUsageNumber(row?.output) ?? 0;
+      const cached = codexPlusUsageNumber(row?.cache_read) ?? codexPlusUsageNumber(row?.cached) ?? 0;
+      sessions.set(id, {
+        id,
+        agent: String(row?.agent || "").trim(),
+        input,
+        output,
+        cached,
+        reasoning: codexPlusUsageNumber(row?.reasoning) ?? 0,
+        total: input + cached + output,
+        calls: codexPlusUsageNumber(row?.calls) ?? 0,
+        cost: codexPlusUsageNumber(row?.cost) ?? 0,
+        source: "magpie",
+      });
+    }
+    return sessions;
+  }
+
+  function codexPlusUsageMagpieTodaySnapshot(payload, now = Date.now()) {
+    if (!payload || typeof payload !== "object") return null;
+    const dateKey = codexPlusUsageMagpieDateKey(payload.since || payload.time)
+      || codexPlusUsageBeijingDateKey(now);
+    return codexPlusUsageMagpieSnapshotFromValues(payload, dateKey);
+  }
+
+  function codexPlusUsageMagpieTaskSession(payload, threadId) {
+    const id = codexPlusUsageNormalizeThreadId(threadId);
+    const snapshot = codexPlusUsageMagpieSnapshotFromValues(payload, "task");
+    if (!id || !snapshot) return null;
+    return {
+      id,
+      agent: "codex",
+      input: snapshot.input,
+      output: snapshot.output,
+      cached: snapshot.cached,
+      reasoning: snapshot.reasoning,
+      total: snapshot.total,
+      calls: snapshot.calls,
+      cost: snapshot.cost,
+      source: "magpie",
+    };
+  }
+
+  function codexPlusUsageAbsoluteUrl(value) {
+    if (!value) return "";
+    try {
+      return new URL(String(value), document.baseURI || location.href).href;
+    } catch {
+      return "";
+    }
+  }
+
+  function codexPlusUsageCollectAssetUrls() {
+    const urls = new Set();
+    const push = (value) => {
+      const url = codexPlusUsageAbsoluteUrl(value);
+      if (url && /\/assets\/.+\.js(?:$|\?)/.test(url)) urls.add(url);
+    };
+    try {
+      document.querySelectorAll?.("script[src],link[href]")?.forEach((node) => {
+        push(node?.getAttribute?.("src") || node?.getAttribute?.("href") || "");
+      });
+    } catch {
+      // 页面 DOM 不可用时仍尝试 performance 资源列表。
+    }
+    try {
+      performance.getEntriesByType?.("resource")?.forEach((entry) => push(entry?.name));
+    } catch {
+      // 旧宿主可能没有 performance 资源条目。
+    }
+    return [...urls];
+  }
+
+  async function codexPlusUsageResolveAppServices() {
+    const state = codexPlusUsageState;
+    if (state.appServicesPromise) return state.appServicesPromise;
+    const promise = (async () => {
+      const urls = codexPlusUsageCollectAssetUrls()
+        .filter((url) => /\/assets\/rpc-[^/]+\.js(?:$|\?)/.test(url));
+      for (const url of urls) {
+        try {
+          const moduleExports = await import(/* @vite-ignore */ url);
+          const services = moduleExports?.appServices;
+          if (services?.httpFetch && typeof services.httpFetch.fetch === "function") {
+            return services;
+          }
+        } catch {
+          // 继续尝试下一个已加载的 RPC 资源。
+        }
+      }
+      return null;
+    })();
+    state.appServicesPromise = promise;
+    try {
+      const services = await promise;
+      if (!services && state.appServicesPromise === promise) state.appServicesPromise = null;
+      return services;
+    } catch (error) {
+      if (state.appServicesPromise === promise) state.appServicesPromise = null;
+      throw error;
+    }
+  }
+
+  async function codexPlusUsageServiceGetJson(services, url) {
+    if (!services?.httpFetch || typeof services.httpFetch.fetch !== "function") {
+      throw new Error("HTTP fetch service 不可用");
+    }
+    const requestId = `tokenlens-magpie-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const result = await services.httpFetch.fetch(requestId, {
+      url,
+      method: "GET",
+      headers: {},
+      retry: false,
+    });
+    if (!result?.response) throw new Error(result?.error || "HTTP fetch service 未返回响应");
+    if (!result.response.ok) throw new Error(`Magpie 请求失败 (${result.response.status || 0})`);
+    try {
+      return await result.response.json();
+    } finally {
+      result?.[Symbol.dispose]?.();
+    }
+  }
+
+  async function codexPlusUsageBridgeGetJson(url) {
+    try {
+      const services = await codexPlusUsageResolveAppServices();
+      if (services?.httpFetch) return await codexPlusUsageServiceGetJson(services, url);
+    } catch {
+      // 新宿主优先走官方 HTTP service；旧宿主继续尝试 renderer bridge。
+    }
+    const bridge = window.electronBridge;
+    if (!bridge || typeof bridge.sendMessageFromView !== "function") {
+      throw new Error("Electron bridge 不可用");
+    }
+    const requestId = `tokenlens-magpie-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = 0;
+      const cleanup = () => {
+        if (timer) window.clearTimeout(timer);
+        window.removeEventListener?.("message", handler, true);
+      };
+      const settle = (data) => {
+        if (settled || !data || data.requestId !== requestId || data.type !== "fetch-response") return false;
+        settled = true;
+        cleanup();
+        const status = Number(data.status) || 0;
+        if (data.responseType !== "success" || status >= 400) {
+          reject(new Error(`Magpie 请求失败${status ? ` (${status})` : ""}`));
+          return true;
+        }
+        try {
+          const body = data.bodyJsonString ?? data.body ?? data.bodyJson ?? "{}";
+          resolve(typeof body === "string" ? JSON.parse(body) : body);
+        } catch (error) {
+          reject(error);
+        }
+        return true;
+      };
+      const handler = (event) => {
+        settle(event?.data);
+      };
+      window.addEventListener?.("message", handler, true);
+      timer = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error("Magpie 请求超时"));
+      }, codexPlusUsageMagpieTimeoutMs);
+      Promise.resolve(
+        bridge.sendMessageFromView({
+          type: "fetch",
+          method: "GET",
+          url,
+          requestId,
+        }),
+      )
+        .then(settle)
+        .catch((error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        });
+    });
+  }
+
+  async function codexPlusUsageRefreshMagpieUsage(force = false) {
+    const state = codexPlusUsageState;
+    if (state.disposed) return { ok: false, changed: false };
+    if (state.magpieUsagePromise) return state.magpieUsagePromise;
+    const now = Date.now();
+    if (!force && now - state.magpieUsageLastAttemptAt < codexPlusUsageMagpieRefreshMs) {
+      return { ok: state.magpieUsage.fetchedAt > 0, changed: false };
+    }
+    state.magpieUsageLastAttemptAt = now;
+    state.magpieUsagePromise = (async () => {
+      try {
+        const taskId = codexPlusUsageNormalizeThreadId(state.threadId);
+        const taskUrl = taskId
+          ? codexPlusUsageMagpieTaskUsageUrlPrefix + encodeURIComponent(taskId)
+          : "";
+        const [weekResult, todayResult, taskResult] = await Promise.allSettled([
+          codexPlusUsageBridgeGetJson(codexPlusUsageMagpieUsageUrl),
+          codexPlusUsageBridgeGetJson(codexPlusUsageMagpieTodayUsageUrl),
+          taskUrl ? codexPlusUsageBridgeGetJson(taskUrl) : Promise.resolve(null),
+        ]);
+        const snapshots = new Map();
+        const errors = [];
+        if (weekResult.status === "fulfilled") {
+          for (const [dateKey, snapshot] of codexPlusUsageMagpieSnapshots(weekResult.value)) {
+            snapshots.set(dateKey, snapshot);
+          }
+        } else {
+          errors.push(String(weekResult.reason?.message || weekResult.reason));
+        }
+        if (todayResult.status === "fulfilled") {
+          const today = codexPlusUsageMagpieTodaySnapshot(todayResult.value);
+          if (today) snapshots.set(today.dateKey, today);
+        } else {
+          errors.push(String(todayResult.reason?.message || todayResult.reason));
+        }
+        const sessions = new Map();
+        if (taskResult.status === "fulfilled") {
+          const task = codexPlusUsageMagpieTaskSession(taskResult.value, taskId);
+          if (task) sessions.set(task.id, task);
+        } else {
+          errors.push(`当前任务: ${String(taskResult.reason?.message || taskResult.reason)}`);
+        }
+        if (!snapshots.size) throw new Error(errors.join("；") || "Magpie 未返回可用用量");
+        if (state.disposed) return { ok: false, changed: false };
+        let changed = state.magpieUsage.snapshots.size !== snapshots.size
+          || state.magpieUsage.sessions.size !== sessions.size;
+        for (const [dateKey, snapshot] of snapshots) {
+          const previous = state.magpieUsage.snapshots.get(dateKey);
+          if (
+            previous?.total !== snapshot.total
+            || previous?.input !== snapshot.input
+            || previous?.output !== snapshot.output
+            || previous?.cached !== snapshot.cached
+            || previous?.calls !== snapshot.calls
+          ) {
+            changed = true;
+          }
+        }
+        for (const [id, session] of sessions) {
+          const previous = state.magpieUsage.sessions.get(id);
+          if (
+            previous?.total !== session.total
+            || previous?.input !== session.input
+            || previous?.output !== session.output
+            || previous?.cached !== session.cached
+            || previous?.calls !== session.calls
+          ) {
+            changed = true;
+          }
+        }
+        state.magpieUsage = { fetchedAt: Date.now(), snapshots, sessions };
+        state.magpieUsageError = "";
+        return { ok: true, changed };
+      } catch (error) {
+        if (!state.disposed) {
+          state.magpieUsageError = String(error?.message || error);
+        }
+        return { ok: false, changed: false, error: state.magpieUsageError };
+      } finally {
+        state.magpieUsagePromise = null;
+      }
+    })();
+    return state.magpieUsagePromise;
+  }
+
   function codexPlusUsageGlobalDateKeys(startAt, endAt) {
     if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || endAt < startAt) return [];
     const dayMs = 24 * 60 * 60 * 1000;
@@ -1377,35 +1714,119 @@
     return keys;
   }
 
-  function codexPlusUsageGlobalTotal(range, now = Date.now(), api = window[codexPlusUsageGlobalApiKey]) {
+  function codexPlusUsageNormalizeGlobalDay(snapshot, source = "daily") {
+    if (!snapshot || !Number.isFinite(codexPlusUsageNumber(snapshot.total))) return null;
+    const rawInput = codexPlusUsageNumber(snapshot.input) ?? 0;
+    const cached = codexPlusUsageNumber(snapshot.cached) ?? codexPlusUsageNumber(snapshot.cache_read) ?? 0;
+    const output = codexPlusUsageNumber(snapshot.output) ?? 0;
+    const magpie = source === "magpie"
+      || snapshot.usageSource === "magpie"
+      || snapshot.source === "magpie";
+    // Magpie 的 input 是非缓存输入；本地日报的 input 是含缓存的总输入。
+    const input = magpie ? rawInput : Math.max(0, rawInput - cached);
+    return {
+      input,
+      cached,
+      output,
+      inputTotal: input + cached,
+      total: codexPlusUsageNumber(snapshot.total),
+      calls: codexPlusUsageNumber(snapshot.calls) ?? 0,
+    };
+  }
+
+  function codexPlusUsageGlobalAggregate(
+    range,
+    now = Date.now(),
+    api = window[codexPlusUsageGlobalApiKey],
+    magpieUsage = codexPlusUsageState.magpieUsage,
+  ) {
     const bounds = codexPlusUsageRangeBounds(range, now);
     if (!bounds) return null;
     if (!codexPlusUsageIsGlobalRange(range)) return null;
-    if (typeof api?.getSnapshot !== "function") return null;
     const keys = codexPlusUsageGlobalDateKeys(bounds.start, bounds.end);
     if (!keys.length) return null;
-    let total = 0;
+    const maxAge = Number.isFinite(codexPlusUsageState.magpieUsageMaxAgeMs)
+      ? codexPlusUsageState.magpieUsageMaxAgeMs
+      : 30_000;
+    const magpieFresh = !!magpieUsage?.fetchedAt
+      && now >= magpieUsage.fetchedAt
+      && now - magpieUsage.fetchedAt <= maxAge
+      && typeof magpieUsage.snapshots?.get === "function";
+    const dailyAvailable = typeof api?.getSnapshot === "function";
+    if (!magpieFresh && !dailyAvailable) return null;
+    const aggregate = {
+      total: 0,
+      input: 0,
+      output: 0,
+      cached: 0,
+      inputTotal: 0,
+      calls: 0,
+      hitRate: null,
+    };
     let available = 0;
+    let magpieDays = 0;
+    let dailyDays = 0;
     for (const key of keys) {
+      const magpieSnapshot = magpieFresh ? magpieUsage.snapshots.get(key) : null;
+      const magpieDay = codexPlusUsageNormalizeGlobalDay(magpieSnapshot, "magpie");
+      if (magpieDay) {
+        available += 1;
+        magpieDays += 1;
+        aggregate.total += magpieDay.total;
+        aggregate.input += magpieDay.input;
+        aggregate.output += magpieDay.output;
+        aggregate.cached += magpieDay.cached;
+        aggregate.inputTotal += magpieDay.inputTotal;
+        aggregate.calls += magpieDay.calls;
+        continue;
+      }
+      if (!dailyAvailable) continue;
       const snapshot = api.getSnapshot(key);
       if (snapshot?.dateKey !== key || !Number.isFinite(snapshot?.total)) continue;
+      const dailyDay = codexPlusUsageNormalizeGlobalDay(snapshot, "daily");
+      if (!dailyDay) continue;
       available += 1;
-      total += snapshot.total;
+      const isMagpie = snapshot.usageSource === "magpie" || snapshot.source === "magpie";
+      if (isMagpie) magpieDays += 1;
+      else dailyDays += 1;
+      aggregate.total += dailyDay.total;
+      aggregate.input += dailyDay.input;
+      aggregate.output += dailyDay.output;
+      aggregate.cached += dailyDay.cached;
+      aggregate.inputTotal += dailyDay.inputTotal;
+      aggregate.calls += dailyDay.calls;
     }
     codexPlusUsageState.globalUsageCoverage = { available, total: keys.length };
-    return available ? total : null;
+    codexPlusUsageState.globalUsageSourceCoverage = { magpie: magpieDays, daily: dailyDays };
+    const result = available ? aggregate : null;
+    if (result) {
+      result.hitRate = result.inputTotal > 0
+        ? Math.min(1, result.cached / result.inputTotal)
+        : null;
+    }
+    codexPlusUsageState.globalUsageAggregate = result;
+    return result;
+  }
+
+  function codexPlusUsageGlobalTotal(...args) {
+    return codexPlusUsageGlobalAggregate(...args)?.total ?? null;
   }
 
   async function codexPlusUsageRefreshGlobalUsage(force = false) {
     if (codexPlusUsageState.globalUsagePromise) return codexPlusUsageState.globalUsagePromise;
-    if (!force && Date.now() - codexPlusUsageState.globalUsageFetchedAt < codexPlusUsageGlobalRefreshMs) return null;
     codexPlusUsageState.globalUsageLoading = true;
     codexPlusUsageState.globalUsageError = "";
     codexPlusUsageState.globalUsagePromise = (async () => {
-      const api = window[codexPlusUsageGlobalApiKey];
-      if (typeof api?.getSnapshot !== "function") throw new Error("未找到每日消耗数据源");
-      if (typeof api.runHistoryBackfill === "function") await api.runHistoryBackfill();
-      codexPlusUsageState.globalUsageFetchedAt = Date.now();
+      const magpie = await codexPlusUsageRefreshMagpieUsage(force);
+      const aggregate = codexPlusUsageGlobalAggregate(codexPlusUsageState.range);
+      if (!aggregate && !magpie.ok) {
+        throw new Error(magpie.error
+          ? `Magpie 不可用，且没有本地日报：${magpie.error}`
+          : "没有可用的每日消耗数据源");
+      }
+      codexPlusUsageState.globalUsageError = magpie.ok
+        ? ""
+        : `Magpie 不可用，已回退本地日报：${magpie.error || "未知错误"}`;
     })().catch((error) => {
       codexPlusUsageState.globalUsageError = String(error?.message || error);
     }).finally(() => {
@@ -1418,19 +1839,61 @@
     return codexPlusUsageState.globalUsagePromise;
   }
 
+  function codexPlusUsageTaskUsage(snapshot, now = Date.now()) {
+    const local = snapshot?.usage || null;
+    const state = codexPlusUsageState;
+    const maxAge = Number.isFinite(state.magpieUsageMaxAgeMs)
+      ? state.magpieUsageMaxAgeMs
+      : 30_000;
+    const fresh = !!state.magpieUsage?.fetchedAt
+      && now >= state.magpieUsage.fetchedAt
+      && now - state.magpieUsage.fetchedAt <= maxAge
+      && typeof state.magpieUsage.sessions?.get === "function";
+    const session = fresh ? state.magpieUsage.sessions.get(state.threadId) : null;
+    if (!local && !session) return null;
+    const localCached = codexPlusUsageNumber(local?.cached) ?? 0;
+    const localInput = Math.max(0, (codexPlusUsageNumber(local?.input) ?? 0) - localCached);
+    const input = Math.max(localInput, codexPlusUsageNumber(session?.input) ?? 0);
+    const cached = Math.max(localCached, codexPlusUsageNumber(session?.cached) ?? 0);
+    const output = Math.max(
+      codexPlusUsageNumber(local?.output) ?? 0,
+      codexPlusUsageNumber(session?.output) ?? 0,
+    );
+    const inputTotal = input + cached;
+    return {
+      input,
+      cached,
+      output,
+      total: inputTotal + output,
+      hitRate: inputTotal > 0 ? Math.min(1, cached / inputTotal) : null,
+      calls: Math.max(
+        codexPlusUsageNumber(snapshot?.samples) ?? 0,
+        codexPlusUsageNumber(session?.calls) ?? 0,
+      ),
+      source: session ? "magpie" : "local",
+    };
+  }
+
+  function codexPlusUsageSelectedUsage(snapshot) {
+    if (codexPlusUsageState.range === "task") return codexPlusUsageTaskUsage(snapshot);
+    return codexPlusUsageGlobalAggregate(codexPlusUsageState.range);
+  }
+
   function codexPlusUsageSelectedConsumption(snapshot) {
     const text = codexPlusUsageText();
+    const usage = codexPlusUsageSelectedUsage(snapshot);
     if (codexPlusUsageState.range === "task") {
-      return { label: text.labels.task, value: snapshot?.usage?.total ?? null };
+      return { label: text.labels.task, value: usage?.total ?? null, usage };
     }
-    const value = codexPlusUsageGlobalTotal(codexPlusUsageState.range);
     const base = text.labels[codexPlusUsageState.range] || text.labels.custom;
     const coverage = codexPlusUsageState.globalUsageCoverage;
+    const coverageLabel = coverage.total > coverage.available
+      ? `${base}（${coverage.available}/${coverage.total}）`
+      : base;
     return {
-      label: coverage.total > coverage.available
-        ? `${base}（${coverage.available}/${coverage.total}）`
-        : base,
-      value,
+      label: coverageLabel,
+      value: usage?.total ?? null,
+      usage,
     };
   }
 
@@ -2195,11 +2658,12 @@
       : "";
     parts.toolToggle.disabled = !snapshot?.toolDetails?.length;
     parts.fields.tool.textContent = codexPlusUsageFormatDuration(snapshot?.toolMs);
-    parts.fields.input.textContent = codexPlusUsageFormatM(snapshot?.usage?.input);
-    parts.fields.output.textContent = codexPlusUsageFormatM(snapshot?.usage?.output);
-    parts.fields.cacheRead.textContent = codexPlusUsageFormatM(snapshot?.usage?.cached);
-    parts.fields.hitRate.textContent = codexPlusUsageFormatPercent(snapshot?.usage?.hitRate);
     const consumption = codexPlusUsageSelectedConsumption(snapshot);
+    const usage = consumption.usage;
+    parts.fields.input.textContent = codexPlusUsageFormatM(usage?.input);
+    parts.fields.output.textContent = codexPlusUsageFormatM(usage?.output);
+    parts.fields.cacheRead.textContent = codexPlusUsageFormatM(usage?.cached);
+    parts.fields.hitRate.textContent = codexPlusUsageFormatPercent(usage?.hitRate);
     const globalRange = codexPlusUsageState.range !== "task";
     const consumptionLoading = globalRange
       ? codexPlusUsageState.globalUsageLoading && consumption.value == null
@@ -2208,17 +2672,27 @@
     parts.fields.consumption.textContent = consumptionLoading
       ? text.labels.loading
       : codexPlusUsageFormatCount(consumption.value);
+    const sources = codexPlusUsageState.globalUsageSourceCoverage;
     parts.fields.consumption.title = globalRange
-      ? codexPlusUsageState.globalUsageError
-      : codexPlusUsageState.historyError;
+      ? codexPlusUsageState.magpieUsageError
+        || codexPlusUsageState.globalUsageError
+        || (sources?.magpie > 0 ? text.labels.magpieLive : "")
+      : usage?.source === "magpie"
+        ? text.labels.taskMagpieLive
+        : codexPlusUsageState.historyError;
     parts.tokenToggle.setAttribute("aria-expanded", String(codexPlusUsageState.tokenExpanded));
     parts.tokenPanel.hidden = !codexPlusUsageState.tokenExpanded;
     for (const button of parts.presets) {
       button.setAttribute("aria-pressed", String(button.dataset.range === codexPlusUsageState.range));
     }
     if (codexPlusUsageState.range !== "custom") {
+      const taskStartedAt = codexPlusUsageState.range === "task"
+        ? codexPlusUsageUuidV7Timestamp(codexPlusUsageState.threadId) ?? snapshot?.startedAt
+        : null;
       const bounds = codexPlusUsageState.range === "task"
-        ? (snapshot?.startedAt != null ? { start: snapshot.startedAt, end: snapshot.endedAt } : null)
+        ? (taskStartedAt != null
+          ? { start: taskStartedAt, end: snapshot?.endedAt ?? Date.now() }
+          : null)
         : codexPlusUsageRangeBounds(codexPlusUsageState.range);
       if (bounds) {
         codexPlusUsageState.customStart = codexPlusUsageBeijingDateTime(bounds.start);
@@ -2275,9 +2749,7 @@
     if (codexPlusUsageState.historyThreadId !== codexPlusUsageState.threadId) {
       void codexPlusUsageLoadHistory();
     }
-    if (codexPlusUsageState.range !== "task") {
-      void codexPlusUsageRefreshGlobalUsage();
-    }
+    void codexPlusUsageRefreshGlobalUsage();
     const parts = codexPlusUsageBuildPopover();
     codexPlusUsageUpdatePopover(
       codexPlusUsageTurnSnapshot(codexPlusUsageState.turns.get(codexPlusUsageState.threadId), Date.now()),
@@ -2316,22 +2788,35 @@
 
   function codexPlusUsageRenderFingerprint(snapshot, context) {
     if (!snapshot) {
+      const consumption = codexPlusUsageSelectedConsumption(null);
+      const usage = consumption.usage;
       return [
         "empty",
         context.percent,
         context.window,
+        usage?.input,
+        usage?.output,
+        usage?.cached,
+        usage?.hitRate,
+        usage?.source,
+        consumption.label,
+        consumption.value,
         codexPlusUsageState.range,
         codexPlusUsageState.historyLoading,
         codexPlusUsageState.historyError,
         codexPlusUsageState.globalUsageLoading,
         codexPlusUsageState.globalUsageError,
+        codexPlusUsageState.magpieUsageError,
         codexPlusUsageState.globalUsageCoverage.available,
         codexPlusUsageState.globalUsageCoverage.total,
+        codexPlusUsageState.globalUsageSourceCoverage.magpie,
+        codexPlusUsageState.globalUsageSourceCoverage.daily,
       ].join("|");
     }
     const speed = snapshot.speed == null ? "--" : codexPlusUsageFormatSpeed(snapshot.speed);
-    const hitRate = codexPlusUsageFormatPercent(snapshot.usage?.hitRate);
     const consumption = codexPlusUsageSelectedConsumption(snapshot);
+    const usage = consumption.usage;
+    const hitRate = codexPlusUsageFormatPercent(usage?.hitRate);
     const toolDetails = (snapshot.toolDetails || []).map((detail) => `${detail.label}:${detail.durationMs}`).join(",");
     return [
       speed,
@@ -2341,10 +2826,11 @@
       context.window,
       snapshot.toolMs,
       toolDetails,
-      snapshot.usage?.input,
-      snapshot.usage?.output,
-      snapshot.usage?.cached,
-      snapshot.usage?.hitRate,
+      usage?.input,
+      usage?.output,
+      usage?.cached,
+      usage?.hitRate,
+      usage?.source,
       hitRate,
       consumption.label,
       consumption.value,
@@ -2353,6 +2839,9 @@
       codexPlusUsageState.historyError,
       codexPlusUsageState.globalUsageLoading,
       codexPlusUsageState.globalUsageError,
+      codexPlusUsageState.magpieUsageError,
+      codexPlusUsageState.globalUsageSourceCoverage.magpie,
+      codexPlusUsageState.globalUsageSourceCoverage.daily,
       codexPlusUsageState.historyFetchedAt,
       codexPlusUsageState.toolExpanded,
       codexPlusUsageState.tokenExpanded,
@@ -2367,7 +2856,8 @@
     const parts = codexPlusUsageState.parts || codexPlusUsageBuild(node);
     const text = codexPlusUsageText();
     const speed = snapshot?.speed == null ? "--" : codexPlusUsageFormatSpeed(snapshot.speed);
-    const hitRate = codexPlusUsageFormatPercent(snapshot?.usage?.hitRate);
+    const consumption = codexPlusUsageSelectedConsumption(snapshot);
+    const hitRate = codexPlusUsageFormatPercent(consumption.usage?.hitRate);
     const context = codexPlusUsageContextSnapshot(
       codexPlusUsageState.turns.get(codexPlusUsageState.threadId),
       codexPlusUsageState.liveContextByThread.get(codexPlusUsageState.threadId),
@@ -2478,9 +2968,13 @@
         ));
       });
     }
-    codexPlusUsageSchedule(turn && turn.completedAt == null && !document.hidden
-      ? codexPlusUsageActiveTickMs
-      : codexPlusUsageIdleTickMs);
+    const liveUsageRange = !codexPlusUsageState.popover?.hidden;
+    if (placement && liveUsageRange) void codexPlusUsageRefreshGlobalUsage();
+    codexPlusUsageSchedule(liveUsageRange
+      ? codexPlusUsageMagpieRefreshMs
+      : turn && turn.completedAt == null && !document.hidden
+        ? codexPlusUsageActiveTickMs
+        : codexPlusUsageIdleTickMs);
   }
 
   codexPlusUsageInstallStyle();
@@ -2531,11 +3025,17 @@
       codexPlusUsageState.parts = null;
       codexPlusUsageState.popover = null;
       codexPlusUsageState.popoverParts = null;
-      codexPlusUsageState.globalUsageFetchedAt = 0;
       codexPlusUsageState.globalUsageLoading = false;
       codexPlusUsageState.globalUsageError = "";
       codexPlusUsageState.globalUsagePromise = null;
+      codexPlusUsageState.globalUsageAggregate = null;
       codexPlusUsageState.globalUsageCoverage = { available: 0, total: 0 };
+      codexPlusUsageState.globalUsageSourceCoverage = { magpie: 0, daily: 0 };
+      codexPlusUsageState.magpieUsage = { fetchedAt: 0, snapshots: new Map(), sessions: new Map() };
+      codexPlusUsageState.magpieUsageLastAttemptAt = 0;
+      codexPlusUsageState.magpieUsagePromise = null;
+      codexPlusUsageState.magpieUsageError = "";
+      codexPlusUsageState.appServicesPromise = null;
       codexPlusUsageState.lastFingerprint = "";
       globalThis.__CODEX_PLUS_THROUGHPUT_STATUSLINE_SYNC__ = undefined;
       if (globalThis.__CODEX_PLUS_USAGE_STATUSLINE_SYNC__ === codexPlusUsageStatusLineSync) {

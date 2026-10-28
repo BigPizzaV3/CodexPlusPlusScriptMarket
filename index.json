@@ -329,7 +329,7 @@
       ],
       "homepage": "https://github.com/LingYingNX/TokenLens-for-Codex",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tokenlens-for-codex.js",
-      "sha256": "84142a7e93a791bd779d9d455272679582137575c6f38c4bb7787e049c4dbd60",
+      "sha256": "0cb94db3fbcf66f513f7998d80a11a43e45cd881ff630ffc9458ea73acca8459",
       "requirements": [
         "Codex++ 用户脚本环境",
         "Codex Desktop 提供本地事件与会话记录"

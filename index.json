@@ -390,6 +390,26 @@
         "每段的方向由该段第一个有方向的字符决定，以英文开头的阿拉伯语段落会按从左往右显示",
         "依赖 Codex 对话与输入框的页面结构，应用更新可能影响兼容性"
       ]
+    },
+    {
+      "id": "prompt-enhancement",
+      "name": "增强提示词",
+      "description": "在发送前增强 Codex 输入框中的提示词，支持 OpenAI 兼容和 Anthropic API，并提供还原及保守回填。",
+      "version": "1.0.0",
+      "author": "Meowv",
+      "tags": ["prompt", "productivity", "llm", "openai", "anthropic"],
+      "homepage": "https://github.com/Meowv/prompt",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/prompt-enhancement.js",
+      "sha256": "c982930243d7a1c07ae836ee14766b1afd1d8a76ae1231673d1564fc0238b3bf",
+      "requirements": [
+        "Codex++ 用户脚本环境",
+        "支持 OpenAI 兼容或 Anthropic 协议的模型 API、API Key 和模型 ID"
+      ],
+      "limitations": [
+        "提示词会发送到用户配置的模型 API 服务",
+        "API Key 和配置保存在渲染环境的 localStorage",
+        "依赖宿主请求桥接和 Codex 输入区结构"
+      ]
     }
   ]
 }

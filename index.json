@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-26T12:51:20.000Z",
+  "updated_at": "2026-10-28T19:56:54.339Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -389,6 +389,32 @@
         "只调整对话内容、用户气泡与输入框，不把整个界面翻转成从右往左",
         "每段的方向由该段第一个有方向的字符决定，以英文开头的阿拉伯语段落会按从左往右显示",
         "依赖 Codex 对话与输入框的页面结构，应用更新可能影响兼容性"
+      ]
+    },
+    {
+      "id": "codex-native-wide-model-picker",
+      "name": "Codex Native Wide Model Picker",
+      "description": "提高 Codex 原生模型常驻栏的自适应宽度上限，并将模型列表和推理面板扩宽到 1.5 倍；不替换原生模型选择器。",
+      "version": "1.0.0",
+      "author": "Lesinthome0",
+      "tags": [
+        "codex",
+        "models",
+        "reasoning",
+        "ui",
+        "picker"
+      ],
+      "homepage": "",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-native-wide-model-picker.js",
+      "sha256": "D36FC387C96964422AEB376E778B4641FF871F44249AC9B86D38C0E82E43B015",
+      "requirements": [
+        "Codex++ 2.0 用户脚本环境",
+        "Codex Desktop 原生模型选择器"
+      ],
+      "limitations": [
+        "依赖 Codex 页面 DOM，Codex 更新后可能需要适配",
+        "只调整模型栏宽度，不改变模型选择或推理参数",
+        "不要与 Model Deck 等接管模型按钮的脚本同时启用"
       ]
     }
   ]

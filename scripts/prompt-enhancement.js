@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         增强提示词
 // @namespace    prompt-enhancement
-// @version      1.0.0
+// @version      1.0.1
 // @description  在发送前智能优化 Codex 输入框中的提示词
 // @author:      Meowv
 // ==/UserScript==
@@ -484,16 +484,31 @@ GOOD OUTPUT EXAMPLE:
   let discoveryNeeded = true,
     discoverySession = "";
   const EDITORS =
-    '[data-axpe-locked], textarea, .ProseMirror[contenteditable="true"], [contenteditable="true"], [contenteditable=""]';
+    '[data-axpe-locked], textarea, .ProseMirror[contenteditable="true"], [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]';
   const COMPOSERS =
     '[data-testid*="composer"], [data-composer], .composer-surface-chrome';
-  const SEND_CONTROLS =
-    'button[aria-label*="Send"], button[aria-label*="发送"], button[data-testid*="send"]';
+  const COMPOSER_CONTROLS =
+    'button[aria-label*="Send"], button[aria-label*="发送"], button[data-testid*="send"], button[aria-label*="Stop"], button[aria-label*="停止"], button[data-testid*="stop"]';
+  function writable(node) {
+    return !!(
+      node &&
+      !node.disabled &&
+      (!node.readOnly || activeLock?.owns(node)) &&
+      node.matches(EDITORS)
+    );
+  }
   function candidate(node) {
+    // 已确认的绑定不依赖会随输入变化的提示属性、控件或容器高度。
+    const retained =
+      node === editor &&
+      node.isConnected &&
+      shell?.isConnected &&
+      shell.contains(node) &&
+      discoverySession === session();
     if (
       own(node) ||
-      node.disabled ||
-      (node.readOnly && !activeLock?.owns(node)) ||
+      (!retained &&
+        (node.disabled || (node.readOnly && !activeLock?.owns(node)))) ||
       node.closest(
         'aside, nav, [role="dialog"], [role="search"], [data-sidebar], [inert]',
       )
@@ -517,20 +532,25 @@ GOOD OUTPUT EXAMPLE:
     const semantic =
       node.classList.contains("ProseMirror") ||
       /prompt|message|消息|询问|ask|follow.up/i.test(hint);
+    // 输入后宿主可能移除占位提示，先通过稳定的输入区结构确认归属。
+    let container =
+      (retained ? shell : null) ||
+      node.parentElement?.closest(".composer-surface-chrome") ||
+      node.parentElement?.closest(COMPOSERS);
     if (
       !semantic &&
+      !container &&
       !activeLock?.owns(node) &&
       !node.matches('[data-message-input], [data-testid*="composer"]')
     )
       return null;
-    let container = node.closest(COMPOSERS);
     if (!container && semantic) {
       for (
         let p = node.parentElement, depth = 0;
         p && p !== document.body && depth < 5;
         p = p.parentElement, depth++
       ) {
-        if (p.querySelector(SEND_CONTROLS)) {
+        if (p.querySelector(COMPOSER_CONTROLS)) {
           container = p;
           break;
         }
@@ -539,16 +559,10 @@ GOOD OUTPUT EXAMPLE:
     if (
       !container ||
       container === document.body ||
-      container.getBoundingClientRect().height > innerHeight * 0.75
+      (!retained && container.getBoundingClientRect().height > innerHeight * 0.75)
     )
       return null;
-    if (
-      !container.querySelector(
-        SEND_CONTROLS +
-          ', .composer-footer, [data-composer-footer], [data-testid="composer-footer"]',
-      )
-    )
-      return null;
+    // 已明确识别的 Composer 不依赖发送按钮；运行期间可能只有停止或排队控件。
     return {
       node,
       container,
@@ -562,6 +576,18 @@ GOOD OUTPUT EXAMPLE:
     // 当前 Composer 有效时只检查其局部；失效或存在外部编辑器焦点时才全局发现。
     const focused = document.activeElement;
     const key = session();
+    // 输入后的延迟检查先复用仍有效的节点，避免重新筛选导致按钮一闪即消失。
+    if (
+      discoverySession === key &&
+      editor?.isConnected &&
+      (own(focused) ||
+        !focused?.matches?.(EDITORS) ||
+        focused === editor ||
+        editor.contains(focused))
+    ) {
+      const retained = candidate(editor);
+      if (retained) return retained;
+    }
     const local =
       !discoveryNeeded &&
       discoverySession === key &&
@@ -798,6 +824,7 @@ GOOD OUTPUT EXAMPLE:
     );
   }
   const host = mark(make("div", "", "axpe-bar"));
+  host.hidden = true;
   const main = button("", () => {
     if (job) job.cancel();
     else enhance();
@@ -923,6 +950,8 @@ GOOD OUTPUT EXAMPLE:
     position();
   }
   function update() {
+    // 显隐只取决于草稿内容；增强请求期间保留取消入口。
+    host.hidden = !job && !text(editor).trim();
     const record = drafts.get(session());
     const canRestore = !!(
       record &&
@@ -937,7 +966,7 @@ GOOD OUTPUT EXAMPLE:
     main.setAttribute("aria-busy", String(!!job));
     const disabled = String(
       !job &&
-        (pendingWrite ||
+        (!writable(editor) || pendingWrite ||
           (configured() && (!editor || !text(editor).trim() || composing))),
     );
     if (
@@ -947,6 +976,7 @@ GOOD OUTPUT EXAMPLE:
     )
       hideTooltip();
     main.setAttribute("aria-disabled", disabled);
+    position();
   }
   function lockEditor(node, container) {
     const editable = node.getAttribute("contenteditable"),
@@ -1057,6 +1087,7 @@ GOOD OUTPUT EXAMPLE:
     }
   }
   async function enhance() {
+    if (!writable(editor)) return;
     if (!configured()) {
       openSettings();
       return;
@@ -1364,6 +1395,28 @@ GOOD OUTPUT EXAMPLE:
   let activeSession = session(),
     lastText = "",
     lastStructure = "";
+  const resizeObserver = new ResizeObserver(schedule);
+  let observedShell = null;
+  function mountHost() {
+    const footer = shell.querySelector(
+      '.composer-footer, [data-testid="composer-footer"], [data-composer-footer]',
+    );
+    // 沿用 1.0.0 的插入位置和底栏溢出回退；隐藏底栏按无底栏处理。
+    if (
+      footer &&
+      !editor.contains(footer) &&
+      !footer.closest("[hidden], [inert]") &&
+      footer.getBoundingClientRect().height > 0 &&
+      getComputedStyle(footer).visibility !== "hidden"
+    ) {
+      if (host.parentElement !== footer) footer.prepend(host);
+    } else {
+      if (host.parentElement !== shell) shell.append(host);
+    }
+    const row = host.parentElement;
+    if (row !== shell && row.scrollWidth > row.clientWidth + 2)
+      shell.append(host);
+  }
   function ensure() {
     if (disposed) return;
     timer = 0;
@@ -1400,23 +1453,19 @@ GOOD OUTPUT EXAMPLE:
       lastText = text(editor);
       lastStructure = editor.innerHTML;
     }
+    shell = found?.container || null;
     if (!editor || !shell) {
       hideTooltip();
       host.remove();
       return;
     }
-    if (!host.isConnected || !shell.contains(host)) {
-      const footer = shell.querySelector(
-        '.composer-footer, [data-testid="composer-footer"], [data-composer-footer]',
-      );
-      if (footer && !editor.contains(footer)) footer.prepend(host);
-      else shell.append(host);
+    mountHost();
+    if (observedShell !== shell) {
+      resizeObserver.disconnect();
+      resizeObserver.observe(shell);
+      observedShell = shell;
     }
-    const row = host.parentElement;
-    if (row !== shell && row.scrollWidth > row.clientWidth + 2)
-      shell.append(host);
     update();
-    position();
   }
   function schedule() {
     if (!disposed && !timer) timer = setTimeout(ensure, 100);
@@ -1424,7 +1473,10 @@ GOOD OUTPUT EXAMPLE:
   function affectsComposer(record) {
     if (own(record.target)) return false;
     if (record.type === "attributes")
-      return !["style", "class"].includes(record.attributeName);
+      return (
+        !["style", "class"].includes(record.attributeName) ||
+        !!shell?.contains(record.target)
+      );
     if (record.type === "characterData")
       return !!shell?.contains(record.target);
     const nodes = [...record.addedNodes, ...record.removedNodes];
@@ -1462,6 +1514,8 @@ GOOD OUTPUT EXAMPLE:
     attributes: true,
     attributeFilter: [
       "contenteditable",
+      "readonly",
+      "disabled",
       "data-thread-id",
       "data-app-action-sidebar-thread-active",
       "aria-current",
@@ -1475,6 +1529,15 @@ GOOD OUTPUT EXAMPLE:
     document,
     "input",
     (event) => {
+      if (
+        !writing &&
+        !own(event.target) &&
+        (!editor || !editor.contains(event.target) || !host.isConnected) &&
+        event.target.closest?.(EDITORS)
+      ) {
+        discoveryNeeded = true;
+        schedule();
+      }
       if (
         editor &&
         (event.target === editor || editor.contains(event.target)) &&
@@ -1495,6 +1558,7 @@ GOOD OUTPUT EXAMPLE:
         lastText = text(editor);
         lastStructure = editor.innerHTML;
         update();
+        schedule();
       }
     },
     true,
@@ -1575,6 +1639,7 @@ GOOD OUTPUT EXAMPLE:
     clearTimeout(timer);
     clearTimeout(noticeTimer);
     observer.disconnect();
+    resizeObserver.disconnect();
     [...paintWaits.values()].forEach((finish) => finish());
     bindings.splice(0).forEach((unbind) => unbind());
     host.remove();
@@ -1583,7 +1648,44 @@ GOOD OUTPUT EXAMPLE:
     tooltip.remove();
     style.remove();
   }
-  window[NS] = { destroy, ensure, drafts, version: "1.0.0" };
+  function inspect() {
+    const box = (node) => {
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return {
+        connected: node.isConnected,
+        width: rect.width,
+        height: rect.height,
+        top: rect.top,
+        display: style.display,
+        visibility: style.visibility,
+        opacity: style.opacity,
+      };
+    };
+    // 仅报告结构和状态，不包含草稿正文、会话标识或 API 配置。
+    return JSON.stringify({
+      version: "1.0.1",
+      editor: box(editor),
+      shell: box(shell),
+      button: box(main),
+      hidden: host.hidden,
+      pendingWrite,
+      composing,
+      editors: [...document.querySelectorAll(EDITORS)].filter((node) => !own(node)).map((node) => ({
+        tag: node.tagName,
+        className: node.className,
+        editable: node.getAttribute("contenteditable"),
+        disabled: !!node.disabled,
+        readOnly: !!node.readOnly,
+        textLength: text(node).trim().length,
+        accepted: !!candidate(node),
+        excluded: !!node.closest('aside, nav, [role="dialog"], [role="search"], [data-sidebar], [inert]'),
+        box: box(node),
+      })),
+    }, null, 2);
+  }
+  window[NS] = { destroy, ensure, inspect, drafts, version: "1.0.1" };
   window.codexPlus?.onCleanup?.(destroy);
   listen(window, "pagehide", destroy);
   ensure();

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-30T20:37:39.000Z",
+  "updated_at": "2026-10-30T20:49:36.000Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -401,11 +401,11 @@
       "version": "0.1.0",
       "author": "BigPizzaV3",
       "homepage": "https://github.com/BigPizzaV3/codexpp-ice-tea-voice-button",
-      "updated_at": "2026-10-30T20:37:39.000Z",
+      "updated_at": "2026-10-30T20:49:36.000Z",
       "repo": "BigPizzaV3/codexpp-ice-tea-voice-button",
       "tag": "v0.1.0",
       "sha": "982464b5a0eacebd223cd6975ba37e68840138a8",
-      "official": true
+      "official": false
     }
   ]
 }

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-10-26T12:51:20.000Z",
+  "updated_at": "2026-10-30T20:37:39.000Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -390,6 +390,22 @@
         "每段的方向由该段第一个有方向的字符决定，以英文开头的阿拉伯语段落会按从左往右显示",
         "依赖 Codex 对话与输入框的页面结构，应用更新可能影响兼容性"
       ]
+    }
+  ],
+  "packages": [
+    {
+      "kind": "package",
+      "id": "ice-tea-voice-button",
+      "name": "冰红茶语音按钮",
+      "description": "将语音输入按钮的麦克风图标替换为冰红茶瓶身，保留原有语音输入功能。",
+      "version": "0.1.0",
+      "author": "BigPizzaV3",
+      "homepage": "https://github.com/BigPizzaV3/codexpp-ice-tea-voice-button",
+      "updated_at": "2026-10-30T20:37:39.000Z",
+      "repo": "BigPizzaV3/codexpp-ice-tea-voice-button",
+      "tag": "v0.1.0",
+      "sha": "982464b5a0eacebd223cd6975ba37e68840138a8",
+      "official": true
     }
   ]
 }

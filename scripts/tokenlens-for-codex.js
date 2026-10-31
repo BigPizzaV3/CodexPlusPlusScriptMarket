@@ -34,7 +34,7 @@
    * 输入框下方吞吐状态栏。
    *
    * 主指标按自有口径：本轮输出 token 除以扣除首 token 等待与工具执行后的模型窗口。
-   * 平均速度按每次已结算调用的速率去掉一个最高、一个最低后再平均。
+   * 平均速度按已结算有效调用的 token 总量除以解码总时长，按 token 与时长加权。
    * 数据来自 Codex app-server 的本地通知，不读取会话正文，也不请求服务商：
    * - 首个非空助手或推理增量为首 token 时间；
    * - 首个输出 delta 开始解码，工具开始或消息完成时结束解码区间；
@@ -53,6 +53,9 @@
   const codexPlusUsageVersion = 43;
   const codexPlusUsageThemeKey = "tokenlens-theme";
   const codexPlusUsageGlobalApiKey = "__codexDailyTokenUsage";
+  const codexPlusUsageDailyLedgerKey = "tokenlens-daily-usage";
+  const codexPlusUsageDailyLedgerVersion = 1;
+  const codexPlusUsageDailyLedgerMaxDays = 60;
   const codexPlusUsageMagpieUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=7d&agent=codex&limit=1";
   const codexPlusUsageMagpieTodayUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=today&agent=codex&limit=1";
   const codexPlusUsageMagpieTaskUsageUrlPrefix = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=7d&agent=codex&limit=1&q=";
@@ -64,8 +67,13 @@
   const codexPlusUsageMaxTurns = 32;
   const codexPlusUsageMaxLiveSamples = 512;
   const codexPlusUsageMaxChartBars = 200;
+  const codexPlusUsagePopoverHideMs = 120;
   // 模型真实峰值约 400 tok/s，仪表盘满偏刻度按此对齐。
   const codexPlusUsageSpeedPeak = 400;
+  // 用量通常按整次调用回传；短于此门槛的样本多是批量推送，不是持续解码速度。
+  const codexPlusUsageSpeedWindowMs = 3000;
+  const codexPlusUsageSpeedMinimumDecodeMs = 1000;
+  const codexPlusUsageSpeedMinimumOutputTokens = 30;
   const codexPlusUsageModelItemTypes = new Set([
     "agentmessage", "plan", "reasoning", "usermessage", "hookprompt", "functioncalloutput",
   ]);
@@ -113,13 +121,15 @@
     historyLoading: false,
     historyError: "",
     historyPromise: null,
+    historyRetryTimer: 0,
     globalUsageLoading: false,
     globalUsageError: "",
     globalUsagePromise: null,
     globalUsageAggregate: null,
     globalUsageCoverage: { available: 0, total: 0 },
-    globalUsageSourceCoverage: { magpie: 0, daily: 0 },
+    globalUsageSourceCoverage: { magpie: 0, ledger: 0, daily: 0 },
     magpieUsage: { fetchedAt: 0, snapshots: new Map(), sessions: new Map() },
+    dailyLedger: codexPlusUsageReadDailyLedger(),
     magpieUsageLastAttemptAt: 0,
     magpieUsageMaxAgeMs: 30_000,
     magpieUsagePromise: null,
@@ -129,6 +139,8 @@
     nativeViewHandler: null,
     resizeHandler: null,
     scrollHandler: null,
+    pointerMoveHandler: null,
+    pointerDownHandler: null,
   };
 
   const codexPlusUsageSvgNs = "http://www.w3.org/2000/svg";
@@ -603,25 +615,29 @@
     return text.split(/[\\/]/).filter(Boolean).pop() || text;
   }
 
-  function codexPlusUsageCommandSummary(item) {
-    const command = Array.isArray(item?.command)
-      ? item.command.join(" ")
-      : codexPlusUsageFirstString(item, ["command"]);
-    const action = (item?.commandActions || item?.command_actions || [])
-      .map((entry) => codexPlusUsageFirstString(entry, ["command", "cmd"]))
-      .find(Boolean);
-    const firstLine = String(command || action || "").split(/\r?\n/).find((line) => line.trim()) || "";
-    return firstLine.replace(/\s+/g, " ").trim().slice(0, 72);
+  function codexPlusUsageSkillNamesFromText(value) {
+    const names = new Set();
+    for (const match of String(value || "").matchAll(/(?:^|[\\/])([^\\/\r\n"'`]+)[\\/]SKILL\.md(?=$|[\s"'`])/gi)) {
+      const name = String(match[1] || "").trim();
+      if (name) names.add(name);
+    }
+    return [...names];
   }
 
-  function codexPlusUsageFileSummary(item) {
-    const changes = item?.changes;
-    const paths = Array.isArray(changes)
-      ? changes.map((entry) => codexPlusUsageFirstString(entry, ["path", "file", "name"]))
-      : Object.keys(changes || {});
-    const names = [...new Set(paths.map(codexPlusUsageBaseName).filter(Boolean))];
-    if (!names.length) return "";
-    return names.length > 1 ? `${names[0]} 等 ${names.length} 个文件` : names[0];
+  function codexPlusUsageCommandText(item) {
+    const actions = Array.isArray(item?.commandActions)
+      ? item.commandActions
+      : Array.isArray(item?.command_actions) ? item.command_actions : [];
+    const parsed = Array.isArray(item?.parsed_cmd) ? item.parsed_cmd : [];
+    return [
+      Array.isArray(item?.command) ? item.command.join(" ") : item?.command,
+      ...actions.map((entry) => codexPlusUsageFirstString(entry, ["command", "cmd"])),
+      ...parsed.map((entry) => codexPlusUsageFirstString(entry, ["path", "cmd", "name"])),
+    ].filter((value) => typeof value === "string" && value.trim()).join("\n");
+  }
+
+  function codexPlusUsageSkillNamesFromCommand(item) {
+    return codexPlusUsageSkillNamesFromText(codexPlusUsageCommandText(item));
   }
 
   function codexPlusUsageSkillNames(item) {
@@ -632,21 +648,16 @@
         if (name) names.add(name);
       }
       if (entry?.type !== "text" || typeof entry.text !== "string") continue;
-      for (const match of entry.text.matchAll(/([A-Za-z0-9_.-]+)[\\/]SKILL\.md/gi)) {
-        if (match[1]) names.add(match[1]);
-      }
+      for (const name of codexPlusUsageSkillNamesFromText(entry.text)) names.add(name);
     }
     return [...names];
   }
 
-  function codexPlusUsageCommandKind(turn, item) {
-    const skill = String(turn?.activeSkills?.[0] || "").trim();
-    if (!skill) return { ...codexPlusUsageToolKind(item), visible: false };
+  function codexPlusUsageSkillKind(skill) {
     return {
       key: "skills",
       fallback: "Skills",
       label: `${codexPlusUsageToolLabel("skills", "Skills")} · ${skill}`,
-      detail: codexPlusUsageCommandSummary(item),
     };
   }
 
@@ -659,50 +670,52 @@
     const plugin = codexPlusUsageFirstString(item, ["pluginId", "plugin_id"]);
     const script = codexPlusUsageFirstString(item, ["scriptPath", "script_path"]);
     const label = codexPlusUsageFirstString(item, ["label", "title"]);
-    const command = codexPlusUsageFirstString(item, ["command"]);
+    const command = codexPlusUsageCommandText(item);
     const identity = [typeRaw, server, tool, namespace, plugin, script, label].join(" ").toLowerCase();
     const fallback = (tool || label || namespace || server || typeRaw || "tool").slice(0, 80);
-    const detail = [server, tool].filter(Boolean).join(" · ").slice(0, 120);
     const result = (key, name = "") => {
       const parts = [codexPlusUsageToolLabel(key, fallback), String(name || "").trim()].filter(Boolean);
-      return { key, fallback, detail, label: parts.join(" · ").slice(0, 120) };
+      return { key, fallback, label: parts.join(" · ").slice(0, 120) };
     };
 
     if (/hindsight|memory|memories|knowledge.?base/.test(identity)
         || /(?:^|[\\/])\.codex[\\/]+memories(?:[\\/]|$)/i.test(command)) {
-      return result("memory", [server, tool].filter(Boolean).join(" / "));
+      return result("memory", server || tool);
     }
     if (/skill\.md|(?:^|[\\/])\.(?:agents|codex)[\\/]+skills(?:[\\/]|$)/i.test(command)
         || /(?:^|[\s:/\\])skills?(?:$|[-_\s:/\\])/.test(identity)) {
       return result("skills", tool || label);
     }
     if (type.startsWith("hook") || /\bhooks?\b/.test(identity)) return result("hook", label || tool);
-    if (type === "mcptoolcall" || server) return result("mcp", [server, tool].filter(Boolean).join(" / "));
-    if (type === "commandexecution") return result("command", codexPlusUsageCommandSummary(item));
-    if (type === "filechange" || type.includes("applypatch") || type.includes("filechange")) {
-      return result("file", codexPlusUsageFileSummary(item) || tool || label);
+    if (type === "mcptoolcall" || server) return result("mcp", server || tool);
+    if (type === "commandexecution"
+        || type === "filechange"
+        || type.includes("applypatch")
+        || type.includes("filechange")
+        || type === "imageview"
+        || type === "collabagenttoolcall"
+        || type === "subagentactivity"
+        || type === "dynamictoolcall"
+        || type === "functioncalloutput") {
+      return result("other");
     }
-    if (type === "imageview") {
-      return result("imageView", codexPlusUsageBaseName(codexPlusUsageFirstString(item, ["path"])));
-    }
-    if (type === "imagegeneration") {
-      return result("imageGeneration", codexPlusUsageFirstString(item, ["revisedPrompt", "revised_prompt", "savedPath", "saved_path"]));
-    }
-    if (type === "websearch") return result("webSearch", codexPlusUsageFirstString(item, ["query"]));
-    if (type === "collabagenttoolcall" || type === "subagentactivity") {
-      return result("agent", tool || codexPlusUsageFirstString(item, ["prompt", "agentPath", "agent_path"]));
-    }
-    if (type === "dynamictoolcall" || type === "functioncalloutput") {
-      return result("dynamic", [namespace, tool].filter(Boolean).join(" / "));
-    }
-    if (type === "enteredreviewmode" || type === "exitedreviewmode") {
-      return result("review", codexPlusUsageFirstString(item, ["review"]).split(/\r?\n/)[0]);
-    }
-    if (type === "sleep") return result("sleep", codexPlusUsageFirstString(item, ["durationMs", "duration_ms"]));
+    if (type === "imagegeneration") return result("imageGeneration");
+    if (type === "websearch") return result("webSearch");
+    if (type === "enteredreviewmode" || type === "exitedreviewmode") return result("review");
+    if (type === "sleep") return result("sleep");
     if (type === "contextcompaction") return result("contextCompaction");
 
     const key = `tool:${(fallback || "other").toLowerCase()}`.slice(0, 100);
-    return { key, fallback, detail, label: fallback || codexPlusUsageToolLabel("other", "tool") };
+    return { key, fallback, label: fallback || codexPlusUsageToolLabel("other", "tool") };
+  }
+
+  function codexPlusUsageAttributedToolKind(turn, item) {
+    const hintedSkills = codexPlusUsageSkillNamesFromCommand(item);
+    if (hintedSkills.length) turn.activeSkills = hintedSkills;
+    const base = codexPlusUsageToolKind(item);
+    if (["hook", "mcp", "memory"].includes(base.key)) return base;
+    const skill = String(turn?.activeSkills?.at(-1) || "").trim();
+    return skill ? codexPlusUsageSkillKind(skill) : base;
   }
 
   function codexPlusUsageToolLabel(categoryKey, fallback) {
@@ -782,13 +795,15 @@
     turn.decodeMs += duration;
     turn.pendingDecodeMs += duration;
     turn.decodeStartedAt = null;
-    codexPlusUsageSettleCall(turn);
+    codexPlusUsageSettleCall(turn, at);
   }
 
   // 输出 token 与它的解码时长要成对结算；用量通知晚于调用结束也不会拉低分母。
-  function codexPlusUsageSettleCall(turn) {
+  function codexPlusUsageSettleCall(turn, at) {
     if (!turn || !(turn.pendingDecodeMs > 0) || !(turn.pendingOutput > 0)) return;
-    turn.settledCalls.push({ output: turn.pendingOutput, decodeMs: turn.pendingDecodeMs });
+    const call = { output: turn.pendingOutput, decodeMs: turn.pendingDecodeMs };
+    if (Number.isFinite(at)) call.observedAt = at;
+    turn.settledCalls.push(call);
     if (turn.settledCalls.length > codexPlusUsageMaxLiveSamples) {
       turn.settledCalls.splice(0, turn.settledCalls.length - codexPlusUsageMaxLiveSamples);
     }
@@ -847,7 +862,6 @@
         categoryKey: kind.key,
         fallback: kind.fallback,
         label: kind.label,
-        detail: kind.detail,
         startedAt: valid ? start : null,
         endedAt: valid ? end : null,
       });
@@ -879,7 +893,6 @@
         key: "hook",
         fallback: "Hook",
         label: [codexPlusUsageToolLabel("hook", "Hook"), hookName, hookHandler].filter(Boolean).join(" · "),
-        detail: [run.eventName, run.handlerType].filter(Boolean).join(" · "),
       };
       if (method === "hook/started") {
         if (!turn.activeTools.has(id)) turn.activeTools.set(id, { ...kind, startedAt: at });
@@ -897,7 +910,7 @@
       const item = data.item;
       if (codexPlusUsageItemType(item?.type) === "customtoolcall") {
         const id = item.call_id || item.callId || item.id || `custom:${turn.toolDetails.length}`;
-        codexPlusUsageRecordTool(turn, id, codexPlusUsageToolKind({ ...item, type: item.name || item.type }));
+        codexPlusUsageRecordTool(turn, id, codexPlusUsageAttributedToolKind(turn, { ...item, type: item.name || item.type }));
       }
       return turn;
     }
@@ -907,9 +920,7 @@
       if (item?.id && codexPlusUsageIsToolItem(item.type)) {
         codexPlusUsageFlushDecode(turn, at);
         if (!turn.activeTools.has(item.id)) {
-          const kind = codexPlusUsageItemType(item.type) === "commandexecution"
-            ? codexPlusUsageCommandKind(turn, item)
-            : codexPlusUsageToolKind(item);
+          const kind = codexPlusUsageAttributedToolKind(turn, item);
           turn.activeTools.set(item.id, { ...kind, startedAt: at });
         }
       }
@@ -920,9 +931,7 @@
       const item = data.item;
       if (item?.id && codexPlusUsageIsToolItem(item.type)) {
         const active = turn.activeTools.get(item.id);
-        const kind = codexPlusUsageItemType(item.type) === "commandexecution"
-          ? codexPlusUsageCommandKind(turn, item)
-          : codexPlusUsageToolKind(item);
+        const kind = codexPlusUsageAttributedToolKind(turn, item);
         codexPlusUsageRecordTool(
           turn,
           item.id,
@@ -939,12 +948,10 @@
       if (codexPlusUsageItemType(item?.type) === "hookprompt") {
         for (const [index, fragment] of (item.fragments || []).entries()) {
           const id = `hook:${fragment.hookRunId || fragment.hook_run_id || `${item.id}:${index}`}`;
-          const text = String(fragment.text || "").replace(/\s+/g, " ").trim().slice(0, 48);
           codexPlusUsageRecordTool(turn, id, {
             key: "hook",
             fallback: "Hook",
-            label: [codexPlusUsageToolLabel("hook", "Hook"), text].filter(Boolean).join(" · "),
-            detail: String(fragment.text || "").slice(0, 120),
+            label: codexPlusUsageToolLabel("hook", "Hook"),
           });
         }
       }
@@ -1017,7 +1024,7 @@
         const output = previous.output > 0 ? previous.output : outputDelta;
         if (output > 0) {
           turn.pendingOutput += output;
-          codexPlusUsageSettleCall(turn);
+          codexPlusUsageSettleCall(turn, at);
         }
       }
       turn.skipMatchingUsage = false;
@@ -1043,26 +1050,55 @@
     return outputTokens > 0 && decodeMs > 0 ? outputTokens / (decodeMs / 1000) : null;
   }
 
-  function codexPlusUsageSettledSpeed(calls) {
-    let output = 0;
-    let decodeMs = 0;
+  function codexPlusUsageSettledSpeed(calls, now = null, windowMs = 0) {
+    const valid = [];
     for (const call of Array.isArray(calls) ? calls : []) {
       const tokens = codexPlusUsageNumber(call?.output);
       const duration = codexPlusUsageNumber(call?.decodeMs);
-      if (tokens > 0 && duration > 0) {
-        output += tokens;
-        decodeMs += duration;
+      if (tokens < codexPlusUsageSpeedMinimumOutputTokens
+          || duration < codexPlusUsageSpeedMinimumDecodeMs) {
+        continue;
       }
+      const rate = codexPlusUsageDecodeSpeed(tokens, duration);
+      if (rate == null || rate > codexPlusUsageSpeedPeak) continue;
+      valid.push({
+        output: tokens,
+        decodeMs: duration,
+        observedAt: Number.isFinite(call?.observedAt) ? call.observedAt : null,
+      });
+    }
+    if (!valid.length) return null;
+    let selected = valid;
+    if (Number.isFinite(now) && windowMs > 0) {
+      const timed = valid.filter((call) => call.observedAt != null);
+      if (timed.length) {
+        const recent = timed.filter((call) => call.observedAt >= now - windowMs);
+        // 空闲时保持最后一个有效读数，不能让速度自己衰减成假值。
+        selected = recent.length ? recent : [timed[timed.length - 1]];
+      }
+    }
+    let output = 0;
+    let decodeMs = 0;
+    for (const call of selected) {
+      output += call.output;
+      decodeMs += call.decodeMs;
     }
     return codexPlusUsageDecodeSpeed(output, decodeMs);
   }
 
-  // 主指标口径：模型可见窗口吞吐。分母 = 轮时长 − 首 token 等待 − 工具执行，只衡量模型真正在产出的时间。
+  // 主指标优先使用逐调用解码窗口；整轮墙钟只在历史数据缺少调用时间轴时兜底。
   function codexPlusUsageModelWindowSpeed(turn, now) {
     if (!turn) return null;
-    // 历史回填没有事件时间轴，算出的窗口不可信，直接显示 --。
-    if (turn.historySeeded && turn.firstTokenAt == null) return null;
     const end = turn.completedAt ?? (Number.isFinite(now) ? now : Date.now());
+    const settledCalls = Array.isArray(turn.settledCalls) ? turn.settledCalls : [];
+    if (settledCalls.length) {
+      const settled = codexPlusUsageSettledSpeed(
+        settledCalls,
+        end,
+        codexPlusUsageSpeedWindowMs,
+      );
+      return settled == null ? null : Math.min(settled, codexPlusUsageSpeedPeak);
+    }
     const wallMs = Math.max(0, end - turn.startedAt);
     const ttftMs = turn.firstTokenAt == null
       ? 0
@@ -1074,28 +1110,29 @@
     }
     const toolMs = codexPlusUsageMergedDuration(intervals);
     const windowMs = Math.max(0, wallMs - ttftMs - Math.min(toolMs, wallMs - ttftMs));
-    // 没有任何窗口数据时退回已结算累计，避免无 delta 会话显示 --。
-    const speed = codexPlusUsageDecodeSpeed(turn.outputTokens, windowMs)
-      ?? codexPlusUsageSettledSpeed(turn.settledCalls);
+    const outputTokens = codexPlusUsageNumber(turn.outputTokens);
+    if (outputTokens < codexPlusUsageSpeedMinimumOutputTokens) return null;
+    const windowSpeed = windowMs >= codexPlusUsageSpeedMinimumDecodeMs
+      ? codexPlusUsageDecodeSpeed(outputTokens, windowMs)
+      : null;
+    // shortcut: 历史回填或工具覆盖整个窗口时用墙钟近似，宿主恢复 decode 事件后应优先走逐调用窗口。
+    const speed = windowSpeed
+      ?? (wallMs >= codexPlusUsageSpeedMinimumDecodeMs
+        ? codexPlusUsageDecodeSpeed(outputTokens, wallMs)
+        : null);
     // 统计窗口刚跨过一个工具时可能只剩几毫秒；真实峰值约 400 tok/s，超出即视为分母失真。
     return speed == null ? null : Math.min(speed, codexPlusUsageSpeedPeak);
   }
 
+  function codexPlusUsageNeedsHistoryRefresh(turn) {
+    if (!turn) return false;
+    if (!(turn.usageSamples > 0) || !(turn.outputTokens > 0)) return true;
+    if (turn.historySeeded) return false;
+    return !turn.observedFromStart;
+  }
+
   function codexPlusUsageAverageSpeed(calls) {
-    const rates = (Array.isArray(calls) ? calls : [])
-      .map((call) => codexPlusUsageDecodeSpeed(
-        codexPlusUsageNumber(call?.output),
-        codexPlusUsageNumber(call?.decodeMs),
-      ))
-      // 超过已知峰值的样本由事件截断产生，不进入平均值。
-      .filter((rate) => rate != null && rate <= codexPlusUsageSpeedPeak);
-    if (!rates.length) return null;
-    if (rates.length <= 2) {
-      return rates.reduce((total, rate) => total + rate, 0) / rates.length;
-    }
-    const sorted = rates.slice().sort((left, right) => left - right);
-    const trimmed = sorted.slice(1, -1);
-    return trimmed.reduce((total, rate) => total + rate, 0) / trimmed.length;
+    return codexPlusUsageSettledSpeed(calls);
   }
 
   function codexPlusUsageFormatSpeed(value) {
@@ -1166,7 +1203,7 @@
     const addToolCall = (detail, detailEnd = end) => {
       if (!detail) return;
       const id = String(detail.id || `${detail.categoryKey || "other"}:${toolCalls.size}`);
-      const categoryKey = String(detail.categoryKey || "other");
+      const categoryKey = String(detail.categoryKey || detail.key || "other");
       const fallback = String(detail.fallback || "");
       const label = String(detail.label || codexPlusUsageToolLabel(categoryKey, fallback)).trim();
       const timed = Number.isFinite(detail.startedAt)
@@ -1174,7 +1211,7 @@
         && detailEnd > detail.startedAt;
       let call = toolCalls.get(id);
       if (!call) {
-        call = { id, categoryKey, fallback, label, intervals: [], details: new Set(), timed: false };
+        call = { id, categoryKey, fallback, label, intervals: [], timed: false };
         toolCalls.set(id, call);
       }
       if (!call.label || (timed && !call.timed)) call.label = label || call.label;
@@ -1182,7 +1219,6 @@
         call.intervals.push([detail.startedAt, detailEnd]);
         call.timed = true;
       }
-      if (detail.detail && call.details.size < 6) call.details.add(String(detail.detail));
     };
     for (const detail of turn.toolDetails) addToolCall(detail, detail.endedAt);
     for (const [id, tool] of turn.activeTools) addToolCall({ ...tool, id }, end);
@@ -1191,20 +1227,16 @@
     for (const call of toolCalls.values()) {
       const key = `${call.categoryKey}:${call.label}`;
       if (!toolGroups.has(key)) {
-        toolGroups.set(key, { ids: new Set(), intervals: [], categoryKey: call.categoryKey, label: call.label, details: new Set() });
+        toolGroups.set(key, { ids: new Set(), intervals: [], categoryKey: call.categoryKey, label: call.label });
       }
       const group = toolGroups.get(key);
       group.ids.add(call.id);
       group.intervals.push(...call.intervals);
-      for (const detail of call.details) {
-        if (group.details.size < 6) group.details.add(detail);
-      }
     }
     const toolDetails = [...toolGroups.values()]
       .map((group) => ({
         categoryKey: group.categoryKey,
         label: group.label,
-        detail: [...group.details].join(" / "),
         count: group.ids.size,
         durationMs: codexPlusUsageMergedDuration(group.intervals),
       }))
@@ -1502,12 +1534,48 @@
     return [...urls];
   }
 
+  function codexPlusUsageAssetRpcUrls(assetUrl, assetText) {
+    const urls = [];
+    for (const match of String(assetText || "").matchAll(/(?:\.\/)?rpc-[A-Za-z0-9_-]+\.js/g)) {
+      try {
+        urls.push(new URL(match[0], assetUrl).href);
+      } catch {
+        // 忽略无法解析的引用，继续查找下一个。
+      }
+    }
+    return [...new Set(urls)];
+  }
+
+  async function codexPlusUsageDiscoverRpcAssetUrls(urls, assetFetch = globalThis.fetch) {
+    const candidates = new Set(urls.filter((url) => /\/assets\/rpc-[^/]+\.js(?:$|\?)/.test(url)));
+    if (candidates.size) return [...candidates];
+    const entryUrls = urls.filter((url) => /\/assets\/(?:index(?:\.client)?-|app-shared-)[^/]+\.js(?:$|\?)/.test(url));
+    for (const entryUrl of entryUrls) {
+      try {
+        const response = await assetFetch?.(entryUrl);
+        if (!response?.ok) continue;
+        const references = codexPlusUsageAssetRpcUrls(entryUrl, await response.text());
+        if (!references.length) continue;
+        for (const url of references) candidates.add(url);
+        break;
+      } catch {
+        // 资源读取失败时继续尝试下一个已加载入口。
+      }
+    }
+    if (!candidates.size) {
+      // 某些宿主把 appServices 直接挂在共享模块上，直接复用已加载模块即可。
+      for (const url of urls) {
+        if (/\/assets\/app-shared-[^/]+\.js(?:$|\?)/.test(url)) candidates.add(url);
+      }
+    }
+    return [...candidates];
+  }
+
   async function codexPlusUsageResolveAppServices() {
     const state = codexPlusUsageState;
     if (state.appServicesPromise) return state.appServicesPromise;
     const promise = (async () => {
-      const urls = codexPlusUsageCollectAssetUrls()
-        .filter((url) => /\/assets\/rpc-[^/]+\.js(?:$|\?)/.test(url));
+      const urls = await codexPlusUsageDiscoverRpcAssetUrls(codexPlusUsageCollectAssetUrls());
       for (const url of urls) {
         try {
           const moduleExports = await import(/* @vite-ignore */ url);
@@ -1687,6 +1755,7 @@
           }
         }
         state.magpieUsage = { fetchedAt: Date.now(), snapshots, sessions };
+        state.dailyLedger = codexPlusUsageMergeDailyLedger(state.dailyLedger, snapshots);
         state.magpieUsageError = "";
         return { ok: true, changed };
       } catch (error) {
@@ -1734,6 +1803,102 @@
     };
   }
 
+  function codexPlusUsageEmptyDailyLedger() {
+    return { version: codexPlusUsageDailyLedgerVersion, days: {} };
+  }
+
+  function codexPlusUsageNormalizeDailyLedgerDay(snapshot, at = 0) {
+    const day = codexPlusUsageNormalizeGlobalDay(snapshot, "magpie");
+    if (!day) return null;
+    return {
+      input: day.input,
+      cached: day.cached,
+      output: day.output,
+      total: day.total,
+      calls: day.calls,
+      source: "magpie",
+      at: codexPlusUsageNumber(at) ?? 0,
+    };
+  }
+
+  function codexPlusUsageReadDailyLedger(storage) {
+    const empty = codexPlusUsageEmptyDailyLedger();
+    try {
+      const store = storage ?? globalThis.localStorage;
+      const parsed = JSON.parse(store?.getItem?.(codexPlusUsageDailyLedgerKey) || "null");
+      if (parsed?.version !== codexPlusUsageDailyLedgerVersion || !parsed?.days) return empty;
+      for (const [dateKey, value] of Object.entries(parsed.days)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
+        const day = codexPlusUsageNormalizeDailyLedgerDay(value, value?.at);
+        if (day) empty.days[dateKey] = day;
+      }
+    } catch {
+      // 存储不可读或内容损坏时从空账本开始，不影响实时 Magpie。
+    }
+    return empty;
+  }
+
+  function codexPlusUsageWriteDailyLedger(ledger, storage) {
+    try {
+      const store = storage ?? globalThis.localStorage;
+      store?.setItem?.(codexPlusUsageDailyLedgerKey, JSON.stringify(ledger));
+    } catch {
+      // 配额或隐私模式禁止写入时保留内存账本。
+    }
+    return ledger;
+  }
+
+  function codexPlusUsageMergeDailyLedger(
+    ledger,
+    snapshots,
+    now = Date.now(),
+    storage,
+  ) {
+    const base = ledger?.version === codexPlusUsageDailyLedgerVersion && ledger?.days
+      ? ledger
+      : codexPlusUsageReadDailyLedger(storage);
+    const days = { ...base.days };
+    const timestamp = Number.isFinite(now) ? now : Date.now();
+    let changed = false;
+    for (const [dateKey, snapshot] of snapshots || []) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
+      const next = codexPlusUsageNormalizeDailyLedgerDay(snapshot, timestamp);
+      if (!next) continue;
+      const previous = days[dateKey];
+      const merged = {
+        input: Math.max(previous?.input ?? 0, next.input),
+        cached: Math.max(previous?.cached ?? 0, next.cached),
+        output: Math.max(previous?.output ?? 0, next.output),
+        total: Math.max(previous?.total ?? 0, next.total),
+        calls: Math.max(previous?.calls ?? 0, next.calls),
+        source: "magpie",
+        at: timestamp,
+      };
+      // 分开取最大值后重算总量，避免回退源只更新部分字段时出现缩水。
+      merged.total = Math.max(merged.total, merged.input + merged.cached + merged.output);
+      if (
+        previous
+        && previous.input === merged.input
+        && previous.cached === merged.cached
+        && previous.output === merged.output
+        && previous.total === merged.total
+        && previous.calls === merged.calls
+      ) {
+        continue;
+      }
+      days[dateKey] = merged;
+      changed = true;
+    }
+    const keys = Object.keys(days).sort();
+    if (keys.length > codexPlusUsageDailyLedgerMaxDays) {
+      for (const key of keys.slice(0, keys.length - codexPlusUsageDailyLedgerMaxDays)) delete days[key];
+      changed = true;
+    }
+    const next = { version: codexPlusUsageDailyLedgerVersion, days };
+    if (changed) codexPlusUsageWriteDailyLedger(next, storage);
+    return next;
+  }
+
   function codexPlusUsageGlobalAggregate(
     range,
     now = Date.now(),
@@ -1752,8 +1917,12 @@
       && now >= magpieUsage.fetchedAt
       && now - magpieUsage.fetchedAt <= maxAge
       && typeof magpieUsage.snapshots?.get === "function";
+    const dailyLedger = codexPlusUsageState.dailyLedger?.days
+      ? codexPlusUsageState.dailyLedger
+      : null;
+    const ledgerAvailable = !!dailyLedger?.days && Object.keys(dailyLedger.days).length > 0;
     const dailyAvailable = typeof api?.getSnapshot === "function";
-    if (!magpieFresh && !dailyAvailable) return null;
+    if (!magpieFresh && !ledgerAvailable && !dailyAvailable) return null;
     const aggregate = {
       total: 0,
       input: 0,
@@ -1765,6 +1934,7 @@
     };
     let available = 0;
     let magpieDays = 0;
+    let ledgerDays = 0;
     let dailyDays = 0;
     for (const key of keys) {
       const magpieSnapshot = magpieFresh ? magpieUsage.snapshots.get(key) : null;
@@ -1778,6 +1948,18 @@
         aggregate.cached += magpieDay.cached;
         aggregate.inputTotal += magpieDay.inputTotal;
         aggregate.calls += magpieDay.calls;
+        continue;
+      }
+      const ledgerDay = codexPlusUsageNormalizeGlobalDay(dailyLedger?.days?.[key], "magpie");
+      if (ledgerDay) {
+        available += 1;
+        ledgerDays += 1;
+        aggregate.total += ledgerDay.total;
+        aggregate.input += ledgerDay.input;
+        aggregate.output += ledgerDay.output;
+        aggregate.cached += ledgerDay.cached;
+        aggregate.inputTotal += ledgerDay.inputTotal;
+        aggregate.calls += ledgerDay.calls;
         continue;
       }
       if (!dailyAvailable) continue;
@@ -1797,7 +1979,7 @@
       aggregate.calls += dailyDay.calls;
     }
     codexPlusUsageState.globalUsageCoverage = { available, total: keys.length };
-    codexPlusUsageState.globalUsageSourceCoverage = { magpie: magpieDays, daily: dailyDays };
+    codexPlusUsageState.globalUsageSourceCoverage = { magpie: magpieDays, ledger: ledgerDays, daily: dailyDays };
     const result = available ? aggregate : null;
     if (result) {
       result.hitRate = result.inputTotal > 0
@@ -1821,12 +2003,12 @@
       const aggregate = codexPlusUsageGlobalAggregate(codexPlusUsageState.range);
       if (!aggregate && !magpie.ok) {
         throw new Error(magpie.error
-          ? `Magpie 不可用，且没有本地日报：${magpie.error}`
+          ? `Magpie 不可用，且没有本地账本或日报：${magpie.error}`
           : "没有可用的每日消耗数据源");
       }
       codexPlusUsageState.globalUsageError = magpie.ok
         ? ""
-        : `Magpie 不可用，已回退本地日报：${magpie.error || "未知错误"}`;
+        : `Magpie 不可用，已回退 TokenLens 本地账本/日报：${magpie.error || "未知错误"}`;
     })().catch((error) => {
       codexPlusUsageState.globalUsageError = String(error?.message || error);
     }).finally(() => {
@@ -1977,6 +2159,18 @@
     return codexPlusUsageState.historyPromise;
   }
 
+  function codexPlusUsageScheduleHistoryRetry(threadId) {
+    if (codexPlusUsageState.historyRetryTimer) {
+      window.clearTimeout(codexPlusUsageState.historyRetryTimer);
+    }
+    codexPlusUsageState.historyRetryTimer = window.setTimeout(() => {
+      codexPlusUsageState.historyRetryTimer = 0;
+      if (codexPlusUsageState.disposed || codexPlusUsageState.threadId !== threadId) return;
+      if (!codexPlusUsageNeedsHistoryRefresh(codexPlusUsageState.turns.get(threadId))) return;
+      void codexPlusUsageLoadHistory(true);
+    }, 1200);
+  }
+
   function codexPlusUsageComposerCard() {
     const cards = [...document.querySelectorAll("[data-composer-surface-variant]")];
     let fallback = null;
@@ -2046,8 +2240,9 @@
     if (method === "turn/started") turn.observedFromStart = true;
     turn = codexPlusUsageApplyEvent(turn, method, data, Date.now());
     codexPlusUsageRememberTurn(turn);
-    if (method === "turn/completed" && !turn.observedFromStart && !turn.historySeeded) {
+    if (method === "turn/completed" && codexPlusUsageNeedsHistoryRefresh(turn)) {
       void codexPlusUsageLoadHistory(true);
+      codexPlusUsageScheduleHistoryRetry(threadId);
     }
     if (codexPlusUsageState.threadId === threadId) {
       codexPlusUsageRender(codexPlusUsageTurnSnapshot(turn, Date.now()));
@@ -2367,7 +2562,10 @@
     };
     parts.customStart.addEventListener("change", updateCustomRange);
     parts.customEnd.addEventListener("change", updateCustomRange);
-    popover.addEventListener("pointerenter", () => clearTimeout(codexPlusUsageState.hideTimer));
+    popover.addEventListener("pointerenter", () => {
+      clearTimeout(codexPlusUsageState.hideTimer);
+      codexPlusUsageState.hideTimer = 0;
+    });
     popover.addEventListener("pointerleave", () => codexPlusUsageHidePopoverSoon());
     codexPlusUsageState.popover = popover;
     codexPlusUsageState.popoverParts = parts;
@@ -2447,7 +2645,6 @@
         detail.durationMs > 0 ? codexPlusUsageFormatDuration(detail.durationMs) : "",
       ].filter(Boolean).join(" · ");
       duration.textContent = summary;
-      row.title = [detail.label, detail.detail, summary].filter(Boolean).join(" · ");
       row.append(label, duration);
       parts.toolPanel.appendChild(row);
     }
@@ -2746,6 +2943,7 @@
   function codexPlusUsageShowPopover() {
     if (!codexPlusUsageEnabled()) return;
     clearTimeout(codexPlusUsageState.hideTimer);
+    codexPlusUsageState.hideTimer = 0;
     if (codexPlusUsageState.historyThreadId !== codexPlusUsageState.threadId) {
       void codexPlusUsageLoadHistory();
     }
@@ -2759,18 +2957,51 @@
     codexPlusUsagePositionPopover();
   }
 
+  function codexPlusUsagePopoverHoverZone() {
+    const popover = codexPlusUsageState.popover;
+    const anchor = codexPlusUsageState.parts?.speed?.item;
+    if (!popover || popover.hidden || !anchor) return null;
+    const anchorRect = anchor.getBoundingClientRect();
+    const popoverRect = popover.getBoundingClientRect();
+    return {
+      left: Math.min(anchorRect.left, popoverRect.left),
+      right: Math.max(anchorRect.right, popoverRect.right),
+      top: Math.min(anchorRect.top, popoverRect.top),
+      bottom: Math.max(anchorRect.bottom, popoverRect.bottom),
+    };
+  }
+
+  function codexPlusUsagePointInRect(x, y, rect) {
+    return !!rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }
+
   function codexPlusUsageHidePopoverSoon() {
     clearTimeout(codexPlusUsageState.hideTimer);
     codexPlusUsageState.hideTimer = window.setTimeout(() => {
+      codexPlusUsageState.hideTimer = 0;
       const popover = codexPlusUsageState.popover;
       if (!popover || popover.hidden) return;
-      if (popover.matches(":hover") || popover.contains(document.activeElement)) return;
+      // 只看指针：焦点留在面板里不再等于“还在用面板”，否则面板会永久卡在屏幕上。
+      if (popover.matches(":hover")) return;
       popover.hidden = true;
-    }, 120);
+    }, codexPlusUsagePopoverHideMs);
+  }
+
+  // 药丸与面板之间的空隙也算悬停区，慢速上移不会被提前隐藏。
+  function codexPlusUsagePopoverPointerMove(event) {
+    const popover = codexPlusUsageState.popover;
+    if (!popover || popover.hidden || !event) return;
+    if (codexPlusUsagePointInRect(event.clientX, event.clientY, codexPlusUsagePopoverHoverZone())) {
+      clearTimeout(codexPlusUsageState.hideTimer);
+      codexPlusUsageState.hideTimer = 0;
+      return;
+    }
+    if (!codexPlusUsageState.hideTimer) codexPlusUsageHidePopoverSoon();
   }
 
   function codexPlusUsageHidePopover() {
     clearTimeout(codexPlusUsageState.hideTimer);
+    codexPlusUsageState.hideTimer = 0;
     if (codexPlusUsageState.popover) codexPlusUsageState.popover.hidden = true;
   }
 
@@ -2810,6 +3041,7 @@
         codexPlusUsageState.globalUsageCoverage.available,
         codexPlusUsageState.globalUsageCoverage.total,
         codexPlusUsageState.globalUsageSourceCoverage.magpie,
+        codexPlusUsageState.globalUsageSourceCoverage.ledger,
         codexPlusUsageState.globalUsageSourceCoverage.daily,
       ].join("|");
     }
@@ -2841,6 +3073,7 @@
       codexPlusUsageState.globalUsageError,
       codexPlusUsageState.magpieUsageError,
       codexPlusUsageState.globalUsageSourceCoverage.magpie,
+      codexPlusUsageState.globalUsageSourceCoverage.ledger,
       codexPlusUsageState.globalUsageSourceCoverage.daily,
       codexPlusUsageState.historyFetchedAt,
       codexPlusUsageState.toolExpanded,
@@ -2911,6 +3144,10 @@
         codexPlusUsageState.historyLoading = false;
         codexPlusUsageState.historyError = "";
         codexPlusUsageState.historyPromise = null;
+        if (codexPlusUsageState.historyRetryTimer) {
+          window.clearTimeout(codexPlusUsageState.historyRetryTimer);
+          codexPlusUsageState.historyRetryTimer = 0;
+        }
       }
     }
     codexPlusUsageShow(node);
@@ -2997,6 +3234,15 @@
   codexPlusUsageState.scrollHandler = codexPlusUsageState.resizeHandler;
   window.addEventListener("resize", codexPlusUsageState.resizeHandler);
   window.addEventListener("scroll", codexPlusUsageState.scrollHandler, true);
+  codexPlusUsageState.pointerMoveHandler = codexPlusUsagePopoverPointerMove;
+  codexPlusUsageState.pointerDownHandler = (event) => {
+    const popover = codexPlusUsageState.popover;
+    if (!popover || popover.hidden) return;
+    if (popover.contains(event.target) || codexPlusUsageState.parts?.speed?.item?.contains(event.target)) return;
+    codexPlusUsageHidePopover();
+  };
+  document.addEventListener("pointermove", codexPlusUsageState.pointerMoveHandler, true);
+  document.addEventListener("pointerdown", codexPlusUsageState.pointerDownHandler, true);
   codexPlusUsageSyncPlacement();
   codexPlusUsageSchedule(300);
   window.__codexPlusThroughputStatusLineRuntime = {
@@ -3006,14 +3252,18 @@
       codexPlusUsageState.disposed = true;
       clearTimeout(codexPlusUsageState.timer);
       clearTimeout(codexPlusUsageState.hideTimer);
+      clearTimeout(codexPlusUsageState.historyRetryTimer);
       codexPlusUsageState.timer = 0;
       codexPlusUsageState.hideTimer = 0;
+      codexPlusUsageState.historyRetryTimer = 0;
       codexPlusUsageState.observer?.disconnect();
       codexPlusUsageUnsubscribe();
       if (codexPlusUsageState.nativeMessageHandler) window.removeEventListener("message", codexPlusUsageState.nativeMessageHandler, true);
       if (codexPlusUsageState.nativeViewHandler) window.removeEventListener("codex-message-from-view", codexPlusUsageState.nativeViewHandler, true);
       if (codexPlusUsageState.resizeHandler) window.removeEventListener("resize", codexPlusUsageState.resizeHandler);
       if (codexPlusUsageState.scrollHandler) window.removeEventListener("scroll", codexPlusUsageState.scrollHandler, true);
+      if (codexPlusUsageState.pointerMoveHandler) document.removeEventListener("pointermove", codexPlusUsageState.pointerMoveHandler, true);
+      if (codexPlusUsageState.pointerDownHandler) document.removeEventListener("pointerdown", codexPlusUsageState.pointerDownHandler, true);
       codexPlusUsageState.node?.remove();
       codexPlusUsageState.popover?.remove();
       codexPlusUsageState.turns.clear();
@@ -3030,7 +3280,7 @@
       codexPlusUsageState.globalUsagePromise = null;
       codexPlusUsageState.globalUsageAggregate = null;
       codexPlusUsageState.globalUsageCoverage = { available: 0, total: 0 };
-      codexPlusUsageState.globalUsageSourceCoverage = { magpie: 0, daily: 0 };
+      codexPlusUsageState.globalUsageSourceCoverage = { magpie: 0, ledger: 0, daily: 0 };
       codexPlusUsageState.magpieUsage = { fetchedAt: 0, snapshots: new Map(), sessions: new Map() };
       codexPlusUsageState.magpieUsageLastAttemptAt = 0;
       codexPlusUsageState.magpieUsagePromise = null;

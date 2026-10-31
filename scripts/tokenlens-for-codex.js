@@ -1,12 +1,3 @@
-// ==UserScript==
-// @name         TokenLens for Codex
-// @namespace    tokenlens-for-codex
-// @version      1.0.3
-// @description  Codex++ throughput, tool, token, cache and usage status line.
-// @match        app://-/*
-// @run-at       document-start
-// ==/UserScript==
-
 /* Codex++ external extension: turn token throughput status line. */
 (() => {
   const visibleElement = (node) => !!node && ((node.getClientRects?.().length || 0) > 0 || node.offsetWidth > 0 || node.offsetHeight > 0);
@@ -42,10 +33,12 @@
   /**
    * 输入框下方吞吐状态栏。
    *
-   * 主界面沿用 DSH 口径：累计已结算输出 token，再除以累计解码时间。
+   * 主指标按自有口径：本轮输出 token 除以扣除首 token 等待与工具执行后的模型窗口。
+   * 平均速度按已结算有效调用的 token 总量除以解码总时长，按 token 与时长加权。
    * 数据来自 Codex app-server 的本地通知，不读取会话正文，也不请求服务商：
    * - 首个非空助手或推理增量为首 token 时间；
-   * - 助手消息或计划条目完成时结束当前解码区间；
+   * - 首个输出 delta 开始解码，工具开始或消息完成时结束解码区间；
+   * - token 用量通知与刚结束的解码区间配对结算，通知延迟不计入时长；
    * - 工具条目开始与完成之间的并集计为工具耗时；
    * - token 用量按线程累计输出增量计入当前轮；
    * - 中途安装时从宿主历史接口回填当前轮并去重。
@@ -57,16 +50,30 @@
   const codexPlusUsageStatusLineId = "codex-plus-throughput-statusline";
   const codexPlusUsagePopoverId = "codex-plus-throughput-popover";
   const codexPlusUsageStyleId = "codex-plus-throughput-statusline-style";
-  const codexPlusUsageVersion = 41;
+  const codexPlusUsageVersion = 43;
   const codexPlusUsageThemeKey = "tokenlens-theme";
   const codexPlusUsageGlobalApiKey = "__codexDailyTokenUsage";
-  const codexPlusUsageGlobalRefreshMs = 5 * 60 * 1000;
+  const codexPlusUsageDailyLedgerKey = "tokenlens-daily-usage";
+  const codexPlusUsageDailyLedgerVersion = 1;
+  const codexPlusUsageDailyLedgerMaxDays = 60;
+  const codexPlusUsageMagpieUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=7d&agent=codex&limit=1";
+  const codexPlusUsageMagpieTodayUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=today&agent=codex&limit=1";
+  const codexPlusUsageMagpieTaskUsageUrlPrefix = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=7d&agent=codex&limit=1&q=";
+  const codexPlusUsageMagpieRefreshMs = 2000;
+  const codexPlusUsageMagpieTimeoutMs = 3000;
   const codexPlusUsageActiveTickMs = 1000;
   const codexPlusUsageIdleTickMs = 4000;
   const codexPlusUsageLiveContextRefreshMs = 2000;
   const codexPlusUsageMaxTurns = 32;
   const codexPlusUsageMaxLiveSamples = 512;
   const codexPlusUsageMaxChartBars = 200;
+  const codexPlusUsagePopoverHideMs = 120;
+  // 模型真实峰值约 400 tok/s，仪表盘满偏刻度按此对齐。
+  const codexPlusUsageSpeedPeak = 400;
+  // 用量通常按整次调用回传；短于此门槛的样本多是批量推送，不是持续解码速度。
+  const codexPlusUsageSpeedWindowMs = 3000;
+  const codexPlusUsageSpeedMinimumDecodeMs = 1000;
+  const codexPlusUsageSpeedMinimumOutputTokens = 30;
   const codexPlusUsageModelItemTypes = new Set([
     "agentmessage", "plan", "reasoning", "usermessage", "hookprompt", "functioncalloutput",
   ]);
@@ -114,15 +121,26 @@
     historyLoading: false,
     historyError: "",
     historyPromise: null,
-    globalUsageFetchedAt: 0,
+    historyRetryTimer: 0,
     globalUsageLoading: false,
     globalUsageError: "",
     globalUsagePromise: null,
+    globalUsageAggregate: null,
     globalUsageCoverage: { available: 0, total: 0 },
+    globalUsageSourceCoverage: { magpie: 0, ledger: 0, daily: 0 },
+    magpieUsage: { fetchedAt: 0, snapshots: new Map(), sessions: new Map() },
+    dailyLedger: codexPlusUsageReadDailyLedger(),
+    magpieUsageLastAttemptAt: 0,
+    magpieUsageMaxAgeMs: 30_000,
+    magpieUsagePromise: null,
+    magpieUsageError: "",
+    appServicesPromise: null,
     nativeMessageHandler: null,
     nativeViewHandler: null,
     resizeHandler: null,
     scrollHandler: null,
+    pointerMoveHandler: null,
+    pointerDownHandler: null,
   };
 
   const codexPlusUsageSvgNs = "http://www.w3.org/2000/svg";
@@ -165,6 +183,9 @@
           today: "今天消耗",
           yesterday: "昨天消耗",
           week: "近7天消耗",
+          magpieLive: "Magpie 本地实时源 · 每 2 秒刷新 · Codex 全部任务",
+          taskMagpieLive: "当前任务已与 Magpie 请求累计对齐 · 近 7 天 · 每 2 秒刷新",
+          localFallback: "本地日报回退",
           presetTask: "任务",
           presetToday: "今天",
           presetYesterday: "昨天",
@@ -226,6 +247,9 @@
         today: "Today",
         yesterday: "Yesterday",
         week: "Last 7 days",
+        magpieLive: "Magpie local live source · refreshes every 2 seconds · all Codex tasks",
+        taskMagpieLive: "Current task is aligned to the Magpie request total · last 7 days · refreshes every 2 seconds",
+        localFallback: "Local daily fallback",
         presetTask: "Task",
         presetToday: "Today",
         presetYesterday: "Yesterday",
@@ -538,6 +562,15 @@
     return /^[A-Za-z0-9_.-]{8,128}$/.test(id) ? id : "";
   }
 
+  function codexPlusUsageUuidV7Timestamp(value) {
+    const compact = String(value || "").replace(/-/g, "");
+    if (!/^[0-9a-f]{12}/i.test(compact)) return null;
+    const timestamp = Number.parseInt(compact.slice(0, 12), 16);
+    return Number.isSafeInteger(timestamp) && timestamp >= 1_000_000_000_000
+      ? timestamp
+      : null;
+  }
+
   function codexPlusUsageEventData(payload) {
     return payload?.method ? (payload.params || {}) : (payload || {});
   }
@@ -582,25 +615,29 @@
     return text.split(/[\\/]/).filter(Boolean).pop() || text;
   }
 
-  function codexPlusUsageCommandSummary(item) {
-    const command = Array.isArray(item?.command)
-      ? item.command.join(" ")
-      : codexPlusUsageFirstString(item, ["command"]);
-    const action = (item?.commandActions || item?.command_actions || [])
-      .map((entry) => codexPlusUsageFirstString(entry, ["command", "cmd"]))
-      .find(Boolean);
-    const firstLine = String(command || action || "").split(/\r?\n/).find((line) => line.trim()) || "";
-    return firstLine.replace(/\s+/g, " ").trim().slice(0, 72);
+  function codexPlusUsageSkillNamesFromText(value) {
+    const names = new Set();
+    for (const match of String(value || "").matchAll(/(?:^|[\\/])([^\\/\r\n"'`]+)[\\/]SKILL\.md(?=$|[\s"'`])/gi)) {
+      const name = String(match[1] || "").trim();
+      if (name) names.add(name);
+    }
+    return [...names];
   }
 
-  function codexPlusUsageFileSummary(item) {
-    const changes = item?.changes;
-    const paths = Array.isArray(changes)
-      ? changes.map((entry) => codexPlusUsageFirstString(entry, ["path", "file", "name"]))
-      : Object.keys(changes || {});
-    const names = [...new Set(paths.map(codexPlusUsageBaseName).filter(Boolean))];
-    if (!names.length) return "";
-    return names.length > 1 ? `${names[0]} 等 ${names.length} 个文件` : names[0];
+  function codexPlusUsageCommandText(item) {
+    const actions = Array.isArray(item?.commandActions)
+      ? item.commandActions
+      : Array.isArray(item?.command_actions) ? item.command_actions : [];
+    const parsed = Array.isArray(item?.parsed_cmd) ? item.parsed_cmd : [];
+    return [
+      Array.isArray(item?.command) ? item.command.join(" ") : item?.command,
+      ...actions.map((entry) => codexPlusUsageFirstString(entry, ["command", "cmd"])),
+      ...parsed.map((entry) => codexPlusUsageFirstString(entry, ["path", "cmd", "name"])),
+    ].filter((value) => typeof value === "string" && value.trim()).join("\n");
+  }
+
+  function codexPlusUsageSkillNamesFromCommand(item) {
+    return codexPlusUsageSkillNamesFromText(codexPlusUsageCommandText(item));
   }
 
   function codexPlusUsageSkillNames(item) {
@@ -611,21 +648,16 @@
         if (name) names.add(name);
       }
       if (entry?.type !== "text" || typeof entry.text !== "string") continue;
-      for (const match of entry.text.matchAll(/([A-Za-z0-9_.-]+)[\\/]SKILL\.md/gi)) {
-        if (match[1]) names.add(match[1]);
-      }
+      for (const name of codexPlusUsageSkillNamesFromText(entry.text)) names.add(name);
     }
     return [...names];
   }
 
-  function codexPlusUsageCommandKind(turn, item) {
-    const skill = String(turn?.activeSkills?.[0] || "").trim();
-    if (!skill) return { ...codexPlusUsageToolKind(item), visible: false };
+  function codexPlusUsageSkillKind(skill) {
     return {
       key: "skills",
       fallback: "Skills",
       label: `${codexPlusUsageToolLabel("skills", "Skills")} · ${skill}`,
-      detail: codexPlusUsageCommandSummary(item),
     };
   }
 
@@ -638,50 +670,52 @@
     const plugin = codexPlusUsageFirstString(item, ["pluginId", "plugin_id"]);
     const script = codexPlusUsageFirstString(item, ["scriptPath", "script_path"]);
     const label = codexPlusUsageFirstString(item, ["label", "title"]);
-    const command = codexPlusUsageFirstString(item, ["command"]);
+    const command = codexPlusUsageCommandText(item);
     const identity = [typeRaw, server, tool, namespace, plugin, script, label].join(" ").toLowerCase();
     const fallback = (tool || label || namespace || server || typeRaw || "tool").slice(0, 80);
-    const detail = [server, tool].filter(Boolean).join(" · ").slice(0, 120);
     const result = (key, name = "") => {
       const parts = [codexPlusUsageToolLabel(key, fallback), String(name || "").trim()].filter(Boolean);
-      return { key, fallback, detail, label: parts.join(" · ").slice(0, 120) };
+      return { key, fallback, label: parts.join(" · ").slice(0, 120) };
     };
 
     if (/hindsight|memory|memories|knowledge.?base/.test(identity)
         || /(?:^|[\\/])\.codex[\\/]+memories(?:[\\/]|$)/i.test(command)) {
-      return result("memory", [server, tool].filter(Boolean).join(" / "));
+      return result("memory", server || tool);
     }
     if (/skill\.md|(?:^|[\\/])\.(?:agents|codex)[\\/]+skills(?:[\\/]|$)/i.test(command)
         || /(?:^|[\s:/\\])skills?(?:$|[-_\s:/\\])/.test(identity)) {
       return result("skills", tool || label);
     }
     if (type.startsWith("hook") || /\bhooks?\b/.test(identity)) return result("hook", label || tool);
-    if (type === "mcptoolcall" || server) return result("mcp", [server, tool].filter(Boolean).join(" / "));
-    if (type === "commandexecution") return result("command", codexPlusUsageCommandSummary(item));
-    if (type === "filechange" || type.includes("applypatch") || type.includes("filechange")) {
-      return result("file", codexPlusUsageFileSummary(item) || tool || label);
+    if (type === "mcptoolcall" || server) return result("mcp", server || tool);
+    if (type === "commandexecution"
+        || type === "filechange"
+        || type.includes("applypatch")
+        || type.includes("filechange")
+        || type === "imageview"
+        || type === "collabagenttoolcall"
+        || type === "subagentactivity"
+        || type === "dynamictoolcall"
+        || type === "functioncalloutput") {
+      return result("other");
     }
-    if (type === "imageview") {
-      return result("imageView", codexPlusUsageBaseName(codexPlusUsageFirstString(item, ["path"])));
-    }
-    if (type === "imagegeneration") {
-      return result("imageGeneration", codexPlusUsageFirstString(item, ["revisedPrompt", "revised_prompt", "savedPath", "saved_path"]));
-    }
-    if (type === "websearch") return result("webSearch", codexPlusUsageFirstString(item, ["query"]));
-    if (type === "collabagenttoolcall" || type === "subagentactivity") {
-      return result("agent", tool || codexPlusUsageFirstString(item, ["prompt", "agentPath", "agent_path"]));
-    }
-    if (type === "dynamictoolcall" || type === "functioncalloutput") {
-      return result("dynamic", [namespace, tool].filter(Boolean).join(" / "));
-    }
-    if (type === "enteredreviewmode" || type === "exitedreviewmode") {
-      return result("review", codexPlusUsageFirstString(item, ["review"]).split(/\r?\n/)[0]);
-    }
-    if (type === "sleep") return result("sleep", codexPlusUsageFirstString(item, ["durationMs", "duration_ms"]));
+    if (type === "imagegeneration") return result("imageGeneration");
+    if (type === "websearch") return result("webSearch");
+    if (type === "enteredreviewmode" || type === "exitedreviewmode") return result("review");
+    if (type === "sleep") return result("sleep");
     if (type === "contextcompaction") return result("contextCompaction");
 
     const key = `tool:${(fallback || "other").toLowerCase()}`.slice(0, 100);
-    return { key, fallback, detail, label: fallback || codexPlusUsageToolLabel("other", "tool") };
+    return { key, fallback, label: fallback || codexPlusUsageToolLabel("other", "tool") };
+  }
+
+  function codexPlusUsageAttributedToolKind(turn, item) {
+    const hintedSkills = codexPlusUsageSkillNamesFromCommand(item);
+    if (hintedSkills.length) turn.activeSkills = hintedSkills;
+    const base = codexPlusUsageToolKind(item);
+    if (["hook", "mcp", "memory"].includes(base.key)) return base;
+    const skill = String(turn?.activeSkills?.at(-1) || "").trim();
+    return skill ? codexPlusUsageSkillKind(skill) : base;
   }
 
   function codexPlusUsageToolLabel(categoryKey, fallback) {
@@ -738,7 +772,9 @@
       firstTokenAt: null,
       decodeStartedAt: null,
       decodeMs: 0,
-      decodeOutputTokens: 0,
+      pendingDecodeMs: 0,
+      pendingOutput: 0,
+      settledCalls: [],
       activeSkills: [],
       historySeeded: false,
       observedFromStart: false,
@@ -755,8 +791,24 @@
 
   function codexPlusUsageFlushDecode(turn, at) {
     if (!turn || turn.decodeStartedAt == null) return;
-    turn.decodeMs += Math.max(0, at - turn.decodeStartedAt);
+    const duration = Math.max(0, at - turn.decodeStartedAt);
+    turn.decodeMs += duration;
+    turn.pendingDecodeMs += duration;
     turn.decodeStartedAt = null;
+    codexPlusUsageSettleCall(turn, at);
+  }
+
+  // 输出 token 与它的解码时长要成对结算；用量通知晚于调用结束也不会拉低分母。
+  function codexPlusUsageSettleCall(turn, at) {
+    if (!turn || !(turn.pendingDecodeMs > 0) || !(turn.pendingOutput > 0)) return;
+    const call = { output: turn.pendingOutput, decodeMs: turn.pendingDecodeMs };
+    if (Number.isFinite(at)) call.observedAt = at;
+    turn.settledCalls.push(call);
+    if (turn.settledCalls.length > codexPlusUsageMaxLiveSamples) {
+      turn.settledCalls.splice(0, turn.settledCalls.length - codexPlusUsageMaxLiveSamples);
+    }
+    turn.pendingDecodeMs = 0;
+    turn.pendingOutput = 0;
   }
 
   function codexPlusUsageCloseActiveTools(turn, at) {
@@ -796,19 +848,22 @@
   function codexPlusUsageRecordTool(turn, id, kind, startedAt, endedAt, durationMs = null) {
     if (!turn || !kind) return;
     const duration = codexPlusUsageNumber(durationMs);
-    let start = codexPlusUsageNumber(startedAt);
-    let end = codexPlusUsageNumber(endedAt);
-    if (!(end > start) && duration > 0 && end != null) start = end - duration;
-    if (start != null && end > start) turn.toolIntervals.push([start, end]);
+    // Number(null) === 0，必须显式排除空值，否则会把 1970 当成工具起点。
+    let start = startedAt == null ? null : codexPlusUsageNumber(startedAt);
+    const end = endedAt == null ? null : codexPlusUsageNumber(endedAt);
+    // 宿主给出的实测时长最可信：即使有 startedAt 也用它对齐，避免事件间隔充当耗时。
+    if (duration > 0 && end != null) start = end - duration;
+    // 起点未知则只记可见明细，不把未知跨度算成工具耗时，否则会跨过整段思考时间。
+    const valid = start != null && end > start;
+    if (valid) turn.toolIntervals.push([start, end]);
     if (kind.visible !== false) {
       turn.toolDetails.push({
         id: String(id || `${kind.key}:${turn.toolDetails.length}`),
         categoryKey: kind.key,
         fallback: kind.fallback,
         label: kind.label,
-        detail: kind.detail,
-        startedAt: start != null && end > start ? start : null,
-        endedAt: start != null && end > start ? end : null,
+        startedAt: valid ? start : null,
+        endedAt: valid ? end : null,
       });
     }
   }
@@ -838,7 +893,6 @@
         key: "hook",
         fallback: "Hook",
         label: [codexPlusUsageToolLabel("hook", "Hook"), hookName, hookHandler].filter(Boolean).join(" · "),
-        detail: [run.eventName, run.handlerType].filter(Boolean).join(" · "),
       };
       if (method === "hook/started") {
         if (!turn.activeTools.has(id)) turn.activeTools.set(id, { ...kind, startedAt: at });
@@ -856,7 +910,7 @@
       const item = data.item;
       if (codexPlusUsageItemType(item?.type) === "customtoolcall") {
         const id = item.call_id || item.callId || item.id || `custom:${turn.toolDetails.length}`;
-        codexPlusUsageRecordTool(turn, id, codexPlusUsageToolKind({ ...item, type: item.name || item.type }));
+        codexPlusUsageRecordTool(turn, id, codexPlusUsageAttributedToolKind(turn, { ...item, type: item.name || item.type }));
       }
       return turn;
     }
@@ -866,9 +920,7 @@
       if (item?.id && codexPlusUsageIsToolItem(item.type)) {
         codexPlusUsageFlushDecode(turn, at);
         if (!turn.activeTools.has(item.id)) {
-          const kind = codexPlusUsageItemType(item.type) === "commandexecution"
-            ? codexPlusUsageCommandKind(turn, item)
-            : codexPlusUsageToolKind(item);
+          const kind = codexPlusUsageAttributedToolKind(turn, item);
           turn.activeTools.set(item.id, { ...kind, startedAt: at });
         }
       }
@@ -879,9 +931,7 @@
       const item = data.item;
       if (item?.id && codexPlusUsageIsToolItem(item.type)) {
         const active = turn.activeTools.get(item.id);
-        const kind = codexPlusUsageItemType(item.type) === "commandexecution"
-          ? codexPlusUsageCommandKind(turn, item)
-          : codexPlusUsageToolKind(item);
+        const kind = codexPlusUsageAttributedToolKind(turn, item);
         codexPlusUsageRecordTool(
           turn,
           item.id,
@@ -898,12 +948,10 @@
       if (codexPlusUsageItemType(item?.type) === "hookprompt") {
         for (const [index, fragment] of (item.fragments || []).entries()) {
           const id = `hook:${fragment.hookRunId || fragment.hook_run_id || `${item.id}:${index}`}`;
-          const text = String(fragment.text || "").replace(/\s+/g, " ").trim().slice(0, 48);
           codexPlusUsageRecordTool(turn, id, {
             key: "hook",
             fallback: "Hook",
-            label: [codexPlusUsageToolLabel("hook", "Hook"), text].filter(Boolean).join(" · "),
-            detail: String(fragment.text || "").slice(0, 120),
+            label: codexPlusUsageToolLabel("hook", "Hook"),
           });
         }
       }
@@ -974,7 +1022,10 @@
         const lastCallTokens = previous.total > 0 ? previous.total : outputDelta;
         if (lastCallTokens > 0) turn.lastCallTokens = lastCallTokens;
         const output = previous.output > 0 ? previous.output : outputDelta;
-        if (output > 0 && (turn.decodeMs > 0 || turn.decodeStartedAt != null)) turn.decodeOutputTokens += output;
+        if (output > 0) {
+          turn.pendingOutput += output;
+          codexPlusUsageSettleCall(turn, at);
+        }
       }
       turn.skipMatchingUsage = false;
       turn.lastHistorySample = null;
@@ -999,8 +1050,89 @@
     return outputTokens > 0 && decodeMs > 0 ? outputTokens / (decodeMs / 1000) : null;
   }
 
-  function codexPlusUsageAverageSpeed(decodeOutputTokens, decodeMs) {
-    return codexPlusUsageDecodeSpeed(decodeOutputTokens, decodeMs);
+  function codexPlusUsageSettledSpeed(calls, now = null, windowMs = 0) {
+    const valid = [];
+    for (const call of Array.isArray(calls) ? calls : []) {
+      const tokens = codexPlusUsageNumber(call?.output);
+      const duration = codexPlusUsageNumber(call?.decodeMs);
+      if (tokens < codexPlusUsageSpeedMinimumOutputTokens
+          || duration < codexPlusUsageSpeedMinimumDecodeMs) {
+        continue;
+      }
+      const rate = codexPlusUsageDecodeSpeed(tokens, duration);
+      if (rate == null || rate > codexPlusUsageSpeedPeak) continue;
+      valid.push({
+        output: tokens,
+        decodeMs: duration,
+        observedAt: Number.isFinite(call?.observedAt) ? call.observedAt : null,
+      });
+    }
+    if (!valid.length) return null;
+    let selected = valid;
+    if (Number.isFinite(now) && windowMs > 0) {
+      const timed = valid.filter((call) => call.observedAt != null);
+      if (timed.length) {
+        const recent = timed.filter((call) => call.observedAt >= now - windowMs);
+        // 空闲时保持最后一个有效读数，不能让速度自己衰减成假值。
+        selected = recent.length ? recent : [timed[timed.length - 1]];
+      }
+    }
+    let output = 0;
+    let decodeMs = 0;
+    for (const call of selected) {
+      output += call.output;
+      decodeMs += call.decodeMs;
+    }
+    return codexPlusUsageDecodeSpeed(output, decodeMs);
+  }
+
+  // 主指标优先使用逐调用解码窗口；整轮墙钟只在历史数据缺少调用时间轴时兜底。
+  function codexPlusUsageModelWindowSpeed(turn, now) {
+    if (!turn) return null;
+    const end = turn.completedAt ?? (Number.isFinite(now) ? now : Date.now());
+    const settledCalls = Array.isArray(turn.settledCalls) ? turn.settledCalls : [];
+    if (settledCalls.length) {
+      const settled = codexPlusUsageSettledSpeed(
+        settledCalls,
+        end,
+        codexPlusUsageSpeedWindowMs,
+      );
+      return settled == null ? null : Math.min(settled, codexPlusUsageSpeedPeak);
+    }
+    const wallMs = Math.max(0, end - turn.startedAt);
+    const ttftMs = turn.firstTokenAt == null
+      ? 0
+      : codexPlusUsageClamp(turn.firstTokenAt - turn.startedAt, 0, wallMs);
+    // 进行中的工具也要扣掉，否则工具跑多久速度就掉多久。
+    const intervals = turn.toolIntervals.slice();
+    for (const tool of turn.activeTools?.values?.() ?? []) {
+      if (Number.isFinite(tool?.startedAt)) intervals.push([tool.startedAt, end]);
+    }
+    const toolMs = codexPlusUsageMergedDuration(intervals);
+    const windowMs = Math.max(0, wallMs - ttftMs - Math.min(toolMs, wallMs - ttftMs));
+    const outputTokens = codexPlusUsageNumber(turn.outputTokens);
+    if (outputTokens < codexPlusUsageSpeedMinimumOutputTokens) return null;
+    const windowSpeed = windowMs >= codexPlusUsageSpeedMinimumDecodeMs
+      ? codexPlusUsageDecodeSpeed(outputTokens, windowMs)
+      : null;
+    // shortcut: 历史回填或工具覆盖整个窗口时用墙钟近似，宿主恢复 decode 事件后应优先走逐调用窗口。
+    const speed = windowSpeed
+      ?? (wallMs >= codexPlusUsageSpeedMinimumDecodeMs
+        ? codexPlusUsageDecodeSpeed(outputTokens, wallMs)
+        : null);
+    // 统计窗口刚跨过一个工具时可能只剩几毫秒；真实峰值约 400 tok/s，超出即视为分母失真。
+    return speed == null ? null : Math.min(speed, codexPlusUsageSpeedPeak);
+  }
+
+  function codexPlusUsageNeedsHistoryRefresh(turn) {
+    if (!turn) return false;
+    if (!(turn.usageSamples > 0) || !(turn.outputTokens > 0)) return true;
+    if (turn.historySeeded) return false;
+    return !turn.observedFromStart;
+  }
+
+  function codexPlusUsageAverageSpeed(calls) {
+    return codexPlusUsageSettledSpeed(calls);
   }
 
   function codexPlusUsageFormatSpeed(value) {
@@ -1071,7 +1203,7 @@
     const addToolCall = (detail, detailEnd = end) => {
       if (!detail) return;
       const id = String(detail.id || `${detail.categoryKey || "other"}:${toolCalls.size}`);
-      const categoryKey = String(detail.categoryKey || "other");
+      const categoryKey = String(detail.categoryKey || detail.key || "other");
       const fallback = String(detail.fallback || "");
       const label = String(detail.label || codexPlusUsageToolLabel(categoryKey, fallback)).trim();
       const timed = Number.isFinite(detail.startedAt)
@@ -1079,7 +1211,7 @@
         && detailEnd > detail.startedAt;
       let call = toolCalls.get(id);
       if (!call) {
-        call = { id, categoryKey, fallback, label, intervals: [], details: new Set(), timed: false };
+        call = { id, categoryKey, fallback, label, intervals: [], timed: false };
         toolCalls.set(id, call);
       }
       if (!call.label || (timed && !call.timed)) call.label = label || call.label;
@@ -1087,7 +1219,6 @@
         call.intervals.push([detail.startedAt, detailEnd]);
         call.timed = true;
       }
-      if (detail.detail && call.details.size < 6) call.details.add(String(detail.detail));
     };
     for (const detail of turn.toolDetails) addToolCall(detail, detail.endedAt);
     for (const [id, tool] of turn.activeTools) addToolCall({ ...tool, id }, end);
@@ -1096,20 +1227,16 @@
     for (const call of toolCalls.values()) {
       const key = `${call.categoryKey}:${call.label}`;
       if (!toolGroups.has(key)) {
-        toolGroups.set(key, { ids: new Set(), intervals: [], categoryKey: call.categoryKey, label: call.label, details: new Set() });
+        toolGroups.set(key, { ids: new Set(), intervals: [], categoryKey: call.categoryKey, label: call.label });
       }
       const group = toolGroups.get(key);
       group.ids.add(call.id);
       group.intervals.push(...call.intervals);
-      for (const detail of call.details) {
-        if (group.details.size < 6) group.details.add(detail);
-      }
     }
     const toolDetails = [...toolGroups.values()]
       .map((group) => ({
         categoryKey: group.categoryKey,
         label: group.label,
-        detail: [...group.details].join(" / "),
         count: group.ids.size,
         durationMs: codexPlusUsageMergedDuration(group.intervals),
       }))
@@ -1122,11 +1249,8 @@
       codexPlusUsageState.liveContextByThread.get(turn.threadId),
     );
     return {
-      speed: codexPlusUsageDecodeSpeed(turn.decodeOutputTokens, decodeMs),
-      averageSpeed: codexPlusUsageAverageSpeed(
-        turn.decodeOutputTokens,
-        decodeMs,
-      ),
+      speed: codexPlusUsageModelWindowSpeed(turn, end),
+      averageSpeed: codexPlusUsageAverageSpeed(turn.settledCalls),
       ttftMs,
       decodeMs,
       toolMs,
@@ -1298,6 +1422,354 @@
     return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`;
   }
 
+  function codexPlusUsageMagpieDateKey(value) {
+    const timestamp = Date.parse(String(value || ""));
+    return Number.isFinite(timestamp) ? codexPlusUsageBeijingDateKey(timestamp) : "";
+  }
+
+  function codexPlusUsageMagpieSnapshotFromValues(source, dateKey = "") {
+    if (!dateKey || !source || typeof source !== "object") return null;
+    const input = codexPlusUsageNumber(source.input) ?? 0;
+    const output = codexPlusUsageNumber(source.output) ?? 0;
+    const cached = codexPlusUsageNumber(source.cache_read) ?? codexPlusUsageNumber(source.cached) ?? 0;
+    return {
+      dateKey,
+      input,
+      output,
+      cached,
+      reasoning: codexPlusUsageNumber(source.reasoning) ?? 0,
+      total: input + cached + output,
+      calls: codexPlusUsageNumber(source.calls) ?? 0,
+      cost: codexPlusUsageNumber(source.cost) ?? 0,
+      source: "magpie",
+    };
+  }
+
+  function codexPlusUsageMagpieSnapshots(payload) {
+    const snapshots = new Map();
+    for (const row of Array.isArray(payload?.series) ? payload.series : []) {
+      const dateKey = codexPlusUsageMagpieDateKey(row?.time);
+      const snapshot = codexPlusUsageMagpieSnapshotFromValues(row, dateKey);
+      if (snapshot) snapshots.set(dateKey, snapshot);
+    }
+    return snapshots;
+  }
+
+  function codexPlusUsageMagpieSessions(payload) {
+    const sessions = new Map();
+    for (const row of Array.isArray(payload?.sessions) ? payload.sessions : []) {
+      const id = codexPlusUsageNormalizeThreadId(row?.id);
+      if (!id) continue;
+      const input = codexPlusUsageNumber(row?.input) ?? 0;
+      const output = codexPlusUsageNumber(row?.output) ?? 0;
+      const cached = codexPlusUsageNumber(row?.cache_read) ?? codexPlusUsageNumber(row?.cached) ?? 0;
+      sessions.set(id, {
+        id,
+        agent: String(row?.agent || "").trim(),
+        input,
+        output,
+        cached,
+        reasoning: codexPlusUsageNumber(row?.reasoning) ?? 0,
+        total: input + cached + output,
+        calls: codexPlusUsageNumber(row?.calls) ?? 0,
+        cost: codexPlusUsageNumber(row?.cost) ?? 0,
+        source: "magpie",
+      });
+    }
+    return sessions;
+  }
+
+  function codexPlusUsageMagpieTodaySnapshot(payload, now = Date.now()) {
+    if (!payload || typeof payload !== "object") return null;
+    const dateKey = codexPlusUsageMagpieDateKey(payload.since || payload.time)
+      || codexPlusUsageBeijingDateKey(now);
+    return codexPlusUsageMagpieSnapshotFromValues(payload, dateKey);
+  }
+
+  function codexPlusUsageMagpieTaskSession(payload, threadId) {
+    const id = codexPlusUsageNormalizeThreadId(threadId);
+    const snapshot = codexPlusUsageMagpieSnapshotFromValues(payload, "task");
+    if (!id || !snapshot) return null;
+    return {
+      id,
+      agent: "codex",
+      input: snapshot.input,
+      output: snapshot.output,
+      cached: snapshot.cached,
+      reasoning: snapshot.reasoning,
+      total: snapshot.total,
+      calls: snapshot.calls,
+      cost: snapshot.cost,
+      source: "magpie",
+    };
+  }
+
+  function codexPlusUsageAbsoluteUrl(value) {
+    if (!value) return "";
+    try {
+      return new URL(String(value), document.baseURI || location.href).href;
+    } catch {
+      return "";
+    }
+  }
+
+  function codexPlusUsageCollectAssetUrls() {
+    const urls = new Set();
+    const push = (value) => {
+      const url = codexPlusUsageAbsoluteUrl(value);
+      if (url && /\/assets\/.+\.js(?:$|\?)/.test(url)) urls.add(url);
+    };
+    try {
+      document.querySelectorAll?.("script[src],link[href]")?.forEach((node) => {
+        push(node?.getAttribute?.("src") || node?.getAttribute?.("href") || "");
+      });
+    } catch {
+      // 页面 DOM 不可用时仍尝试 performance 资源列表。
+    }
+    try {
+      performance.getEntriesByType?.("resource")?.forEach((entry) => push(entry?.name));
+    } catch {
+      // 旧宿主可能没有 performance 资源条目。
+    }
+    return [...urls];
+  }
+
+  function codexPlusUsageAssetRpcUrls(assetUrl, assetText) {
+    const urls = [];
+    for (const match of String(assetText || "").matchAll(/(?:\.\/)?rpc-[A-Za-z0-9_-]+\.js/g)) {
+      try {
+        urls.push(new URL(match[0], assetUrl).href);
+      } catch {
+        // 忽略无法解析的引用，继续查找下一个。
+      }
+    }
+    return [...new Set(urls)];
+  }
+
+  async function codexPlusUsageDiscoverRpcAssetUrls(urls, assetFetch = globalThis.fetch) {
+    const candidates = new Set(urls.filter((url) => /\/assets\/rpc-[^/]+\.js(?:$|\?)/.test(url)));
+    if (candidates.size) return [...candidates];
+    const entryUrls = urls.filter((url) => /\/assets\/(?:index(?:\.client)?-|app-shared-)[^/]+\.js(?:$|\?)/.test(url));
+    for (const entryUrl of entryUrls) {
+      try {
+        const response = await assetFetch?.(entryUrl);
+        if (!response?.ok) continue;
+        const references = codexPlusUsageAssetRpcUrls(entryUrl, await response.text());
+        if (!references.length) continue;
+        for (const url of references) candidates.add(url);
+        break;
+      } catch {
+        // 资源读取失败时继续尝试下一个已加载入口。
+      }
+    }
+    if (!candidates.size) {
+      // 某些宿主把 appServices 直接挂在共享模块上，直接复用已加载模块即可。
+      for (const url of urls) {
+        if (/\/assets\/app-shared-[^/]+\.js(?:$|\?)/.test(url)) candidates.add(url);
+      }
+    }
+    return [...candidates];
+  }
+
+  async function codexPlusUsageResolveAppServices() {
+    const state = codexPlusUsageState;
+    if (state.appServicesPromise) return state.appServicesPromise;
+    const promise = (async () => {
+      const urls = await codexPlusUsageDiscoverRpcAssetUrls(codexPlusUsageCollectAssetUrls());
+      for (const url of urls) {
+        try {
+          const moduleExports = await import(/* @vite-ignore */ url);
+          const services = moduleExports?.appServices;
+          if (services?.httpFetch && typeof services.httpFetch.fetch === "function") {
+            return services;
+          }
+        } catch {
+          // 继续尝试下一个已加载的 RPC 资源。
+        }
+      }
+      return null;
+    })();
+    state.appServicesPromise = promise;
+    try {
+      const services = await promise;
+      if (!services && state.appServicesPromise === promise) state.appServicesPromise = null;
+      return services;
+    } catch (error) {
+      if (state.appServicesPromise === promise) state.appServicesPromise = null;
+      throw error;
+    }
+  }
+
+  async function codexPlusUsageServiceGetJson(services, url) {
+    if (!services?.httpFetch || typeof services.httpFetch.fetch !== "function") {
+      throw new Error("HTTP fetch service 不可用");
+    }
+    const requestId = `tokenlens-magpie-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const result = await services.httpFetch.fetch(requestId, {
+      url,
+      method: "GET",
+      headers: {},
+      retry: false,
+    });
+    if (!result?.response) throw new Error(result?.error || "HTTP fetch service 未返回响应");
+    if (!result.response.ok) throw new Error(`Magpie 请求失败 (${result.response.status || 0})`);
+    try {
+      return await result.response.json();
+    } finally {
+      result?.[Symbol.dispose]?.();
+    }
+  }
+
+  async function codexPlusUsageBridgeGetJson(url) {
+    try {
+      const services = await codexPlusUsageResolveAppServices();
+      if (services?.httpFetch) return await codexPlusUsageServiceGetJson(services, url);
+    } catch {
+      // 新宿主优先走官方 HTTP service；旧宿主继续尝试 renderer bridge。
+    }
+    const bridge = window.electronBridge;
+    if (!bridge || typeof bridge.sendMessageFromView !== "function") {
+      throw new Error("Electron bridge 不可用");
+    }
+    const requestId = `tokenlens-magpie-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = 0;
+      const cleanup = () => {
+        if (timer) window.clearTimeout(timer);
+        window.removeEventListener?.("message", handler, true);
+      };
+      const settle = (data) => {
+        if (settled || !data || data.requestId !== requestId || data.type !== "fetch-response") return false;
+        settled = true;
+        cleanup();
+        const status = Number(data.status) || 0;
+        if (data.responseType !== "success" || status >= 400) {
+          reject(new Error(`Magpie 请求失败${status ? ` (${status})` : ""}`));
+          return true;
+        }
+        try {
+          const body = data.bodyJsonString ?? data.body ?? data.bodyJson ?? "{}";
+          resolve(typeof body === "string" ? JSON.parse(body) : body);
+        } catch (error) {
+          reject(error);
+        }
+        return true;
+      };
+      const handler = (event) => {
+        settle(event?.data);
+      };
+      window.addEventListener?.("message", handler, true);
+      timer = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error("Magpie 请求超时"));
+      }, codexPlusUsageMagpieTimeoutMs);
+      Promise.resolve(
+        bridge.sendMessageFromView({
+          type: "fetch",
+          method: "GET",
+          url,
+          requestId,
+        }),
+      )
+        .then(settle)
+        .catch((error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        });
+    });
+  }
+
+  async function codexPlusUsageRefreshMagpieUsage(force = false) {
+    const state = codexPlusUsageState;
+    if (state.disposed) return { ok: false, changed: false };
+    if (state.magpieUsagePromise) return state.magpieUsagePromise;
+    const now = Date.now();
+    if (!force && now - state.magpieUsageLastAttemptAt < codexPlusUsageMagpieRefreshMs) {
+      return { ok: state.magpieUsage.fetchedAt > 0, changed: false };
+    }
+    state.magpieUsageLastAttemptAt = now;
+    state.magpieUsagePromise = (async () => {
+      try {
+        const taskId = codexPlusUsageNormalizeThreadId(state.threadId);
+        const taskUrl = taskId
+          ? codexPlusUsageMagpieTaskUsageUrlPrefix + encodeURIComponent(taskId)
+          : "";
+        const [weekResult, todayResult, taskResult] = await Promise.allSettled([
+          codexPlusUsageBridgeGetJson(codexPlusUsageMagpieUsageUrl),
+          codexPlusUsageBridgeGetJson(codexPlusUsageMagpieTodayUsageUrl),
+          taskUrl ? codexPlusUsageBridgeGetJson(taskUrl) : Promise.resolve(null),
+        ]);
+        const snapshots = new Map();
+        const errors = [];
+        if (weekResult.status === "fulfilled") {
+          for (const [dateKey, snapshot] of codexPlusUsageMagpieSnapshots(weekResult.value)) {
+            snapshots.set(dateKey, snapshot);
+          }
+        } else {
+          errors.push(String(weekResult.reason?.message || weekResult.reason));
+        }
+        if (todayResult.status === "fulfilled") {
+          const today = codexPlusUsageMagpieTodaySnapshot(todayResult.value);
+          if (today) snapshots.set(today.dateKey, today);
+        } else {
+          errors.push(String(todayResult.reason?.message || todayResult.reason));
+        }
+        const sessions = new Map();
+        if (taskResult.status === "fulfilled") {
+          const task = codexPlusUsageMagpieTaskSession(taskResult.value, taskId);
+          if (task) sessions.set(task.id, task);
+        } else {
+          errors.push(`当前任务: ${String(taskResult.reason?.message || taskResult.reason)}`);
+        }
+        if (!snapshots.size) throw new Error(errors.join("；") || "Magpie 未返回可用用量");
+        if (state.disposed) return { ok: false, changed: false };
+        let changed = state.magpieUsage.snapshots.size !== snapshots.size
+          || state.magpieUsage.sessions.size !== sessions.size;
+        for (const [dateKey, snapshot] of snapshots) {
+          const previous = state.magpieUsage.snapshots.get(dateKey);
+          if (
+            previous?.total !== snapshot.total
+            || previous?.input !== snapshot.input
+            || previous?.output !== snapshot.output
+            || previous?.cached !== snapshot.cached
+            || previous?.calls !== snapshot.calls
+          ) {
+            changed = true;
+          }
+        }
+        for (const [id, session] of sessions) {
+          const previous = state.magpieUsage.sessions.get(id);
+          if (
+            previous?.total !== session.total
+            || previous?.input !== session.input
+            || previous?.output !== session.output
+            || previous?.cached !== session.cached
+            || previous?.calls !== session.calls
+          ) {
+            changed = true;
+          }
+        }
+        state.magpieUsage = { fetchedAt: Date.now(), snapshots, sessions };
+        state.dailyLedger = codexPlusUsageMergeDailyLedger(state.dailyLedger, snapshots);
+        state.magpieUsageError = "";
+        return { ok: true, changed };
+      } catch (error) {
+        if (!state.disposed) {
+          state.magpieUsageError = String(error?.message || error);
+        }
+        return { ok: false, changed: false, error: state.magpieUsageError };
+      } finally {
+        state.magpieUsagePromise = null;
+      }
+    })();
+    return state.magpieUsagePromise;
+  }
+
   function codexPlusUsageGlobalDateKeys(startAt, endAt) {
     if (!Number.isFinite(startAt) || !Number.isFinite(endAt) || endAt < startAt) return [];
     const dayMs = 24 * 60 * 60 * 1000;
@@ -1311,35 +1783,232 @@
     return keys;
   }
 
-  function codexPlusUsageGlobalTotal(range, now = Date.now(), api = window[codexPlusUsageGlobalApiKey]) {
+  function codexPlusUsageNormalizeGlobalDay(snapshot, source = "daily") {
+    if (!snapshot || !Number.isFinite(codexPlusUsageNumber(snapshot.total))) return null;
+    const rawInput = codexPlusUsageNumber(snapshot.input) ?? 0;
+    const cached = codexPlusUsageNumber(snapshot.cached) ?? codexPlusUsageNumber(snapshot.cache_read) ?? 0;
+    const output = codexPlusUsageNumber(snapshot.output) ?? 0;
+    const magpie = source === "magpie"
+      || snapshot.usageSource === "magpie"
+      || snapshot.source === "magpie";
+    // Magpie 的 input 是非缓存输入；本地日报的 input 是含缓存的总输入。
+    const input = magpie ? rawInput : Math.max(0, rawInput - cached);
+    return {
+      input,
+      cached,
+      output,
+      inputTotal: input + cached,
+      total: codexPlusUsageNumber(snapshot.total),
+      calls: codexPlusUsageNumber(snapshot.calls) ?? 0,
+    };
+  }
+
+  function codexPlusUsageEmptyDailyLedger() {
+    return { version: codexPlusUsageDailyLedgerVersion, days: {} };
+  }
+
+  function codexPlusUsageNormalizeDailyLedgerDay(snapshot, at = 0) {
+    const day = codexPlusUsageNormalizeGlobalDay(snapshot, "magpie");
+    if (!day) return null;
+    return {
+      input: day.input,
+      cached: day.cached,
+      output: day.output,
+      total: day.total,
+      calls: day.calls,
+      source: "magpie",
+      at: codexPlusUsageNumber(at) ?? 0,
+    };
+  }
+
+  function codexPlusUsageReadDailyLedger(storage) {
+    const empty = codexPlusUsageEmptyDailyLedger();
+    try {
+      const store = storage ?? globalThis.localStorage;
+      const parsed = JSON.parse(store?.getItem?.(codexPlusUsageDailyLedgerKey) || "null");
+      if (parsed?.version !== codexPlusUsageDailyLedgerVersion || !parsed?.days) return empty;
+      for (const [dateKey, value] of Object.entries(parsed.days)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
+        const day = codexPlusUsageNormalizeDailyLedgerDay(value, value?.at);
+        if (day) empty.days[dateKey] = day;
+      }
+    } catch {
+      // 存储不可读或内容损坏时从空账本开始，不影响实时 Magpie。
+    }
+    return empty;
+  }
+
+  function codexPlusUsageWriteDailyLedger(ledger, storage) {
+    try {
+      const store = storage ?? globalThis.localStorage;
+      store?.setItem?.(codexPlusUsageDailyLedgerKey, JSON.stringify(ledger));
+    } catch {
+      // 配额或隐私模式禁止写入时保留内存账本。
+    }
+    return ledger;
+  }
+
+  function codexPlusUsageMergeDailyLedger(
+    ledger,
+    snapshots,
+    now = Date.now(),
+    storage,
+  ) {
+    const base = ledger?.version === codexPlusUsageDailyLedgerVersion && ledger?.days
+      ? ledger
+      : codexPlusUsageReadDailyLedger(storage);
+    const days = { ...base.days };
+    const timestamp = Number.isFinite(now) ? now : Date.now();
+    let changed = false;
+    for (const [dateKey, snapshot] of snapshots || []) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) continue;
+      const next = codexPlusUsageNormalizeDailyLedgerDay(snapshot, timestamp);
+      if (!next) continue;
+      const previous = days[dateKey];
+      const merged = {
+        input: Math.max(previous?.input ?? 0, next.input),
+        cached: Math.max(previous?.cached ?? 0, next.cached),
+        output: Math.max(previous?.output ?? 0, next.output),
+        total: Math.max(previous?.total ?? 0, next.total),
+        calls: Math.max(previous?.calls ?? 0, next.calls),
+        source: "magpie",
+        at: timestamp,
+      };
+      // 分开取最大值后重算总量，避免回退源只更新部分字段时出现缩水。
+      merged.total = Math.max(merged.total, merged.input + merged.cached + merged.output);
+      if (
+        previous
+        && previous.input === merged.input
+        && previous.cached === merged.cached
+        && previous.output === merged.output
+        && previous.total === merged.total
+        && previous.calls === merged.calls
+      ) {
+        continue;
+      }
+      days[dateKey] = merged;
+      changed = true;
+    }
+    const keys = Object.keys(days).sort();
+    if (keys.length > codexPlusUsageDailyLedgerMaxDays) {
+      for (const key of keys.slice(0, keys.length - codexPlusUsageDailyLedgerMaxDays)) delete days[key];
+      changed = true;
+    }
+    const next = { version: codexPlusUsageDailyLedgerVersion, days };
+    if (changed) codexPlusUsageWriteDailyLedger(next, storage);
+    return next;
+  }
+
+  function codexPlusUsageGlobalAggregate(
+    range,
+    now = Date.now(),
+    api = window[codexPlusUsageGlobalApiKey],
+    magpieUsage = codexPlusUsageState.magpieUsage,
+  ) {
     const bounds = codexPlusUsageRangeBounds(range, now);
     if (!bounds) return null;
     if (!codexPlusUsageIsGlobalRange(range)) return null;
-    if (typeof api?.getSnapshot !== "function") return null;
     const keys = codexPlusUsageGlobalDateKeys(bounds.start, bounds.end);
     if (!keys.length) return null;
-    let total = 0;
+    const maxAge = Number.isFinite(codexPlusUsageState.magpieUsageMaxAgeMs)
+      ? codexPlusUsageState.magpieUsageMaxAgeMs
+      : 30_000;
+    const magpieFresh = !!magpieUsage?.fetchedAt
+      && now >= magpieUsage.fetchedAt
+      && now - magpieUsage.fetchedAt <= maxAge
+      && typeof magpieUsage.snapshots?.get === "function";
+    const dailyLedger = codexPlusUsageState.dailyLedger?.days
+      ? codexPlusUsageState.dailyLedger
+      : null;
+    const ledgerAvailable = !!dailyLedger?.days && Object.keys(dailyLedger.days).length > 0;
+    const dailyAvailable = typeof api?.getSnapshot === "function";
+    if (!magpieFresh && !ledgerAvailable && !dailyAvailable) return null;
+    const aggregate = {
+      total: 0,
+      input: 0,
+      output: 0,
+      cached: 0,
+      inputTotal: 0,
+      calls: 0,
+      hitRate: null,
+    };
     let available = 0;
+    let magpieDays = 0;
+    let ledgerDays = 0;
+    let dailyDays = 0;
     for (const key of keys) {
+      const magpieSnapshot = magpieFresh ? magpieUsage.snapshots.get(key) : null;
+      const magpieDay = codexPlusUsageNormalizeGlobalDay(magpieSnapshot, "magpie");
+      if (magpieDay) {
+        available += 1;
+        magpieDays += 1;
+        aggregate.total += magpieDay.total;
+        aggregate.input += magpieDay.input;
+        aggregate.output += magpieDay.output;
+        aggregate.cached += magpieDay.cached;
+        aggregate.inputTotal += magpieDay.inputTotal;
+        aggregate.calls += magpieDay.calls;
+        continue;
+      }
+      const ledgerDay = codexPlusUsageNormalizeGlobalDay(dailyLedger?.days?.[key], "magpie");
+      if (ledgerDay) {
+        available += 1;
+        ledgerDays += 1;
+        aggregate.total += ledgerDay.total;
+        aggregate.input += ledgerDay.input;
+        aggregate.output += ledgerDay.output;
+        aggregate.cached += ledgerDay.cached;
+        aggregate.inputTotal += ledgerDay.inputTotal;
+        aggregate.calls += ledgerDay.calls;
+        continue;
+      }
+      if (!dailyAvailable) continue;
       const snapshot = api.getSnapshot(key);
       if (snapshot?.dateKey !== key || !Number.isFinite(snapshot?.total)) continue;
+      const dailyDay = codexPlusUsageNormalizeGlobalDay(snapshot, "daily");
+      if (!dailyDay) continue;
       available += 1;
-      total += snapshot.total;
+      const isMagpie = snapshot.usageSource === "magpie" || snapshot.source === "magpie";
+      if (isMagpie) magpieDays += 1;
+      else dailyDays += 1;
+      aggregate.total += dailyDay.total;
+      aggregate.input += dailyDay.input;
+      aggregate.output += dailyDay.output;
+      aggregate.cached += dailyDay.cached;
+      aggregate.inputTotal += dailyDay.inputTotal;
+      aggregate.calls += dailyDay.calls;
     }
     codexPlusUsageState.globalUsageCoverage = { available, total: keys.length };
-    return available ? total : null;
+    codexPlusUsageState.globalUsageSourceCoverage = { magpie: magpieDays, ledger: ledgerDays, daily: dailyDays };
+    const result = available ? aggregate : null;
+    if (result) {
+      result.hitRate = result.inputTotal > 0
+        ? Math.min(1, result.cached / result.inputTotal)
+        : null;
+    }
+    codexPlusUsageState.globalUsageAggregate = result;
+    return result;
+  }
+
+  function codexPlusUsageGlobalTotal(...args) {
+    return codexPlusUsageGlobalAggregate(...args)?.total ?? null;
   }
 
   async function codexPlusUsageRefreshGlobalUsage(force = false) {
     if (codexPlusUsageState.globalUsagePromise) return codexPlusUsageState.globalUsagePromise;
-    if (!force && Date.now() - codexPlusUsageState.globalUsageFetchedAt < codexPlusUsageGlobalRefreshMs) return null;
     codexPlusUsageState.globalUsageLoading = true;
     codexPlusUsageState.globalUsageError = "";
     codexPlusUsageState.globalUsagePromise = (async () => {
-      const api = window[codexPlusUsageGlobalApiKey];
-      if (typeof api?.getSnapshot !== "function") throw new Error("未找到每日消耗数据源");
-      if (typeof api.runHistoryBackfill === "function") await api.runHistoryBackfill();
-      codexPlusUsageState.globalUsageFetchedAt = Date.now();
+      const magpie = await codexPlusUsageRefreshMagpieUsage(force);
+      const aggregate = codexPlusUsageGlobalAggregate(codexPlusUsageState.range);
+      if (!aggregate && !magpie.ok) {
+        throw new Error(magpie.error
+          ? `Magpie 不可用，且没有本地账本或日报：${magpie.error}`
+          : "没有可用的每日消耗数据源");
+      }
+      codexPlusUsageState.globalUsageError = magpie.ok
+        ? ""
+        : `Magpie 不可用，已回退 TokenLens 本地账本/日报：${magpie.error || "未知错误"}`;
     })().catch((error) => {
       codexPlusUsageState.globalUsageError = String(error?.message || error);
     }).finally(() => {
@@ -1352,19 +2021,61 @@
     return codexPlusUsageState.globalUsagePromise;
   }
 
+  function codexPlusUsageTaskUsage(snapshot, now = Date.now()) {
+    const local = snapshot?.usage || null;
+    const state = codexPlusUsageState;
+    const maxAge = Number.isFinite(state.magpieUsageMaxAgeMs)
+      ? state.magpieUsageMaxAgeMs
+      : 30_000;
+    const fresh = !!state.magpieUsage?.fetchedAt
+      && now >= state.magpieUsage.fetchedAt
+      && now - state.magpieUsage.fetchedAt <= maxAge
+      && typeof state.magpieUsage.sessions?.get === "function";
+    const session = fresh ? state.magpieUsage.sessions.get(state.threadId) : null;
+    if (!local && !session) return null;
+    const localCached = codexPlusUsageNumber(local?.cached) ?? 0;
+    const localInput = Math.max(0, (codexPlusUsageNumber(local?.input) ?? 0) - localCached);
+    const input = Math.max(localInput, codexPlusUsageNumber(session?.input) ?? 0);
+    const cached = Math.max(localCached, codexPlusUsageNumber(session?.cached) ?? 0);
+    const output = Math.max(
+      codexPlusUsageNumber(local?.output) ?? 0,
+      codexPlusUsageNumber(session?.output) ?? 0,
+    );
+    const inputTotal = input + cached;
+    return {
+      input,
+      cached,
+      output,
+      total: inputTotal + output,
+      hitRate: inputTotal > 0 ? Math.min(1, cached / inputTotal) : null,
+      calls: Math.max(
+        codexPlusUsageNumber(snapshot?.samples) ?? 0,
+        codexPlusUsageNumber(session?.calls) ?? 0,
+      ),
+      source: session ? "magpie" : "local",
+    };
+  }
+
+  function codexPlusUsageSelectedUsage(snapshot) {
+    if (codexPlusUsageState.range === "task") return codexPlusUsageTaskUsage(snapshot);
+    return codexPlusUsageGlobalAggregate(codexPlusUsageState.range);
+  }
+
   function codexPlusUsageSelectedConsumption(snapshot) {
     const text = codexPlusUsageText();
+    const usage = codexPlusUsageSelectedUsage(snapshot);
     if (codexPlusUsageState.range === "task") {
-      return { label: text.labels.task, value: snapshot?.usage?.total ?? null };
+      return { label: text.labels.task, value: usage?.total ?? null, usage };
     }
-    const value = codexPlusUsageGlobalTotal(codexPlusUsageState.range);
     const base = text.labels[codexPlusUsageState.range] || text.labels.custom;
     const coverage = codexPlusUsageState.globalUsageCoverage;
+    const coverageLabel = coverage.total > coverage.available
+      ? `${base}（${coverage.available}/${coverage.total}）`
+      : base;
     return {
-      label: coverage.total > coverage.available
-        ? `${base}（${coverage.available}/${coverage.total}）`
-        : base,
-      value,
+      label: coverageLabel,
+      value: usage?.total ?? null,
+      usage,
     };
   }
 
@@ -1448,6 +2159,18 @@
     return codexPlusUsageState.historyPromise;
   }
 
+  function codexPlusUsageScheduleHistoryRetry(threadId) {
+    if (codexPlusUsageState.historyRetryTimer) {
+      window.clearTimeout(codexPlusUsageState.historyRetryTimer);
+    }
+    codexPlusUsageState.historyRetryTimer = window.setTimeout(() => {
+      codexPlusUsageState.historyRetryTimer = 0;
+      if (codexPlusUsageState.disposed || codexPlusUsageState.threadId !== threadId) return;
+      if (!codexPlusUsageNeedsHistoryRefresh(codexPlusUsageState.turns.get(threadId))) return;
+      void codexPlusUsageLoadHistory(true);
+    }, 1200);
+  }
+
   function codexPlusUsageComposerCard() {
     const cards = [...document.querySelectorAll("[data-composer-surface-variant]")];
     let fallback = null;
@@ -1517,8 +2240,9 @@
     if (method === "turn/started") turn.observedFromStart = true;
     turn = codexPlusUsageApplyEvent(turn, method, data, Date.now());
     codexPlusUsageRememberTurn(turn);
-    if (method === "turn/completed" && !turn.observedFromStart && !turn.historySeeded) {
+    if (method === "turn/completed" && codexPlusUsageNeedsHistoryRefresh(turn)) {
       void codexPlusUsageLoadHistory(true);
+      codexPlusUsageScheduleHistoryRetry(threadId);
     }
     if (codexPlusUsageState.threadId === threadId) {
       codexPlusUsageRender(codexPlusUsageTurnSnapshot(turn, Date.now()));
@@ -1671,6 +2395,12 @@
     parts.chartTrack.style.setProperty("--chart-count", String(desired));
     parts.chartTrack.style.width = `${desired / 20 * 100}%`;
     return desired;
+  }
+
+  function codexPlusUsagePinChartToLatest(parts) {
+    const scroll = parts?.chartScroll;
+    if (!scroll) return;
+    scroll.scrollLeft = scroll.scrollWidth;
   }
 
   function codexPlusUsageBuildPopover() {
@@ -1832,7 +2562,10 @@
     };
     parts.customStart.addEventListener("change", updateCustomRange);
     parts.customEnd.addEventListener("change", updateCustomRange);
-    popover.addEventListener("pointerenter", () => clearTimeout(codexPlusUsageState.hideTimer));
+    popover.addEventListener("pointerenter", () => {
+      clearTimeout(codexPlusUsageState.hideTimer);
+      codexPlusUsageState.hideTimer = 0;
+    });
     popover.addEventListener("pointerleave", () => codexPlusUsageHidePopoverSoon());
     codexPlusUsageState.popover = popover;
     codexPlusUsageState.popoverParts = parts;
@@ -1858,7 +2591,11 @@
   }
 
   function codexPlusUsageFormatM(value) {
-    return Number.isFinite(value) ? `${(Math.max(0, value) / 1_000_000).toFixed(2)} M` : codexPlusUsageText().unavailable;
+    if (!Number.isFinite(value)) return codexPlusUsageText().unavailable;
+    const tokens = Math.max(0, value);
+    // 小量保留有效数字，避免 1096 tokens 显示成 0.00 M。
+    if (tokens < 10_000) return String(Math.round(tokens));
+    return `${(tokens / 1_000_000).toFixed(2)} M`;
   }
 
   function codexPlusUsageFormatPercent(value) {
@@ -1908,7 +2645,6 @@
         detail.durationMs > 0 ? codexPlusUsageFormatDuration(detail.durationMs) : "",
       ].filter(Boolean).join(" · ");
       duration.textContent = summary;
-      row.title = [detail.label, detail.detail, summary].filter(Boolean).join(" · ");
       row.append(label, duration);
       parts.toolPanel.appendChild(row);
     }
@@ -2090,6 +2826,7 @@
       ref.col.title = summary;
       parts.xLabels[index].classList.toggle("current", !!item?.isCurrent);
     }
+    codexPlusUsagePinChartToLatest(parts);
   }
 
   function codexPlusUsageUpdatePopover(snapshot) {
@@ -2118,11 +2855,12 @@
       : "";
     parts.toolToggle.disabled = !snapshot?.toolDetails?.length;
     parts.fields.tool.textContent = codexPlusUsageFormatDuration(snapshot?.toolMs);
-    parts.fields.input.textContent = codexPlusUsageFormatM(snapshot?.usage?.input);
-    parts.fields.output.textContent = codexPlusUsageFormatM(snapshot?.usage?.output);
-    parts.fields.cacheRead.textContent = codexPlusUsageFormatM(snapshot?.usage?.cached);
-    parts.fields.hitRate.textContent = codexPlusUsageFormatPercent(snapshot?.usage?.hitRate);
     const consumption = codexPlusUsageSelectedConsumption(snapshot);
+    const usage = consumption.usage;
+    parts.fields.input.textContent = codexPlusUsageFormatM(usage?.input);
+    parts.fields.output.textContent = codexPlusUsageFormatM(usage?.output);
+    parts.fields.cacheRead.textContent = codexPlusUsageFormatM(usage?.cached);
+    parts.fields.hitRate.textContent = codexPlusUsageFormatPercent(usage?.hitRate);
     const globalRange = codexPlusUsageState.range !== "task";
     const consumptionLoading = globalRange
       ? codexPlusUsageState.globalUsageLoading && consumption.value == null
@@ -2131,17 +2869,27 @@
     parts.fields.consumption.textContent = consumptionLoading
       ? text.labels.loading
       : codexPlusUsageFormatCount(consumption.value);
+    const sources = codexPlusUsageState.globalUsageSourceCoverage;
     parts.fields.consumption.title = globalRange
-      ? codexPlusUsageState.globalUsageError
-      : codexPlusUsageState.historyError;
+      ? codexPlusUsageState.magpieUsageError
+        || codexPlusUsageState.globalUsageError
+        || (sources?.magpie > 0 ? text.labels.magpieLive : "")
+      : usage?.source === "magpie"
+        ? text.labels.taskMagpieLive
+        : codexPlusUsageState.historyError;
     parts.tokenToggle.setAttribute("aria-expanded", String(codexPlusUsageState.tokenExpanded));
     parts.tokenPanel.hidden = !codexPlusUsageState.tokenExpanded;
     for (const button of parts.presets) {
       button.setAttribute("aria-pressed", String(button.dataset.range === codexPlusUsageState.range));
     }
     if (codexPlusUsageState.range !== "custom") {
+      const taskStartedAt = codexPlusUsageState.range === "task"
+        ? codexPlusUsageUuidV7Timestamp(codexPlusUsageState.threadId) ?? snapshot?.startedAt
+        : null;
       const bounds = codexPlusUsageState.range === "task"
-        ? (snapshot?.startedAt != null ? { start: snapshot.startedAt, end: snapshot.endedAt } : null)
+        ? (taskStartedAt != null
+          ? { start: taskStartedAt, end: snapshot?.endedAt ?? Date.now() }
+          : null)
         : codexPlusUsageRangeBounds(codexPlusUsageState.range);
       if (bounds) {
         codexPlusUsageState.customStart = codexPlusUsageBeijingDateTime(bounds.start);
@@ -2195,32 +2943,65 @@
   function codexPlusUsageShowPopover() {
     if (!codexPlusUsageEnabled()) return;
     clearTimeout(codexPlusUsageState.hideTimer);
+    codexPlusUsageState.hideTimer = 0;
     if (codexPlusUsageState.historyThreadId !== codexPlusUsageState.threadId) {
       void codexPlusUsageLoadHistory();
     }
-    if (codexPlusUsageState.range !== "task") {
-      void codexPlusUsageRefreshGlobalUsage();
-    }
+    void codexPlusUsageRefreshGlobalUsage();
     const parts = codexPlusUsageBuildPopover();
     codexPlusUsageUpdatePopover(
       codexPlusUsageTurnSnapshot(codexPlusUsageState.turns.get(codexPlusUsageState.threadId), Date.now()),
     );
     parts.popover.hidden = false;
+    codexPlusUsagePinChartToLatest(parts);
     codexPlusUsagePositionPopover();
+  }
+
+  function codexPlusUsagePopoverHoverZone() {
+    const popover = codexPlusUsageState.popover;
+    const anchor = codexPlusUsageState.parts?.speed?.item;
+    if (!popover || popover.hidden || !anchor) return null;
+    const anchorRect = anchor.getBoundingClientRect();
+    const popoverRect = popover.getBoundingClientRect();
+    return {
+      left: Math.min(anchorRect.left, popoverRect.left),
+      right: Math.max(anchorRect.right, popoverRect.right),
+      top: Math.min(anchorRect.top, popoverRect.top),
+      bottom: Math.max(anchorRect.bottom, popoverRect.bottom),
+    };
+  }
+
+  function codexPlusUsagePointInRect(x, y, rect) {
+    return !!rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
   }
 
   function codexPlusUsageHidePopoverSoon() {
     clearTimeout(codexPlusUsageState.hideTimer);
     codexPlusUsageState.hideTimer = window.setTimeout(() => {
+      codexPlusUsageState.hideTimer = 0;
       const popover = codexPlusUsageState.popover;
       if (!popover || popover.hidden) return;
-      if (popover.matches(":hover") || popover.contains(document.activeElement)) return;
+      // 只看指针：焦点留在面板里不再等于“还在用面板”，否则面板会永久卡在屏幕上。
+      if (popover.matches(":hover")) return;
       popover.hidden = true;
-    }, 120);
+    }, codexPlusUsagePopoverHideMs);
+  }
+
+  // 药丸与面板之间的空隙也算悬停区，慢速上移不会被提前隐藏。
+  function codexPlusUsagePopoverPointerMove(event) {
+    const popover = codexPlusUsageState.popover;
+    if (!popover || popover.hidden || !event) return;
+    if (codexPlusUsagePointInRect(event.clientX, event.clientY, codexPlusUsagePopoverHoverZone())) {
+      clearTimeout(codexPlusUsageState.hideTimer);
+      codexPlusUsageState.hideTimer = 0;
+      return;
+    }
+    if (!codexPlusUsageState.hideTimer) codexPlusUsageHidePopoverSoon();
   }
 
   function codexPlusUsageHidePopover() {
     clearTimeout(codexPlusUsageState.hideTimer);
+    codexPlusUsageState.hideTimer = 0;
     if (codexPlusUsageState.popover) codexPlusUsageState.popover.hidden = true;
   }
 
@@ -2238,22 +3019,36 @@
 
   function codexPlusUsageRenderFingerprint(snapshot, context) {
     if (!snapshot) {
+      const consumption = codexPlusUsageSelectedConsumption(null);
+      const usage = consumption.usage;
       return [
         "empty",
         context.percent,
         context.window,
+        usage?.input,
+        usage?.output,
+        usage?.cached,
+        usage?.hitRate,
+        usage?.source,
+        consumption.label,
+        consumption.value,
         codexPlusUsageState.range,
         codexPlusUsageState.historyLoading,
         codexPlusUsageState.historyError,
         codexPlusUsageState.globalUsageLoading,
         codexPlusUsageState.globalUsageError,
+        codexPlusUsageState.magpieUsageError,
         codexPlusUsageState.globalUsageCoverage.available,
         codexPlusUsageState.globalUsageCoverage.total,
+        codexPlusUsageState.globalUsageSourceCoverage.magpie,
+        codexPlusUsageState.globalUsageSourceCoverage.ledger,
+        codexPlusUsageState.globalUsageSourceCoverage.daily,
       ].join("|");
     }
     const speed = snapshot.speed == null ? "--" : codexPlusUsageFormatSpeed(snapshot.speed);
-    const hitRate = codexPlusUsageFormatPercent(snapshot.usage?.hitRate);
     const consumption = codexPlusUsageSelectedConsumption(snapshot);
+    const usage = consumption.usage;
+    const hitRate = codexPlusUsageFormatPercent(usage?.hitRate);
     const toolDetails = (snapshot.toolDetails || []).map((detail) => `${detail.label}:${detail.durationMs}`).join(",");
     return [
       speed,
@@ -2263,10 +3058,11 @@
       context.window,
       snapshot.toolMs,
       toolDetails,
-      snapshot.usage?.input,
-      snapshot.usage?.output,
-      snapshot.usage?.cached,
-      snapshot.usage?.hitRate,
+      usage?.input,
+      usage?.output,
+      usage?.cached,
+      usage?.hitRate,
+      usage?.source,
       hitRate,
       consumption.label,
       consumption.value,
@@ -2275,6 +3071,10 @@
       codexPlusUsageState.historyError,
       codexPlusUsageState.globalUsageLoading,
       codexPlusUsageState.globalUsageError,
+      codexPlusUsageState.magpieUsageError,
+      codexPlusUsageState.globalUsageSourceCoverage.magpie,
+      codexPlusUsageState.globalUsageSourceCoverage.ledger,
+      codexPlusUsageState.globalUsageSourceCoverage.daily,
       codexPlusUsageState.historyFetchedAt,
       codexPlusUsageState.toolExpanded,
       codexPlusUsageState.tokenExpanded,
@@ -2289,7 +3089,8 @@
     const parts = codexPlusUsageState.parts || codexPlusUsageBuild(node);
     const text = codexPlusUsageText();
     const speed = snapshot?.speed == null ? "--" : codexPlusUsageFormatSpeed(snapshot.speed);
-    const hitRate = codexPlusUsageFormatPercent(snapshot?.usage?.hitRate);
+    const consumption = codexPlusUsageSelectedConsumption(snapshot);
+    const hitRate = codexPlusUsageFormatPercent(consumption.usage?.hitRate);
     const context = codexPlusUsageContextSnapshot(
       codexPlusUsageState.turns.get(codexPlusUsageState.threadId),
       codexPlusUsageState.liveContextByThread.get(codexPlusUsageState.threadId),
@@ -2299,7 +3100,7 @@
       codexPlusUsageState.lastFingerprint = fingerprint;
       parts.speed.value.textContent = text.speed(speed);
       parts.speed.hitRateValue.textContent = hitRate;
-      const needleRatio = codexPlusUsageClamp((snapshot?.speed || 0) / 300, 0, 1);
+      const needleRatio = codexPlusUsageClamp((snapshot?.speed || 0) / codexPlusUsageSpeedPeak, 0, 1);
       parts.speed.needle.style.transform = `rotate(${-75 + needleRatio * 150}deg)`;
       node.dataset.state = snapshot?.completed ? "completed" : "running";
       node.setAttribute("aria-label", `${text.aria}：${text.speed(speed)}，${text.labels.hitRate} ${hitRate}`);
@@ -2343,6 +3144,10 @@
         codexPlusUsageState.historyLoading = false;
         codexPlusUsageState.historyError = "";
         codexPlusUsageState.historyPromise = null;
+        if (codexPlusUsageState.historyRetryTimer) {
+          window.clearTimeout(codexPlusUsageState.historyRetryTimer);
+          codexPlusUsageState.historyRetryTimer = 0;
+        }
       }
     }
     codexPlusUsageShow(node);
@@ -2400,9 +3205,13 @@
         ));
       });
     }
-    codexPlusUsageSchedule(turn && turn.completedAt == null && !document.hidden
-      ? codexPlusUsageActiveTickMs
-      : codexPlusUsageIdleTickMs);
+    const liveUsageRange = !codexPlusUsageState.popover?.hidden;
+    if (placement && liveUsageRange) void codexPlusUsageRefreshGlobalUsage();
+    codexPlusUsageSchedule(liveUsageRange
+      ? codexPlusUsageMagpieRefreshMs
+      : turn && turn.completedAt == null && !document.hidden
+        ? codexPlusUsageActiveTickMs
+        : codexPlusUsageIdleTickMs);
   }
 
   codexPlusUsageInstallStyle();
@@ -2425,6 +3234,15 @@
   codexPlusUsageState.scrollHandler = codexPlusUsageState.resizeHandler;
   window.addEventListener("resize", codexPlusUsageState.resizeHandler);
   window.addEventListener("scroll", codexPlusUsageState.scrollHandler, true);
+  codexPlusUsageState.pointerMoveHandler = codexPlusUsagePopoverPointerMove;
+  codexPlusUsageState.pointerDownHandler = (event) => {
+    const popover = codexPlusUsageState.popover;
+    if (!popover || popover.hidden) return;
+    if (popover.contains(event.target) || codexPlusUsageState.parts?.speed?.item?.contains(event.target)) return;
+    codexPlusUsageHidePopover();
+  };
+  document.addEventListener("pointermove", codexPlusUsageState.pointerMoveHandler, true);
+  document.addEventListener("pointerdown", codexPlusUsageState.pointerDownHandler, true);
   codexPlusUsageSyncPlacement();
   codexPlusUsageSchedule(300);
   window.__codexPlusThroughputStatusLineRuntime = {
@@ -2434,14 +3252,18 @@
       codexPlusUsageState.disposed = true;
       clearTimeout(codexPlusUsageState.timer);
       clearTimeout(codexPlusUsageState.hideTimer);
+      clearTimeout(codexPlusUsageState.historyRetryTimer);
       codexPlusUsageState.timer = 0;
       codexPlusUsageState.hideTimer = 0;
+      codexPlusUsageState.historyRetryTimer = 0;
       codexPlusUsageState.observer?.disconnect();
       codexPlusUsageUnsubscribe();
       if (codexPlusUsageState.nativeMessageHandler) window.removeEventListener("message", codexPlusUsageState.nativeMessageHandler, true);
       if (codexPlusUsageState.nativeViewHandler) window.removeEventListener("codex-message-from-view", codexPlusUsageState.nativeViewHandler, true);
       if (codexPlusUsageState.resizeHandler) window.removeEventListener("resize", codexPlusUsageState.resizeHandler);
       if (codexPlusUsageState.scrollHandler) window.removeEventListener("scroll", codexPlusUsageState.scrollHandler, true);
+      if (codexPlusUsageState.pointerMoveHandler) document.removeEventListener("pointermove", codexPlusUsageState.pointerMoveHandler, true);
+      if (codexPlusUsageState.pointerDownHandler) document.removeEventListener("pointerdown", codexPlusUsageState.pointerDownHandler, true);
       codexPlusUsageState.node?.remove();
       codexPlusUsageState.popover?.remove();
       codexPlusUsageState.turns.clear();
@@ -2453,11 +3275,17 @@
       codexPlusUsageState.parts = null;
       codexPlusUsageState.popover = null;
       codexPlusUsageState.popoverParts = null;
-      codexPlusUsageState.globalUsageFetchedAt = 0;
       codexPlusUsageState.globalUsageLoading = false;
       codexPlusUsageState.globalUsageError = "";
       codexPlusUsageState.globalUsagePromise = null;
+      codexPlusUsageState.globalUsageAggregate = null;
       codexPlusUsageState.globalUsageCoverage = { available: 0, total: 0 };
+      codexPlusUsageState.globalUsageSourceCoverage = { magpie: 0, ledger: 0, daily: 0 };
+      codexPlusUsageState.magpieUsage = { fetchedAt: 0, snapshots: new Map(), sessions: new Map() };
+      codexPlusUsageState.magpieUsageLastAttemptAt = 0;
+      codexPlusUsageState.magpieUsagePromise = null;
+      codexPlusUsageState.magpieUsageError = "";
+      codexPlusUsageState.appServicesPromise = null;
       codexPlusUsageState.lastFingerprint = "";
       globalThis.__CODEX_PLUS_THROUGHPUT_STATUSLINE_SYNC__ = undefined;
       if (globalThis.__CODEX_PLUS_USAGE_STATUSLINE_SYNC__ === codexPlusUsageStatusLineSync) {

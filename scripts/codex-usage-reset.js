@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Usage & Resets
 // @namespace    codex-plus-plus
-// @version      1.1.3
+// @version      1.1.4
 // @description  顶栏仅显示 5 小时剩余用量及重置时间，点击展开用量与重置卡片菜单。
 // @match        app://-/*
 // @run-at       document-start
@@ -11,7 +11,7 @@
   "use strict";
   const KEY = "__codexUsageReset";
   const ID = "codex-usage-reset";
-  const VERSION = "1.1.3";
+  const VERSION = "1.1.4";
   const USAGE = "/wham/usage";
   const CREDITS = "/wham/rate-limit-reset-credits";
 
@@ -102,10 +102,14 @@
       .map((n) => n.src || n.href));
     for (const entry of performance.getEntriesByType("resource")) urls.add(entry.name);
     for (const url of urls) {
-      if (!/\/assets\/rpc-[^/]+\.js(?:$|\?)/.test(url)) continue;
+      if (!/\/assets\/(?:rpc|app-shared)-[^/]+\.js(?:$|\?)/.test(url)) continue;
       try {
         const mod = await import(/* @vite-ignore */ url);
-        if (mod.appServices?.httpFetch) { services = mod.appServices; return services; }
+        // Recent builds bundle and minify appServices inside app-shared.
+        const candidates = [mod.appServices, ...Object.values(mod)];
+        const found = candidates.find((item) => item && typeof item === "object" &&
+          typeof item.httpFetch?.fetch === "function" && typeof item.httpFetch?.cancel === "function");
+        if (found) { services = found; return services; }
       } catch { /* Older versions use the renderer message bridge below. */ }
     }
     return null;

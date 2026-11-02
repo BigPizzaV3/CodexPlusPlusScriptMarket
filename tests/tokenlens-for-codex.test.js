@@ -24,6 +24,11 @@ test("TokenLens market entry matches the published script", () => {
     "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tokenlens-for-codex.js",
   );
   assert.equal(entry.sha256, crypto.createHash("sha256").update(source).digest("hex"));
+  assert.match(source, /^\/\/ ==UserScript==/);
+  assert.match(source, /\/\/ @version\s+1\.0\.5(?:\r?\n)/);
+  assert.match(source, /\/\/ @match\s+app:\/\/-\/\*(?:\r?\n)/);
+  assert.ok(entry.requirements.includes("Magpie（可选；未安装时回退 TokenLens 本地账本/日报）"));
+  assert.ok(entry.limitations.includes("Magpie 连续连接失败时指数退避，最长 30 秒重试一次"));
   assert.match(source, /usage\/requests\?period=7d&agent=codex&limit=1/);
   assert.match(source, /usage\/requests\?period=today&agent=codex&limit=1/);
   assert.match(source, /label:\s*kind\.label/);

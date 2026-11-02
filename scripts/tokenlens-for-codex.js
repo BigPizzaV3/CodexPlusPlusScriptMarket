@@ -1,3 +1,12 @@
+// ==UserScript==
+// @name         TokenLens for Codex
+// @namespace    tokenlens-for-codex
+// @version      1.0.5
+// @description  Codex++ throughput, tool, token, cache and usage status line.
+// @match        app://-/*
+// @run-at       document-start
+// ==/UserScript==
+
 /* Codex++ external extension: turn token throughput status line. */
 (() => {
   const visibleElement = (node) => !!node && ((node.getClientRects?.().length || 0) > 0 || node.offsetWidth > 0 || node.offsetHeight > 0);
@@ -60,6 +69,7 @@
   const codexPlusUsageMagpieTodayUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=today&agent=codex&limit=1";
   const codexPlusUsageMagpieTaskUsageUrlPrefix = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=7d&agent=codex&limit=1&q=";
   const codexPlusUsageMagpieRefreshMs = 2000;
+  const codexPlusUsageMagpieRetryMaxMs = 30000;
   const codexPlusUsageMagpieTimeoutMs = 3000;
   const codexPlusUsageActiveTickMs = 1000;
   const codexPlusUsageIdleTickMs = 4000;
@@ -131,6 +141,7 @@
     magpieUsage: { fetchedAt: 0, snapshots: new Map(), sessions: new Map() },
     dailyLedger: codexPlusUsageReadDailyLedger(),
     magpieUsageLastAttemptAt: 0,
+    magpieUsageFailureCount: 0,
     magpieUsageMaxAgeMs: 30_000,
     magpieUsagePromise: null,
     magpieUsageError: "",
@@ -1684,12 +1695,25 @@
     });
   }
 
+  function codexPlusUsageMagpieRetryDelayMs(failures) {
+    const count = Math.max(0, Math.floor(Number(failures) || 0));
+    const retries = Math.min(Math.max(0, count - 1), 4);
+    return Math.min(
+      codexPlusUsageMagpieRefreshMs * (2 ** retries),
+      codexPlusUsageMagpieRetryMaxMs,
+    );
+  }
+
   async function codexPlusUsageRefreshMagpieUsage(force = false) {
     const state = codexPlusUsageState;
     if (state.disposed) return { ok: false, changed: false };
     if (state.magpieUsagePromise) return state.magpieUsagePromise;
     const now = Date.now();
-    if (!force && now - state.magpieUsageLastAttemptAt < codexPlusUsageMagpieRefreshMs) {
+    if (
+      !force
+      && now - state.magpieUsageLastAttemptAt
+        < codexPlusUsageMagpieRetryDelayMs(state.magpieUsageFailureCount)
+    ) {
       return { ok: state.magpieUsage.fetchedAt > 0, changed: false };
     }
     state.magpieUsageLastAttemptAt = now;
@@ -1756,14 +1780,20 @@
         }
         state.magpieUsage = { fetchedAt: Date.now(), snapshots, sessions };
         state.dailyLedger = codexPlusUsageMergeDailyLedger(state.dailyLedger, snapshots);
+        state.magpieUsageFailureCount = 0;
         state.magpieUsageError = "";
         return { ok: true, changed };
       } catch (error) {
         if (!state.disposed) {
+          state.magpieUsageFailureCount = Math.max(
+            0,
+            Number(state.magpieUsageFailureCount) || 0,
+          ) + 1;
           state.magpieUsageError = String(error?.message || error);
         }
         return { ok: false, changed: false, error: state.magpieUsageError };
       } finally {
+        state.magpieUsageLastAttemptAt = Date.now();
         state.magpieUsagePromise = null;
       }
     })();
@@ -3283,6 +3313,7 @@
       codexPlusUsageState.globalUsageSourceCoverage = { magpie: 0, ledger: 0, daily: 0 };
       codexPlusUsageState.magpieUsage = { fetchedAt: 0, snapshots: new Map(), sessions: new Map() };
       codexPlusUsageState.magpieUsageLastAttemptAt = 0;
+      codexPlusUsageState.magpieUsageFailureCount = 0;
       codexPlusUsageState.magpieUsagePromise = null;
       codexPlusUsageState.magpieUsageError = "";
       codexPlusUsageState.appServicesPromise = null;

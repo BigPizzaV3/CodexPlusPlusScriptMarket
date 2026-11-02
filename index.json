@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-11-01T16:30:03.000Z",
+  "updated_at": "2026-11-02T11:20:36.000Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -439,6 +439,20 @@
       "repo": "BigPizzaV3/codexpp-request-toasts",
       "tag": "v0.1.0",
       "sha": "edd6a8093271a0bbc9275dacb3c386e95ed74119",
+      "official": true
+    },
+    {
+      "kind": "package",
+      "id": "rice-maid-pet",
+      "name": "大肥鱼吃米饭桌宠",
+      "description": "参考角色的可拖动悬浮桌宠。每次模型请求夹起一口白米饭，支持位置记忆、显示开关和手动喂饭；不读取聊天内容。",
+      "version": "1.0.2",
+      "author": "BigPizzaV3",
+      "homepage": "https://github.com/BigPizzaV3/codexpp-rice-maid-pet",
+      "updated_at": "2026-11-02T11:20:36.000Z",
+      "repo": "BigPizzaV3/codexpp-rice-maid-pet",
+      "tag": "v1.0.2",
+      "sha": "daefa4858f9e0c654208f3ba1a23d19e3375538c",
       "official": true
     }
   ]

@@ -2035,7 +2035,7 @@ Do not reproduce history unless needed to clarify the draft.`
     // 仅报告结构和状态，不包含草稿正文、会话标识或 API 配置。
     return JSON.stringify(
       {
-        version: "1.0.1",
+        version: "1.0.2",
         editor: box(editor),
         shell: box(shell),
         button: box(main),
@@ -2062,7 +2062,7 @@ Do not reproduce history unless needed to clarify the draft.`
       2,
     );
   }
-  window[NS] = { destroy, ensure, inspect, drafts, version: "1.0.1" };
+  window[NS] = { destroy, ensure, inspect, drafts, version: "1.0.2" };
   window.codexPlus?.onCleanup?.(destroy);
   listen(window, "pagehide", destroy);
   ensure();

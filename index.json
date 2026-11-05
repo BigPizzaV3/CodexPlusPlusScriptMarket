@@ -397,18 +397,19 @@
       "id": "prompt-enhancement",
       "name": "增强提示词",
       "description": "在发送前增强 Codex 输入框中的提示词，支持 OpenAI 兼容和 Anthropic API，并提供还原及保守回填。",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "Meowv",
       "tags": ["prompt", "productivity", "llm", "openai", "anthropic"],
       "homepage": "https://github.com/Meowv/prompt",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/prompt-enhancement.js",
-      "sha256": "77fb2fb5e147a8822df7ddbcee9e947b7647cc2ce4a382c456cb079cd15edf89",
+      "sha256": "efd7f7512d584ea10d1784c1ab297d3fec6e02890bbe18e8aa63278c0ca62647",
       "requirements": [
         "Codex++ 用户脚本环境",
         "支持 OpenAI 兼容或 Anthropic 协议的模型 API、API Key 和模型 ID"
       ],
       "limitations": [
         "提示词会发送到用户配置的模型 API 服务",
+        "开启「附带对话上下文」后，当前窗格最近 1～4 轮问答也会一并发送到用户配置的模型 API 服务",
         "API Key 和配置保存在渲染环境的 localStorage",
         "依赖宿主请求桥接和 Codex 输入区结构"
       ]

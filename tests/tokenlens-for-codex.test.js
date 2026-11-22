@@ -16,7 +16,7 @@ test("TokenLens market entry matches the published script", () => {
 
   assert.equal(entries.length, 1);
   const entry = entries[0];
-  assert.equal(entry.version, "1.0.5");
+  assert.equal(entry.version, "1.0.6");
   assert.equal(entry.author, "LingYingNX");
   assert.equal(entry.homepage, "https://github.com/LingYingNX/TokenLens-for-Codex");
   assert.equal(
@@ -25,11 +25,12 @@ test("TokenLens market entry matches the published script", () => {
   );
   assert.equal(entry.sha256, crypto.createHash("sha256").update(source).digest("hex"));
   assert.match(source, /^\/\/ ==UserScript==/);
-  assert.match(source, /\/\/ @version\s+1\.0\.5(?:\r?\n)/);
+  assert.match(source, /\/\/ @version\s+1\.0\.6(?:\r?\n)/);
   assert.match(source, /\/\/ @match\s+app:\/\/-\/\*(?:\r?\n)/);
   assert.ok(entry.requirements.includes("Magpie（可选；未安装时回退 TokenLens 本地账本/日报）"));
   assert.ok(entry.limitations.includes("Magpie 连续连接失败时指数退避，最长 30 秒重试一次"));
-  assert.match(source, /usage\/requests\?period=7d&agent=codex&limit=1/);
+  assert.match(source, /usage\/requests\?period=30d&agent=codex&limit=1/);
+  assert.match(source, /usage\/requests\?period=7d&agent=codex&limit=1&q=/);
   assert.match(source, /usage\/requests\?period=today&agent=codex&limit=1/);
   assert.match(source, /label:\s*kind\.label/);
   assert.match(source, /right\.durationMs - left\.durationMs/);
@@ -39,6 +40,10 @@ test("TokenLens market entry matches the published script", () => {
   assert.doesNotMatch(source, /getMagpieUsage|runHistoryBackfill/);
   assert.match(source, /codexPlusUsageMaxChartBars\s*=\s*200/);
   assert.match(source, /const base = 100000/);
+  assert.match(source, /codexPlusUsageChartAxisWindow = 20/);
+  assert.match(source, /function codexPlusUsageChartAxisMax/);
+  assert.match(source, /function codexPlusUsageRenderCalendar/);
+  assert.match(source, /function codexPlusUsageDataSources/);
   assert.match(source, /codexPlusUsageAverageSpeed/);
   assert.doesNotMatch(source, /__codexPlusUsageStatusLineRuntime\?\.dispose/);
   assert.doesNotMatch(source, /workspaceFiles/);

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-11-02T11:20:36.000Z",
+  "updated_at": "2026-11-22T07:00:16.455Z",
   "scripts": [
     {
       "id": "codex-relay-balance",
@@ -315,8 +315,8 @@
     {
       "id": "tokenlens-for-codex",
       "name": "TokenLens for Codex",
-      "description": "在 Codex++ 底栏显示实时 tok/s、平均速度、上下文、Token、缓存、调用图表与 TOP 排行，并提供工具分类和多时间范围用量统计。",
-      "version": "1.0.5",
+      "description": "在 Codex++ 底栏显示实时 tok/s、平均速度、上下文、Token、缓存、调用图表与 TOP 排行，并提供工具分类、区间日历与多时间范围用量统计。",
+      "version": "1.0.6",
       "author": "LingYingNX",
       "tags": [
         "codex",
@@ -329,7 +329,7 @@
       ],
       "homepage": "https://github.com/LingYingNX/TokenLens-for-Codex",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tokenlens-for-codex.js",
-      "sha256": "1f2d1aa72a09116b659776a389a33691151295a4ceb4ac20652e4ca6d9a2e090",
+      "sha256": "9d2e080e7ca7a53ce13dd9d63ec22fecccde8a9f3872452c87675a8ac335f3fb",
       "requirements": [
         "Codex++ 用户脚本环境",
         "Codex Desktop 提供本地事件与会话记录",
@@ -339,6 +339,7 @@
         "tok/s 来自本机 Codex 事件和已结算 Token 数据，不是供应商 API 性能指标",
         "依赖 Codex 本地事件与会话目录结构，应用更新后可能需要适配",
         "历史消耗覆盖 Codex 当前可访问的会话范围，覆盖不足时界面显示可用天数",
+        "Magpie 日序列读取 30 天窗口；超出保留期或零消耗的日期在区间日历中置灰不可选",
         "Magpie 连续连接失败时指数退避，最长 30 秒重试一次"
       ]
     },

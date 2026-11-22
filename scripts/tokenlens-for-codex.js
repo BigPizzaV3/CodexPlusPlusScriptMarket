@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TokenLens for Codex
 // @namespace    tokenlens-for-codex
-// @version      1.0.5
+// @version      1.0.6
 // @description  Codex++ throughput, tool, token, cache and usage status line.
 // @match        app://-/*
 // @run-at       document-start
@@ -65,7 +65,8 @@
   const codexPlusUsageDailyLedgerKey = "tokenlens-daily-usage";
   const codexPlusUsageDailyLedgerVersion = 1;
   const codexPlusUsageDailyLedgerMaxDays = 60;
-  const codexPlusUsageMagpieUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=7d&agent=codex&limit=1";
+  // Magpie 保留 30 天日桶；只取 7 天会让自定义区间里超出 7 天的日期永远没有数据。
+  const codexPlusUsageMagpieUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=30d&agent=codex&limit=1";
   const codexPlusUsageMagpieTodayUsageUrl = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=today&agent=codex&limit=1";
   const codexPlusUsageMagpieTaskUsageUrlPrefix = "http://127.0.0.1:3425/v1/magpie/usage/requests?period=7d&agent=codex&limit=1&q=";
   const codexPlusUsageMagpieRefreshMs = 2000;
@@ -77,6 +78,7 @@
   const codexPlusUsageMaxTurns = 32;
   const codexPlusUsageMaxLiveSamples = 512;
   const codexPlusUsageMaxChartBars = 200;
+  const codexPlusUsageChartAxisWindow = 20;
   const codexPlusUsagePopoverHideMs = 120;
   // 模型真实峰值约 400 tok/s，仪表盘满偏刻度按此对齐。
   const codexPlusUsageSpeedPeak = 400;
@@ -125,6 +127,8 @@
     range: "task",
     customStart: "",
     customEnd: "",
+    calendarMonth: "",
+    calendarAnchor: "",
     historyThreadId: "",
     historySamples: [],
     historyFetchedAt: 0,
@@ -194,6 +198,7 @@
           today: "今天消耗",
           yesterday: "昨天消耗",
           week: "近7天消耗",
+          sourceUnavailable: " · 数据源不可用",
           magpieLive: "Magpie 本地实时源 · 每 2 秒刷新 · Codex 全部任务",
           taskMagpieLive: "当前任务已与 Magpie 请求累计对齐 · 近 7 天 · 每 2 秒刷新",
           localFallback: "本地日报回退",
@@ -202,6 +207,10 @@
           presetYesterday: "昨天",
           presetWeek: "近7天",
           custom: "区间消耗",
+          calendarPrev: "上个月",
+          calendarNext: "下个月",
+          dayTotal: "当日消耗",
+          dayEmpty: "当日无消耗数据",
           start: "起始",
           end: "截止",
           toolEmpty: "暂无工具明细",
@@ -258,6 +267,7 @@
         today: "Today",
         yesterday: "Yesterday",
         week: "Last 7 days",
+        sourceUnavailable: " · data source unavailable",
         magpieLive: "Magpie local live source · refreshes every 2 seconds · all Codex tasks",
         taskMagpieLive: "Current task is aligned to the Magpie request total · last 7 days · refreshes every 2 seconds",
         localFallback: "Local daily fallback",
@@ -266,6 +276,10 @@
         presetYesterday: "Yesterday",
         presetWeek: "7 days",
         custom: "Range",
+        calendarPrev: "Previous month",
+        calendarNext: "Next month",
+        dayTotal: "Day usage",
+        dayEmpty: "No usage that day",
         start: "Start",
         end: "End",
         toolEmpty: "No tool details",
@@ -405,6 +419,27 @@
       .codex-plus-throughput-time{display:grid;grid-template-columns:minmax(0,1fr) 130px;align-items:center;gap:5px;min-height:19px;color:#94a3b8;font-size:9.5px;line-height:normal}
       .codex-plus-throughput-time input{box-sizing:border-box;width:130px;min-width:0;min-height:19px;padding:1.5px 3px;border:1px solid #332d50;border-radius:2px;background:#191528;color:#f1f5f9;font:inherit;font-size:9px;line-height:normal;color-scheme:dark light;outline:none}
       .codex-plus-throughput-time input:focus{outline:2px solid color-mix(in srgb,currentColor 28%,transparent);outline-offset:0}
+      .codex-plus-throughput-calendar{display:grid;gap:2px;margin:4px 0}
+      .codex-plus-throughput-calendar-head{display:grid;grid-template-columns:18px minmax(0,1fr) 18px;align-items:center;gap:4px}
+      .codex-plus-throughput-calendar-nav{display:flex;align-items:center;justify-content:center;width:18px;height:16px;padding:0;border:1px solid #312b4d;border-radius:2px;background:#1f1a32;color:#cbd5e1;font:inherit;font-size:11px;line-height:1;cursor:pointer}
+      .codex-plus-throughput-calendar-nav:hover:not(:disabled){background:#27203d}
+      .codex-plus-throughput-calendar-nav:disabled{border-color:#241f38;color:#4b4470;cursor:default}
+      .codex-plus-throughput-calendar-nav:focus-visible{outline:2px solid color-mix(in srgb,currentColor 28%,transparent);outline-offset:0}
+      .codex-plus-throughput-calendar-month{min-width:0;color:#cbd5e1;font-size:10px;font-weight:700;line-height:normal;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .codex-plus-throughput-calendar-week{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:2px}
+      .codex-plus-throughput-calendar-week span{color:#8c84a8;font-size:8px;font-weight:700;line-height:normal;text-align:center}
+      .codex-plus-throughput-calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:2px}
+      .codex-plus-throughput-day{display:flex;flex-direction:column;align-items:center;justify-content:center;box-sizing:border-box;height:24px;padding:0;border:1.5px solid transparent;border-radius:2px;background:#1b1729;color:#cbd5e1;font:inherit;line-height:1;cursor:pointer;outline:none}
+      .codex-plus-throughput-day[hidden]{display:none}
+      .codex-plus-throughput-day:hover:not(:disabled){background:#27203d}
+      .codex-plus-throughput-day:focus-visible{outline:2px solid color-mix(in srgb,currentColor 28%,transparent);outline-offset:0}
+      .codex-plus-throughput-day[data-selected="true"]{border-color:#2b7fff;background:#2b2a45;color:#7cc0ff}
+      .codex-plus-throughput-day:disabled{background:#191528;color:#4f4a6b;cursor:default}
+      .codex-plus-throughput-day-number{font-size:9.5px;font-weight:700;font-variant-numeric:tabular-nums}
+      .codex-plus-throughput-day[data-today="true"] .codex-plus-throughput-day-number{color:#c084fc}
+      .codex-plus-throughput-day-amount{color:#8c84a8;font-size:7.5px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}
+      .codex-plus-throughput-day[data-selected="true"] .codex-plus-throughput-day-amount{color:#93c5fd}
+      .codex-plus-throughput-day:disabled .codex-plus-throughput-day-amount{visibility:hidden}
       .codex-plus-throughput-analytics{box-sizing:border-box;margin-top:6px;padding-top:6px;border-top:1px solid #28233d}
       .codex-plus-throughput-turn-status{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;padding:0 1px 4px;color:#e2e8f0;font-size:11.4px;line-height:1}
       .codex-plus-throughput-turn-left,.codex-plus-throughput-turn-right{display:flex;align-items:baseline;gap:2px}
@@ -472,6 +507,18 @@
       #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-preset[aria-pressed="true"]{border-color:#2563eb;background:#e8f0fe;color:#1d4ed8}
       #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-time{color:#64748b}
       #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-time input{border-color:#cbd5e1;background:#fff;color:#111827;color-scheme:light}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-calendar-nav{border-color:#cbd5e1;background:#fff;color:#334155}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-calendar-nav:hover:not(:disabled){background:#eef4fb}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-calendar-nav:disabled{border-color:#e5e9f0;color:#b6c0cf}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-calendar-month{color:#334155}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-calendar-week span{color:#94a3b8}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-day{background:#fff;color:#334155}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-day:hover:not(:disabled){background:#eef4fb}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-day[data-selected="true"]{border-color:#2b7fff;background:#e8f0fe;color:#1d4ed8}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-day[data-today="true"] .codex-plus-throughput-day-number{color:#7c3aed}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-day:disabled{background:#f1f3f8;color:#c2c9d6}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-day-amount{color:#94a3b8}
+      #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-day[data-selected="true"] .codex-plus-throughput-day-amount{color:#1d4ed8}
       #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-analytics{border-top-color:#dfe5ee}
       #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-turn-status{color:#334155}
       #codex-plus-throughput-popover[data-theme="light"] .codex-plus-throughput-turn-label{color:#64748b}
@@ -1302,8 +1349,10 @@
       // shortcut: 宿主缺 total_token_usage 时 contextUsed 会退回本次用量，极端情况下会误判重复。
       const cumulative = codexPlusUsageNumber(row?.usage?.contextUsed ?? row?.usage?.context_used);
       if (cumulative != null) {
-        if (cumulatives.has(cumulative)) continue;
-        cumulatives.add(cumulative);
+        // 累计值按轮次加用量去重：压缩后同一轮的累计值会从头重算，只看数值会把新调用当成重放丢掉。
+        const cumulativeKey = [turnId, cumulative, usage.input, usage.cached, usage.output, usage.total].join("|");
+        if (cumulatives.has(cumulativeKey)) continue;
+        cumulatives.add(cumulativeKey);
       }
       const key = [observedAt, turnId, usage.input, usage.cached, usage.output, usage.total].join("|");
       if (seen.has(key)) continue;
@@ -1515,6 +1564,31 @@
     };
   }
 
+  /**
+   * 用量数据源描述符表。接入一个类似 Magpie 的本地聚合器只需加一条目：
+   * 提供三个 URL 与三个解析器即可，渲染与刷新逻辑不认具体工具。
+   * 刷新时按序探测，首个返回快照的源胜出，不做多源合并。
+   */
+  function codexPlusUsageDataSources() {
+    return [
+      {
+        label: "Magpie",
+        buildUrls(threadId) {
+          return {
+            series: codexPlusUsageMagpieUsageUrl,
+            today: codexPlusUsageMagpieTodayUsageUrl,
+            task: threadId
+              ? codexPlusUsageMagpieTaskUsageUrlPrefix + encodeURIComponent(threadId)
+              : "",
+          };
+        },
+        snapshotsFromSeries: codexPlusUsageMagpieSnapshots,
+        snapshotFromToday: codexPlusUsageMagpieTodaySnapshot,
+        sessionFromTask: codexPlusUsageMagpieTaskSession,
+      },
+    ];
+  }
+
   function codexPlusUsageAbsoluteUrl(value) {
     if (!value) return "";
     try {
@@ -1582,11 +1656,46 @@
     return [...candidates];
   }
 
+  /**
+   * rspack/webpack 宿主把 appServices 留在模块注册表里，chunk 本身不导出它。
+   * 先查已加载缓存，未命中再按工厂源码里的 `appServices` 定位模块 id 后 require 一次。
+   */
+  function codexPlusUsageWebpackServices(requireFn) {
+    const cache = requireFn?.c;
+    if (cache && typeof cache === "object") {
+      for (const id of Object.keys(cache)) {
+        const services = cache[id]?.exports?.appServices;
+        if (services?.httpFetch && typeof services.httpFetch.fetch === "function") return services;
+      }
+    }
+    const factories = requireFn?.m;
+    if (!factories || typeof factories !== "object" || typeof requireFn !== "function") return null;
+    for (const id of Object.keys(factories)) {
+      let source = "";
+      try {
+        source = Function.prototype.toString.call(factories[id]);
+      } catch {
+        continue;
+      }
+      if (!source.includes("appServices")) continue;
+      try {
+        const services = requireFn(id)?.appServices;
+        if (services?.httpFetch && typeof services.httpFetch.fetch === "function") return services;
+      } catch {
+        // 工厂依赖未就绪时跳过，继续找下一个。
+      }
+    }
+    return null;
+  }
+
   async function codexPlusUsageResolveAppServices() {
     const state = codexPlusUsageState;
     if (state.appServicesPromise) return state.appServicesPromise;
     const promise = (async () => {
-      const urls = await codexPlusUsageDiscoverRpcAssetUrls(codexPlusUsageCollectAssetUrls());
+      const assetUrls = codexPlusUsageCollectAssetUrls();
+      const discovered = await codexPlusUsageDiscoverRpcAssetUrls(assetUrls);
+      // 旧宿主按 rpc-/app-shared- 命名；新宿主是数字 chunk，只能全量探测运行时。
+      const urls = [...new Set([...discovered, ...assetUrls])];
       for (const url of urls) {
         try {
           const moduleExports = await import(/* @vite-ignore */ url);
@@ -1594,8 +1703,10 @@
           if (services?.httpFetch && typeof services.httpFetch.fetch === "function") {
             return services;
           }
+          const bundled = codexPlusUsageWebpackServices(moduleExports?.__webpack_require__);
+          if (bundled) return bundled;
         } catch {
-          // 继续尝试下一个已加载的 RPC 资源。
+          // 继续尝试下一个已加载的资源。
         }
       }
       return null;
@@ -1632,16 +1743,25 @@
   }
 
   async function codexPlusUsageBridgeGetJson(url) {
+    let serviceError = null;
     try {
       const services = await codexPlusUsageResolveAppServices();
       if (services?.httpFetch) return await codexPlusUsageServiceGetJson(services, url);
-    } catch {
+      serviceError = new Error("未找到宿主 HTTP fetch service");
+    } catch (error) {
       // 新宿主优先走官方 HTTP service；旧宿主继续尝试 renderer bridge。
+      serviceError = error;
     }
     const bridge = window.electronBridge;
     if (!bridge || typeof bridge.sendMessageFromView !== "function") {
-      throw new Error("Electron bridge 不可用");
+      throw new Error(`Electron bridge 不可用（HTTP service: ${serviceError?.message || "未知"}）`);
     }
+    // 两条通道都失败时必须同时给出原因，否则只会看到 bridge 的报错而误判成 bridge 坏了。
+    const bridgeError = (error) => new Error(
+      serviceError
+        ? `${error?.message || error}（HTTP service: ${serviceError.message}）`
+        : String(error?.message || error),
+    );
     const requestId = `tokenlens-magpie-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -1656,7 +1776,7 @@
         cleanup();
         const status = Number(data.status) || 0;
         if (data.responseType !== "success" || status >= 400) {
-          reject(new Error(`Magpie 请求失败${status ? ` (${status})` : ""}`));
+          reject(bridgeError(`Magpie 请求失败${status ? ` (${status})` : ""}`));
           return true;
         }
         try {
@@ -1675,7 +1795,7 @@
         if (settled) return;
         settled = true;
         cleanup();
-        reject(new Error("Magpie 请求超时"));
+        reject(bridgeError("Magpie 请求超时"));
       }, codexPlusUsageMagpieTimeoutMs);
       Promise.resolve(
         bridge.sendMessageFromView({
@@ -1690,7 +1810,7 @@
           if (settled) return;
           settled = true;
           cleanup();
-          reject(error);
+          reject(bridgeError(error));
         });
     });
   }
@@ -1702,6 +1822,49 @@
       codexPlusUsageMagpieRefreshMs * (2 ** retries),
       codexPlusUsageMagpieRetryMaxMs,
     );
+  }
+
+  /**
+   * 拉取单个数据源的三个端点并解析。失败一律收进 errors 而不抛出，
+   * 这样某个源坏了不会拖垮排在它后面的源。
+   */
+  async function codexPlusUsageFetchDataSource(source, threadId) {
+    const snapshots = new Map();
+    const sessions = new Map();
+    const errors = [];
+    try {
+      const urls = source.buildUrls(threadId);
+      const [seriesResult, todayResult, taskResult] = await Promise.allSettled([
+        codexPlusUsageBridgeGetJson(urls.series),
+        codexPlusUsageBridgeGetJson(urls.today),
+        urls.task ? codexPlusUsageBridgeGetJson(urls.task) : Promise.resolve(null),
+      ]);
+      if (seriesResult.status === "fulfilled") {
+        for (const [dateKey, snapshot] of source.snapshotsFromSeries(seriesResult.value)) {
+          snapshots.set(dateKey, snapshot);
+        }
+      } else {
+        errors.push(String(seriesResult.reason?.message || seriesResult.reason));
+      }
+      if (todayResult.status === "fulfilled") {
+        const today = source.snapshotFromToday(todayResult.value);
+        if (today) snapshots.set(today.dateKey, today);
+      } else {
+        errors.push(String(todayResult.reason?.message || todayResult.reason));
+      }
+      if (taskResult.status === "fulfilled") {
+        const task = source.sessionFromTask(taskResult.value, threadId);
+        if (task) sessions.set(task.id, task);
+      } else {
+        errors.push(`当前任务: ${String(taskResult.reason?.message || taskResult.reason)}`);
+      }
+    } catch (error) {
+      // URL 模板或解析器抛错时，按整个源不可用处理。
+      snapshots.clear();
+      sessions.clear();
+      errors.push(String(error?.message || error));
+    }
+    return { snapshots, sessions, errors };
   }
 
   async function codexPlusUsageRefreshMagpieUsage(force = false) {
@@ -1720,37 +1883,19 @@
     state.magpieUsagePromise = (async () => {
       try {
         const taskId = codexPlusUsageNormalizeThreadId(state.threadId);
-        const taskUrl = taskId
-          ? codexPlusUsageMagpieTaskUsageUrlPrefix + encodeURIComponent(taskId)
-          : "";
-        const [weekResult, todayResult, taskResult] = await Promise.allSettled([
-          codexPlusUsageBridgeGetJson(codexPlusUsageMagpieUsageUrl),
-          codexPlusUsageBridgeGetJson(codexPlusUsageMagpieTodayUsageUrl),
-          taskUrl ? codexPlusUsageBridgeGetJson(taskUrl) : Promise.resolve(null),
-        ]);
-        const snapshots = new Map();
-        const errors = [];
-        if (weekResult.status === "fulfilled") {
-          for (const [dateKey, snapshot] of codexPlusUsageMagpieSnapshots(weekResult.value)) {
-            snapshots.set(dateKey, snapshot);
+        const attempts = [];
+        let picked = null;
+        // 首个返回快照的源胜出；不合并多源，避免不同工具的口径互相污染。
+        for (const source of codexPlusUsageDataSources()) {
+          const outcome = await codexPlusUsageFetchDataSource(source, taskId);
+          if (outcome.snapshots.size) {
+            picked = outcome;
+            break;
           }
-        } else {
-          errors.push(String(weekResult.reason?.message || weekResult.reason));
+          attempts.push(`${source.label}: ${outcome.errors.join("；") || "未返回可用用量"}`);
         }
-        if (todayResult.status === "fulfilled") {
-          const today = codexPlusUsageMagpieTodaySnapshot(todayResult.value);
-          if (today) snapshots.set(today.dateKey, today);
-        } else {
-          errors.push(String(todayResult.reason?.message || todayResult.reason));
-        }
-        const sessions = new Map();
-        if (taskResult.status === "fulfilled") {
-          const task = codexPlusUsageMagpieTaskSession(taskResult.value, taskId);
-          if (task) sessions.set(task.id, task);
-        } else {
-          errors.push(`当前任务: ${String(taskResult.reason?.message || taskResult.reason)}`);
-        }
-        if (!snapshots.size) throw new Error(errors.join("；") || "Magpie 未返回可用用量");
+        if (!picked) throw new Error(attempts.join(" / ") || "未配置可用的用量数据源");
+        const { snapshots, sessions } = picked;
         if (state.disposed) return { ok: false, changed: false };
         let changed = state.magpieUsage.snapshots.size !== snapshots.size
           || state.magpieUsage.sessions.size !== sessions.size;
@@ -1929,6 +2074,48 @@
     return next;
   }
 
+  /**
+   * 只有取回时间在有效期内的 Magpie 快照能当实时源，否则返回 null 让调用方回退账本与日报。
+   */
+  function codexPlusUsageMagpieSnapshotFreshness(
+    now = Date.now(),
+    magpieUsage = codexPlusUsageState.magpieUsage,
+  ) {
+    const maxAge = Number.isFinite(codexPlusUsageState.magpieUsageMaxAgeMs)
+      ? codexPlusUsageState.magpieUsageMaxAgeMs
+      : 30_000;
+    const fresh = !!magpieUsage?.fetchedAt
+      && now >= magpieUsage.fetchedAt
+      && now - magpieUsage.fetchedAt <= maxAge
+      && typeof magpieUsage.snapshots?.get === "function";
+    return fresh ? magpieUsage.snapshots : null;
+  }
+
+  /**
+   * 某一天汇总后的可用用量：Magpie 实时桶 > 本地账本 > 日报回退。
+   * 缺失、或当天没有任何消耗（total 为 0）时返回 null——区间覆盖计数与日历的可用/置灰共用这一判断。
+   */
+  // 参数不用 `= {}` 默认值：tests/helpers 的花括号配对提取器会把默认值当成函数体。
+  function codexPlusUsageGlobalDayUsage(dateKey, options) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || ""))) return null;
+    const opts = options || {};
+    const usable = (snapshot, source, kind) => {
+      const day = codexPlusUsageNormalizeGlobalDay(snapshot, source);
+      return day && day.total > 0 ? { ...day, kind } : null;
+    };
+    const magpieDay = opts.magpieSnapshots
+      ? usable(opts.magpieSnapshots.get(dateKey), "magpie", "magpie")
+      : null;
+    if (magpieDay) return magpieDay;
+    const ledgerDay = usable(opts.ledgerDays?.[dateKey], "magpie", "ledger");
+    if (ledgerDay) return ledgerDay;
+    const api = opts.dailyApi;
+    if (typeof api?.getSnapshot !== "function") return null;
+    const snapshot = api.getSnapshot(dateKey);
+    if (snapshot?.dateKey !== dateKey) return null;
+    return usable(snapshot, "daily", "daily");
+  }
+
   function codexPlusUsageGlobalAggregate(
     range,
     now = Date.now(),
@@ -1940,19 +2127,18 @@
     if (!codexPlusUsageIsGlobalRange(range)) return null;
     const keys = codexPlusUsageGlobalDateKeys(bounds.start, bounds.end);
     if (!keys.length) return null;
-    const maxAge = Number.isFinite(codexPlusUsageState.magpieUsageMaxAgeMs)
-      ? codexPlusUsageState.magpieUsageMaxAgeMs
-      : 30_000;
-    const magpieFresh = !!magpieUsage?.fetchedAt
-      && now >= magpieUsage.fetchedAt
-      && now - magpieUsage.fetchedAt <= maxAge
-      && typeof magpieUsage.snapshots?.get === "function";
+    const magpieSnapshots = codexPlusUsageMagpieSnapshotFreshness(now, magpieUsage);
     const dailyLedger = codexPlusUsageState.dailyLedger?.days
       ? codexPlusUsageState.dailyLedger
       : null;
     const ledgerAvailable = !!dailyLedger?.days && Object.keys(dailyLedger.days).length > 0;
     const dailyAvailable = typeof api?.getSnapshot === "function";
-    if (!magpieFresh && !ledgerAvailable && !dailyAvailable) return null;
+    if (!magpieSnapshots && !ledgerAvailable && !dailyAvailable) return null;
+    const dayOptions = {
+      magpieSnapshots,
+      ledgerDays: ledgerAvailable ? dailyLedger.days : null,
+      dailyApi: dailyAvailable ? api : null,
+    };
     const aggregate = {
       total: 0,
       input: 0,
@@ -1967,46 +2153,18 @@
     let ledgerDays = 0;
     let dailyDays = 0;
     for (const key of keys) {
-      const magpieSnapshot = magpieFresh ? magpieUsage.snapshots.get(key) : null;
-      const magpieDay = codexPlusUsageNormalizeGlobalDay(magpieSnapshot, "magpie");
-      if (magpieDay) {
-        available += 1;
-        magpieDays += 1;
-        aggregate.total += magpieDay.total;
-        aggregate.input += magpieDay.input;
-        aggregate.output += magpieDay.output;
-        aggregate.cached += magpieDay.cached;
-        aggregate.inputTotal += magpieDay.inputTotal;
-        aggregate.calls += magpieDay.calls;
-        continue;
-      }
-      const ledgerDay = codexPlusUsageNormalizeGlobalDay(dailyLedger?.days?.[key], "magpie");
-      if (ledgerDay) {
-        available += 1;
-        ledgerDays += 1;
-        aggregate.total += ledgerDay.total;
-        aggregate.input += ledgerDay.input;
-        aggregate.output += ledgerDay.output;
-        aggregate.cached += ledgerDay.cached;
-        aggregate.inputTotal += ledgerDay.inputTotal;
-        aggregate.calls += ledgerDay.calls;
-        continue;
-      }
-      if (!dailyAvailable) continue;
-      const snapshot = api.getSnapshot(key);
-      if (snapshot?.dateKey !== key || !Number.isFinite(snapshot?.total)) continue;
-      const dailyDay = codexPlusUsageNormalizeGlobalDay(snapshot, "daily");
-      if (!dailyDay) continue;
+      const day = codexPlusUsageGlobalDayUsage(key, dayOptions);
+      if (!day) continue;
       available += 1;
-      const isMagpie = snapshot.usageSource === "magpie" || snapshot.source === "magpie";
-      if (isMagpie) magpieDays += 1;
+      if (day.kind === "magpie") magpieDays += 1;
+      else if (day.kind === "ledger") ledgerDays += 1;
       else dailyDays += 1;
-      aggregate.total += dailyDay.total;
-      aggregate.input += dailyDay.input;
-      aggregate.output += dailyDay.output;
-      aggregate.cached += dailyDay.cached;
-      aggregate.inputTotal += dailyDay.inputTotal;
-      aggregate.calls += dailyDay.calls;
+      aggregate.total += day.total;
+      aggregate.input += day.input;
+      aggregate.output += day.output;
+      aggregate.cached += day.cached;
+      aggregate.inputTotal += day.inputTotal;
+      aggregate.calls += day.calls;
     }
     codexPlusUsageState.globalUsageCoverage = { available, total: keys.length };
     codexPlusUsageState.globalUsageSourceCoverage = { magpie: magpieDays, ledger: ledgerDays, daily: dailyDays };
@@ -2022,6 +2180,198 @@
 
   function codexPlusUsageGlobalTotal(...args) {
     return codexPlusUsageGlobalAggregate(...args)?.total ?? null;
+  }
+
+  function codexPlusUsageBeijingMonthKey(timestamp) {
+    const dateKey = codexPlusUsageBeijingDateKey(timestamp);
+    return /^\d{4}-\d{2}/.test(dateKey) ? dateKey.slice(0, 7) : "";
+  }
+
+  function codexPlusUsageCalendarShiftMonth(monthKey, delta) {
+    const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey || ""));
+    if (!match) return "";
+    const shifted = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1 + delta, 1));
+    return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}`;
+  }
+
+  /**
+   * 一个月的日历格子，周日开头。日期按北京时间的日界线切分，月首之前的空位用 null 占位。
+   */
+  function codexPlusUsageCalendarDays(monthKey) {
+    const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey || ""));
+    if (!match) return [];
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    if (!(month >= 1 && month <= 12)) return [];
+    const firstDayUtc = Date.UTC(year, month - 1, 1);
+    const dayCount = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    // 北京时间零点比 UTC 早 8 小时：往回 8 小时再按 UTC 日期取键，得到的就是北京日期。
+    const firstBeijing = firstDayUtc - 8 * 60 * 60 * 1000;
+    const cells = new Array(new Date(firstDayUtc).getUTCDay()).fill(null);
+    for (let index = 0; index < dayCount; index += 1) {
+      const at = firstBeijing + index * 24 * 60 * 60 * 1000;
+      cells.push({ dateKey: codexPlusUsageBeijingDateKey(at), dayLabel: String(index + 1) });
+    }
+    return cells;
+  }
+
+  /**
+   * 星期表头与月份标题交给 Intl，跟随系统区域设置，不写死中英文。
+   */
+  function codexPlusUsageCalendarWeekdays() {
+    try {
+      const formatter = new Intl.DateTimeFormat(undefined, { weekday: "narrow", timeZone: "UTC" });
+      // 2024-01-07 是周日，往后 7 天正好是本周表头。
+      return Array.from({ length: 7 }, (unused, index) => formatter.format(new Date(Date.UTC(2024, 0, 7 + index))));
+    } catch {
+      return ["S", "M", "T", "W", "T", "F", "S"];
+    }
+  }
+
+  function codexPlusUsageCalendarMonthLabel(monthKey) {
+    const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey || ""));
+    if (!match) return String(monthKey || "");
+    const at = Date.UTC(Number(match[1]), Number(match[2]) - 1, 1);
+    try {
+      return new Intl.DateTimeFormat(undefined, { year: "numeric", month: "long", timeZone: "UTC" })
+        .format(new Date(at));
+    } catch {
+      return String(monthKey);
+    }
+  }
+
+  /**
+   * 日历点选：第一次点选整天，之后点更晚的日期延长截止，点更早的日期则重开区间。
+   */
+  function codexPlusUsageCalendarRange(anchorKey, clickedKey) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(clickedKey || ""))) return null;
+    if (!anchorKey || clickedKey < anchorKey) {
+      return { anchor: clickedKey, start: clickedKey, end: clickedKey };
+    }
+    return { anchor: anchorKey, start: anchorKey, end: clickedKey };
+  }
+
+  function codexPlusUsageCalendarDayOptions() {
+    const state = codexPlusUsageState;
+    const api = window[codexPlusUsageGlobalApiKey];
+    return {
+      magpieSnapshots: codexPlusUsageMagpieSnapshotFreshness(Date.now(), state.magpieUsage),
+      ledgerDays: state.dailyLedger?.days || null,
+      dailyApi: typeof api?.getSnapshot === "function" ? api : null,
+    };
+  }
+
+  function codexPlusUsageCalendarSelection() {
+    const startKey = String(codexPlusUsageState.customStart || "").slice(0, 10);
+    const endKey = String(codexPlusUsageState.customEnd || "").slice(0, 10);
+    const valid = /^\d{4}-\d{2}-\d{2}$/.test(startKey) && /^\d{4}-\d{2}-\d{2}$/.test(endKey);
+    return valid ? { startKey, endKey } : { startKey: "", endKey: "" };
+  }
+
+  /**
+   * 日历格子固定 42 个（最多 6 周），每月只重新指向日期，不重建节点。
+   */
+  function codexPlusUsageInitCalendar(parts) {
+    const text = codexPlusUsageText();
+    for (const weekday of codexPlusUsageCalendarWeekdays()) {
+      const label = document.createElement("span");
+      label.textContent = weekday;
+      parts.calendarWeek.appendChild(label);
+    }
+    for (let index = 0; index < 42; index += 1) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "codex-plus-throughput-day";
+      const number = document.createElement("span");
+      number.className = "codex-plus-throughput-day-number";
+      const amount = document.createElement("span");
+      amount.className = "codex-plus-throughput-day-amount";
+      button.append(number, amount);
+      parts.calendarGrid.appendChild(button);
+      parts.calendarCells.push({ button, number, amount });
+    }
+    parts.calendarPrev.setAttribute("aria-label", text.labels.calendarPrev);
+    parts.calendarNext.setAttribute("aria-label", text.labels.calendarNext);
+    parts.calendarPrev.addEventListener("click", () => codexPlusUsageShiftCalendarMonth(-1));
+    parts.calendarNext.addEventListener("click", () => codexPlusUsageShiftCalendarMonth(1));
+    parts.calendarGrid.addEventListener("click", (event) => {
+      const button = event.target?.closest?.("button[data-day]");
+      if (!button || button.disabled) return;
+      codexPlusUsageSelectCalendarDay(button.dataset.day);
+    });
+  }
+
+  /**
+   * 日历渲染：没有消耗（或没有数据源覆盖）的日期置灰且不可点击，其余日期可点选区间。
+   */
+  function codexPlusUsageRenderCalendar(parts) {
+    if (!parts?.calendarGrid) return;
+    const text = codexPlusUsageText();
+    const now = Date.now();
+    const todayKey = codexPlusUsageBeijingDateKey(now);
+    const currentMonth = codexPlusUsageBeijingMonthKey(now);
+    const selection = codexPlusUsageCalendarSelection();
+    let monthKey = codexPlusUsageState.calendarMonth || currentMonth;
+    // 区间变了才把视图拉到区间所在月份，用户自己翻月时不抢回焦点。
+    const selectionKey = `${selection.startKey}~${selection.endKey}`;
+    if (parts.calendarSelectionKey !== selectionKey) {
+      parts.calendarSelectionKey = selectionKey;
+      const startMonth = selection.startKey.slice(0, 7);
+      const endMonth = selection.endKey.slice(0, 7);
+      if (startMonth && (monthKey < startMonth || monthKey > endMonth)) monthKey = endMonth;
+    }
+    if (monthKey > currentMonth) monthKey = currentMonth;
+    codexPlusUsageState.calendarMonth = monthKey;
+    parts.calendarMonth.textContent = codexPlusUsageCalendarMonthLabel(monthKey);
+    parts.calendarNext.disabled = monthKey >= currentMonth;
+    const days = codexPlusUsageCalendarDays(monthKey);
+    const options = codexPlusUsageCalendarDayOptions();
+    for (let index = 0; index < parts.calendarCells.length; index += 1) {
+      const cell = parts.calendarCells[index];
+      const day = days[index] || null;
+      if (!day) {
+        cell.button.hidden = true;
+        continue;
+      }
+      const usage = codexPlusUsageGlobalDayUsage(day.dateKey, options);
+      cell.button.hidden = false;
+      cell.button.disabled = !usage;
+      cell.button.dataset.day = day.dateKey;
+      cell.button.dataset.today = String(day.dateKey === todayKey);
+      cell.button.dataset.selected = String(
+        !!usage && day.dateKey >= selection.startKey && day.dateKey <= selection.endKey,
+      );
+      cell.number.textContent = day.dayLabel;
+      cell.amount.textContent = usage ? codexPlusUsageFormatCompact(usage.total) : "";
+      const title = usage
+        ? `${text.labels.dayTotal} ${codexPlusUsageFormatCount(usage.total)} · ${text.calls(usage.calls)}`
+        : text.labels.dayEmpty;
+      cell.button.title = title;
+      cell.button.setAttribute("aria-label", `${day.dateKey} ${title}`);
+    }
+  }
+
+  function codexPlusUsageShiftCalendarMonth(delta) {
+    const now = Date.now();
+    const current = codexPlusUsageState.calendarMonth || codexPlusUsageBeijingMonthKey(now);
+    const shifted = codexPlusUsageCalendarShiftMonth(current, delta);
+    if (!shifted || shifted > codexPlusUsageBeijingMonthKey(now)) return;
+    codexPlusUsageState.calendarMonth = shifted;
+    codexPlusUsageUpdatePopover(codexPlusUsageTurnSnapshot(codexPlusUsageState.turns.get(codexPlusUsageState.threadId), now));
+  }
+
+  function codexPlusUsageSelectCalendarDay(dateKey) {
+    const picked = codexPlusUsageCalendarRange(codexPlusUsageState.calendarAnchor, dateKey);
+    if (!picked) return;
+    const start = codexPlusUsageBeijingDayStart(codexPlusUsageBeijingDate(`${picked.start}T00:00`));
+    const endOfDay = codexPlusUsageBeijingDayStart(codexPlusUsageBeijingDate(`${picked.end}T00:00`))
+      + 23 * 60 * 60 * 1000 + 59 * 60 * 1000;
+    if (!Number.isFinite(start) || !Number.isFinite(endOfDay) || endOfDay < start) return;
+    codexPlusUsageState.calendarAnchor = picked.anchor;
+    codexPlusUsageState.range = "custom";
+    codexPlusUsageState.customStart = codexPlusUsageBeijingDateTime(start);
+    codexPlusUsageState.customEnd = codexPlusUsageBeijingDateTime(Math.min(Date.now(), endOfDay));
+    codexPlusUsageApplyCustomRange();
   }
 
   async function codexPlusUsageRefreshGlobalUsage(force = false) {
@@ -2099,9 +2449,15 @@
     }
     const base = text.labels[codexPlusUsageState.range] || text.labels.custom;
     const coverage = codexPlusUsageState.globalUsageCoverage;
-    const coverageLabel = coverage.total > coverage.available
-      ? `${base}（${coverage.available}/${coverage.total}）`
-      : base;
+    // 数据源挂掉时不能只显示 "--"：把不可用状态写进标签，否则用户以为用量真的是 0。
+    const failed = usage == null
+      && !codexPlusUsageState.globalUsageLoading
+      && !!(codexPlusUsageState.magpieUsageError || codexPlusUsageState.globalUsageError);
+    const coverageLabel = failed
+      ? `${base}${text.labels.sourceUnavailable}`
+      : coverage.total > coverage.available
+        ? `${base}（${coverage.available}/${coverage.total}）`
+        : base;
     return {
       label: coverageLabel,
       value: usage?.total ?? null,
@@ -2169,9 +2525,17 @@
         const result = await window.codexPlus.call("/thread-usage-history", { session_id: threadId });
         if (codexPlusUsageState.disposed || codexPlusUsageState.threadId !== threadId) return;
         const latestSamples = codexPlusUsageHistorySamples(result);
+        // 换线程必须从空白开始累积，否则上一个线程的调用会混进本轮统计。
+        const previousSamples = codexPlusUsageState.historyThreadId === threadId
+          ? codexPlusUsageState.historySamples
+          : [];
         codexPlusUsageState.historyThreadId = threadId;
         // shortcut: /thread-usage-history 只返回最新 rollout 分段，完整分段历史需宿主提供接口。
-        codexPlusUsageState.historySamples = latestSamples;
+        // 分段会随压缩切换，整体替换会让已经统计到的调用次数回落，所以只并集累积。
+        codexPlusUsageState.historySamples = codexPlusUsageMergeHistorySamples(
+          previousSamples,
+          latestSamples,
+        );
         codexPlusUsageState.historyFetchedAt = Date.now();
         codexPlusUsageSeedHistoryTurn(threadId);
       } catch (error) {
@@ -2433,6 +2797,15 @@
     scroll.scrollLeft = scroll.scrollWidth;
   }
 
+  /**
+   * 自定义区间的时间来源有两处（手动输入、日历点选），统一走这里，避免两条路径漏刷新。
+   */
+  function codexPlusUsageApplyCustomRange() {
+    codexPlusUsageState.range = "custom";
+    void codexPlusUsageRefreshGlobalUsage();
+    codexPlusUsageUpdatePopover(codexPlusUsageTurnSnapshot(codexPlusUsageState.turns.get(codexPlusUsageState.threadId), Date.now()));
+  }
+
   function codexPlusUsageBuildPopover() {
     if (codexPlusUsageState.popover) return codexPlusUsageState.popoverParts;
     const popover = document.createElement("div");
@@ -2490,6 +2863,15 @@
           <button class="codex-plus-throughput-preset" type="button" data-range="yesterday" data-label="presetYesterday" aria-pressed="false"></button>
           <button class="codex-plus-throughput-preset" type="button" data-range="week" data-label="presetWeek" aria-pressed="false"></button>
         </div>
+        <div class="codex-plus-throughput-calendar">
+          <div class="codex-plus-throughput-calendar-head">
+            <button class="codex-plus-throughput-calendar-nav" type="button" data-role="calendar-prev">‹</button>
+            <span class="codex-plus-throughput-calendar-month" data-role="calendar-month"></span>
+            <button class="codex-plus-throughput-calendar-nav" type="button" data-role="calendar-next">›</button>
+          </div>
+          <div class="codex-plus-throughput-calendar-week" data-role="calendar-week"></div>
+          <div class="codex-plus-throughput-calendar-grid" data-role="calendar-grid"></div>
+        </div>
         <div class="codex-plus-throughput-custom">
           <label class="codex-plus-throughput-time"><span data-label="start"></span><input type="datetime-local" step="60" data-role="custom-start"></label>
           <label class="codex-plus-throughput-time"><span data-label="end"></span><input type="datetime-local" step="60" data-role="custom-end"></label>
@@ -2544,6 +2926,13 @@
       presets: [...popover.querySelectorAll("[data-range]")],
       customStart: popover.querySelector('[data-role="custom-start"]'),
       customEnd: popover.querySelector('[data-role="custom-end"]'),
+      calendarMonth: popover.querySelector('[data-role="calendar-month"]'),
+      calendarWeek: popover.querySelector('[data-role="calendar-week"]'),
+      calendarGrid: popover.querySelector('[data-role="calendar-grid"]'),
+      calendarPrev: popover.querySelector('[data-role="calendar-prev"]'),
+      calendarNext: popover.querySelector('[data-role="calendar-next"]'),
+      calendarCells: [],
+      calendarSelectionKey: "",
       fields: Object.fromEntries([...popover.querySelectorAll("[data-field]")].map((node) => [node.dataset.field, node])),
       bars: [],
       xLabels: [],
@@ -2553,6 +2942,7 @@
     parts.barsHost = barsHost;
     parts.xAxisHost = xAxisHost;
     codexPlusUsageEnsureChartColumns(parts, 20);
+    codexPlusUsageInitCalendar(parts);
     const now = new Date();
     now.setMinutes(0, 0, 0);
     const initialStart = new Date(now.getTime() - 4 * 60 * 60 * 1000);
@@ -2577,6 +2967,7 @@
     for (const button of parts.presets) {
       button.addEventListener("click", () => {
         codexPlusUsageState.range = button.dataset.range || "task";
+        codexPlusUsageState.calendarAnchor = "";
         if (codexPlusUsageIsGlobalRange(codexPlusUsageState.range)) {
           void codexPlusUsageRefreshGlobalUsage();
         }
@@ -2584,11 +2975,10 @@
       });
     }
     const updateCustomRange = () => {
-      codexPlusUsageState.range = "custom";
       codexPlusUsageState.customStart = parts.customStart.value;
       codexPlusUsageState.customEnd = parts.customEnd.value;
-      void codexPlusUsageRefreshGlobalUsage();
-      codexPlusUsageUpdatePopover(codexPlusUsageTurnSnapshot(codexPlusUsageState.turns.get(codexPlusUsageState.threadId), Date.now()));
+      codexPlusUsageState.calendarAnchor = "";
+      codexPlusUsageApplyCustomRange();
     };
     parts.customStart.addEventListener("change", updateCustomRange);
     parts.customEnd.addEventListener("change", updateCustomRange);
@@ -2630,6 +3020,17 @@
 
   function codexPlusUsageFormatPercent(value) {
     return Number.isFinite(value) ? `${(Math.max(0, value) * 100).toFixed(1)}%` : codexPlusUsageText().unavailable;
+  }
+
+  /**
+   * 日历格子只有约 30px 宽：三位有效数字加单位，无消耗返回空串由调用方决定占位。
+   */
+  function codexPlusUsageFormatCompact(value) {
+    if (!Number.isFinite(value) || value <= 0) return "";
+    if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+    if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+    if (value >= 1_000) return `${Math.round(value / 1_000)}K`;
+    return String(Math.round(value));
   }
 
   function codexPlusUsageFormatTokenWindow(value) {
@@ -2770,6 +3171,15 @@
     return (Array.isArray(calls) ? calls : []).slice(-codexPlusUsageMaxChartBars);
   }
 
+  function codexPlusUsageChartAxisMax(calls) {
+    // shortcut: 刻度只跟最近 20 次走，近期用量骤降时更早的柱会顶格；需要全窗口稳健定档时再升级。
+    const tokens = (Array.isArray(calls) ? calls : [])
+      .map((item) => Number(item?.tokens))
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .slice(-codexPlusUsageChartAxisWindow);
+    return tokens.length ? Math.max(...tokens) : 0;
+  }
+
   function codexPlusUsageChartScale(value) {
     const base = 100000;
     let top = base;
@@ -2829,9 +3239,7 @@
     );
     const renderedCalls = codexPlusUsageChartWindow(calls);
     const renderCount = codexPlusUsageEnsureChartColumns(parts, renderedCalls.length);
-    const scale = codexPlusUsageChartScale(
-      renderedCalls.reduce((maximum, item) => Math.max(maximum, item.tokens), 0),
-    );
+    const scale = codexPlusUsageChartScale(codexPlusUsageChartAxisMax(renderedCalls));
     parts.fields.yTop.textContent = codexPlusUsageFormatWan(scale.top);
     parts.fields.yMid.textContent = codexPlusUsageFormatWan(scale.mid);
     const topIds = [rankedCalls[0]?.id, rankedCalls[1]?.id, rankedCalls[2]?.id];
@@ -2839,7 +3247,7 @@
       const item = renderedCalls[index] || null;
       const ref = parts.bars[index];
       const height = item && item.tokens > 0
-        ? Math.max(2, Math.round(item.tokens / scale.top * 90))
+        ? Math.min(100, Math.max(2, Math.round(item.tokens / scale.top * 90)))
         : 0;
       ref.stick.style.height = height + "%";
       const classes = ["codex-plus-throughput-bar-col"];
@@ -2928,6 +3336,7 @@
     }
     if (document.activeElement !== parts.customStart) parts.customStart.value = codexPlusUsageState.customStart;
     if (document.activeElement !== parts.customEnd) parts.customEnd.value = codexPlusUsageState.customEnd;
+    codexPlusUsageRenderCalendar(parts);
     codexPlusUsageRenderToolDetails(snapshot);
     codexPlusUsageRenderAnalytics(snapshot);
     parts.popover.setAttribute("aria-label", `${text.labels.title}：${value}，${parts.fields.context.textContent}`);

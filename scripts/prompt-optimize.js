@@ -2,17 +2,17 @@
 @codex-plus-script
 name: Prompt Optimize
 description: Optimize the composer prompt with an external LLM; click ✨ to optimize, click again to restore.
-version: 1.0.4
+version: 1.0.5
 author: Codex++ Community
 */
 
 (() => {
-  const SCRIPT_VERSION = "1.0.4";
+  const SCRIPT_VERSION = "1.0.5";
   // Keep the published script version separate from the locally loaded DOM
   // owner. A cached legacy instance must not be able to remove this revision's
   // button or its styles during a later reinjection.
-  const INSTANCE_REVISION = "v1-0-4-bridge-first";
-  const OWNER_TOKEN = "v1-0-4-bridge-first";
+  const INSTANCE_REVISION = "v1-0-5-anchor-follow";
+  const OWNER_TOKEN = "v1-0-5-anchor-follow";
   const API_KEY = "__codexPlusPromptOptimize";
   const MARKET_ID = "prompt-optimize";
   const BRIDGE_KEY = "__codexSessionDeleteBridge";
@@ -26,6 +26,9 @@ author: Codex++ Community
   const DRAFT_THREAD_ID = "__draft__";
   const POLL_MS = 1500;
   const MUTATION_DEBOUNCE_MS = 120;
+  // While Codex streams, mutations never pause long enough for the trailing
+  // debounce to fire; force a full ensure at least this often.
+  const MUTATION_MAX_WAIT_MS = 500;
   const TOAST_MS = 2200;
   const REQUEST_TIMEOUT_MS = 120000;
   const SLOW_REQUEST_NOTICE_MS = 15000;
@@ -120,11 +123,14 @@ author: Codex++ Community
     anthropic: "https://api.anthropic.com",
   };
 
-  /** @type {{observer: MutationObserver|null, pollId: number, mutationTimer: number, toastTimer: number, resizeHandler: EventListener|null, inputListeners: Map<HTMLElement, EventListener>, disposed: boolean}} */
+  /** @type {{observer: MutationObserver|null, pollId: number, mutationTimer: number, mutationFirstAt: number, repositionFrame: number, anchor: {button: HTMLElement, modelItem: HTMLElement}|null, toastTimer: number, resizeHandler: EventListener|null, inputListeners: Map<HTMLElement, EventListener>, disposed: boolean}} */
   const runtime = {
     observer: null,
     pollId: 0,
     mutationTimer: 0,
+    mutationFirstAt: 0,
+    repositionFrame: 0,
+    anchor: null,
     toastTimer: 0,
     resizeHandler: null,
     inputListeners: new Map(),
@@ -1045,6 +1051,7 @@ author: Codex++ Community
     host.style.top = "auto";
     host.style.right = "18px";
     host.style.bottom = "18px";
+    runtime.anchor = null;
     button.style.margin = "";
     button.dataset.placement = "float";
     if (button.parentElement !== host) host.appendChild(button);
@@ -1062,18 +1069,70 @@ author: Codex++ Community
     // visibly jump whenever the composer was reconciled.
     button.style.margin = "0";
     if (button.parentElement !== host) host.appendChild(button);
+    if (!positionAnchorHost(host, button, modelRect)) return false;
+    runtime.anchor = { button, modelItem };
+    button.dataset.placement = `${strategy || "model"}-anchor`;
+    return true;
+  }
+
+  function positionAnchorHost(host, button, modelRect) {
     const buttonRect = button.getBoundingClientRect();
     const width = Math.max(1, Math.round(buttonRect.width || 28));
     const height = Math.max(1, Math.round(buttonRect.height || 28));
     const left = Math.round(modelRect.left - width - 2);
     if (left < 4) return false;
 
-    host.style.left = `${left}px`;
-    host.style.top = `${Math.round(modelRect.top + (modelRect.height - height) / 2)}px`;
+    const nextLeft = `${left}px`;
+    const nextTop = `${Math.round(modelRect.top + (modelRect.height - height) / 2)}px`;
+    // Called every frame while following: skip style writes when nothing moved.
+    if (host.style.left === nextLeft && host.style.top === nextTop && host.style.right === "auto") return true;
+    host.style.left = nextLeft;
+    host.style.top = nextTop;
     host.style.right = "auto";
     host.style.bottom = "auto";
-    button.dataset.placement = `${strategy || "model"}-anchor`;
     return true;
+  }
+
+  // The ✨ host is position:fixed, so it does not move with the composer by
+  // itself. Re-read the cached model chip's rect once per frame after DOM
+  // changes (cheap: one rect read), and keep following for as long as the
+  // chip keeps moving (CSS transitions). The heavier ensureSparkleButton()
+  // only runs when the anchor is gone or no longer valid.
+  function scheduleReposition() {
+    if (runtime.disposed || runtime.repositionFrame || !runtime.anchor) return;
+    if (typeof window.requestAnimationFrame !== "function") return;
+    runtime.repositionFrame = window.requestAnimationFrame(() => {
+      runtime.repositionFrame = 0;
+      repositionAnchoredButton();
+    });
+  }
+
+  function repositionAnchoredButton() {
+    const anchor = runtime.anchor;
+    if (runtime.disposed || !anchor) return;
+    const { button, modelItem } = anchor;
+    const host = button.parentElement;
+    const modelRect = modelItem.isConnected ? modelItem.getBoundingClientRect() : null;
+    const usable =
+      button.isConnected &&
+      host instanceof HTMLElement &&
+      host.hasAttribute(FLOAT_HOST_ATTR) &&
+      !!modelRect &&
+      modelRect.width > 0 &&
+      modelRect.height > 0;
+    const before = usable ? `${host.style.left},${host.style.top}` : "";
+    if (!usable || !positionAnchorHost(host, button, modelRect)) {
+      // The chip was re-rendered or moved out of reach: re-resolve now rather
+      // than waiting for the debounce, which streaming keeps pushing back.
+      runtime.anchor = null;
+      try {
+        ensureSparkleButton();
+      } catch (_) {
+        /* ignore */
+      }
+      return;
+    }
+    if (`${host.style.left},${host.style.top}` !== before) scheduleReposition();
   }
 
   function findComposerShell(footer) {
@@ -2334,7 +2393,18 @@ author: Codex++ Community
 
   function scheduleEnsure() {
     if (runtime.disposed) return;
-    if (runtime.mutationTimer) window.clearTimeout(runtime.mutationTimer);
+    // Follow layout shifts of the composer on the next frame (#3199); the
+    // debounced full ensure below can lag by hundreds of ms while streaming.
+    scheduleReposition();
+    const now = Date.now();
+    if (runtime.mutationTimer) {
+      window.clearTimeout(runtime.mutationTimer);
+    } else {
+      runtime.mutationFirstAt = now;
+    }
+    // Trailing debounce with a max wait: continuous streaming mutations must
+    // not postpone the full ensure until the next POLL_MS tick.
+    const delay = Math.max(0, Math.min(MUTATION_DEBOUNCE_MS, runtime.mutationFirstAt + MUTATION_MAX_WAIT_MS - now));
     runtime.mutationTimer = window.setTimeout(() => {
       runtime.mutationTimer = 0;
       try {
@@ -2343,7 +2413,7 @@ author: Codex++ Community
       } catch (_) {
         /* ignore */
       }
-    }, MUTATION_DEBOUNCE_MS);
+    }, delay);
   }
 
   function startObservers() {
@@ -2385,6 +2455,11 @@ author: Codex++ Community
       window.clearTimeout(runtime.mutationTimer);
       runtime.mutationTimer = 0;
     }
+    if (runtime.repositionFrame) {
+      window.cancelAnimationFrame?.(runtime.repositionFrame);
+      runtime.repositionFrame = 0;
+    }
+    runtime.anchor = null;
     if (runtime.toastTimer) {
       window.clearTimeout(runtime.toastTimer);
       runtime.toastTimer = 0;

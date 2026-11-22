@@ -220,13 +220,22 @@ test("same-version reinjection reuses an idle optimizer without rebuilding it", 
 test("release revision isolates its DOM ownership from legacy selectors", () => {
   const source = fs.readFileSync(scriptPath, "utf8");
 
-  assert.match(source, /version:\s*1\.0\.4/);
-  assert.match(source, /const SCRIPT_VERSION = "1\.0\.4"/);
-  assert.match(source, /const OWNER_TOKEN = "v1-0-4-bridge-first"/);
+  assert.match(source, /version:\s*1\.0\.5/);
+  assert.match(source, /const SCRIPT_VERSION = "1\.0\.5"/);
+  assert.match(source, /const OWNER_TOKEN = "v1-0-5-anchor-follow"/);
   assert.match(source, /const BUTTON_ATTR = `data-codex-prompt-optimize-\$\{OWNER_TOKEN\}`/);
   assert.match(source, /const STYLE_ID = `codex-plus-prompt-optimize-style-\$\{OWNER_TOKEN\}`/);
   assert.doesNotMatch(source, /Node\.prototype/);
   assert.doesNotMatch(source, /insertBefore/);
+});
+
+test("market index lists the released script version and checksum", () => {
+  const source = fs.readFileSync(scriptPath);
+  const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "index.json"), "utf8"));
+  const entry = manifest.scripts.find((script) => script.id === "prompt-optimize");
+
+  assert.equal(entry.version, "1.0.5");
+  assert.equal(entry.sha256, require("node:crypto").createHash("sha256").update(source).digest("hex"));
 });
 
 test("anchor revision repositions after a resize without leaving a global listener", () => {
@@ -236,8 +245,137 @@ test("anchor revision repositions after a resize without leaving a global listen
   assert.match(source, /window\.removeEventListener\("resize", runtime\.resizeHandler\)/);
   assert.match(source, /runtime\.resizeHandler = \(\) => scheduleEnsure\(\)/);
   assert.match(source, /function anchorButtonToModel\(button, modelItem, strategy\)/);
-  assert.match(source, /host\.style\.left = `\$\{left\}px`/);
-  assert.match(source, /host\.style\.top = `\$\{Math\.round\(modelRect\.top \+ \(modelRect\.height - height\) \/ 2\)\}px`/);
+  assert.match(source, /const nextLeft = `\$\{left\}px`/);
+  assert.match(source, /const nextTop = `\$\{Math\.round\(modelRect\.top \+ \(modelRect\.height - height\) \/ 2\)\}px`/);
+});
+
+function createAnchorFollower() {
+  const source = fs.readFileSync(scriptPath, "utf8");
+  const frames = [];
+  const calls = { ensure: 0 };
+
+  class HTMLElement {}
+  const host = new HTMLElement();
+  host.style = { left: "auto", top: "auto", right: "18px", bottom: "18px" };
+  host.hasAttribute = () => true;
+  const button = {
+    isConnected: true,
+    parentElement: host,
+    getBoundingClientRect: () => ({ width: 28, height: 28 }),
+  };
+  const modelRect = { left: 660, top: 225, width: 120, height: 28 };
+  const modelItem = { isConnected: true, getBoundingClientRect: () => ({ ...modelRect }) };
+  const runtime = { disposed: false, repositionFrame: 0, anchor: { button, modelItem } };
+  const context = {
+    HTMLElement,
+    FLOAT_HOST_ATTR: "data-float",
+    runtime,
+    ensureSparkleButton() {
+      calls.ensure += 1;
+    },
+    window: {
+      requestAnimationFrame(callback) {
+        frames.push(callback);
+        return frames.length;
+      },
+    },
+  };
+  const names = ["positionAnchorHost", "scheduleReposition", "repositionAnchoredButton"];
+  const fns = vm.runInNewContext(
+    `${names.map((name) => extractFunction(source, name)).join("\n")}\n({ ${names.join(", ")} })`,
+    context,
+  );
+  const flush = () => {
+    let count = 0;
+    while (frames.length && count < 20) {
+      frames.shift()();
+      count += 1;
+    }
+    return count;
+  };
+  return { calls, flush, fns, host, modelItem, modelRect, runtime };
+}
+
+test("anchored ✨ follows the model chip on the next frame when the composer shifts (#3199)", () => {
+  const { calls, flush, fns, host, modelRect } = createAnchorFollower();
+
+  fns.scheduleReposition();
+  flush();
+  assert.equal(host.style.left, "630px");
+  assert.equal(host.style.top, "225px");
+
+  // Composer moves up 6px while the transcript keeps streaming.
+  modelRect.top = 219;
+  fns.scheduleReposition();
+  fns.scheduleReposition();
+  const frameCount = flush();
+  assert.equal(host.style.top, "219px");
+  // One frame for the move plus one confirming the position settled.
+  assert.equal(frameCount, 2);
+  assert.equal(calls.ensure, 0);
+});
+
+test("anchor follower falls back to a full ensure when the model chip is replaced", () => {
+  const { calls, flush, fns, modelItem, runtime } = createAnchorFollower();
+
+  modelItem.isConnected = false;
+  fns.scheduleReposition();
+  flush();
+  assert.equal(calls.ensure, 1);
+  assert.equal(runtime.anchor, null);
+});
+
+test("continuous mutations cannot postpone the full ensure past the max wait", () => {
+  const source = fs.readFileSync(scriptPath, "utf8");
+  const timers = new Map();
+  let now = 0;
+  let nextId = 1;
+  const calls = { ensure: 0, reposition: 0 };
+  const context = {
+    Date: { now: () => now },
+    Math,
+    MUTATION_DEBOUNCE_MS: 120,
+    MUTATION_MAX_WAIT_MS: 500,
+    runtime: { disposed: false, mutationTimer: 0, mutationFirstAt: 0 },
+    ensureSparkleButton() {
+      calls.ensure += 1;
+    },
+    maybeDetachOnEdit() {},
+    scheduleReposition() {
+      calls.reposition += 1;
+    },
+    window: {
+      setTimeout(callback, delay) {
+        const id = nextId++;
+        timers.set(id, { at: now + delay, callback });
+        return id;
+      },
+      clearTimeout(id) {
+        timers.delete(id);
+      },
+    },
+  };
+  const scheduleEnsure = vm.runInNewContext(`(${extractFunction(source, "scheduleEnsure")})`, context);
+  const advanceTo = (time) => {
+    for (;;) {
+      const due = [...timers].filter(([, timer]) => timer.at <= time).sort((a, b) => a[1].at - b[1].at)[0];
+      if (!due) break;
+      timers.delete(due[0]);
+      now = due[1].at;
+      due[1].callback();
+    }
+    now = time;
+  };
+
+  // A mutation every 50ms for 2s, as while a reply streams.
+  for (let time = 0; time < 2000; time += 50) {
+    advanceTo(time);
+    scheduleEnsure();
+  }
+  advanceTo(2000);
+
+  assert.ok(calls.ensure >= 3, `expected the max wait to force ensures, got ${calls.ensure}`);
+  assert.equal(calls.reposition, 40);
 });
 
 test("right-click stays local and opens the settings panel without optimizing", () => {

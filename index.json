@@ -203,7 +203,7 @@
       "id": "codex-live-token-cost",
       "name": "Codex Live Token Cost",
       "description": "实时查看输入框上方的 Token 消耗，本地解锁官方个人资料页，并追踪历史用量与使用趋势。",
-      "version": "0.7.9",
+      "version": "0.8.1",
       "author": "Tianzora",
       "tags": [
         "codex",
@@ -213,7 +213,20 @@
       ],
       "homepage": "https://github.com/Tianzora/codex-token-cost",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-live-token-cost.js",
-      "sha256": "8F340EFE8233D62262804F6EA4A128208C81B883E1D8C6491DB2964D3D98D1BE"
+      "sha256": "DD691950B689094479C4D1037D4AE55A21FAF54730E3097EF1C5FD74156F649C",
+      "requirements": [
+        "Codex++ 用户脚本环境",
+        "价格表同步需要本机 curl；Windows 沙箱 TLS 凭证失败时回退到 Node.js 22+",
+        "自动冷备需要 Codex++ 宿主文件通道（fs/writeFile）"
+      ],
+      "limitations": [
+        "启动时默认不下载价格表，使用内置参考价；可在「模型价格」点「同步价格」手动更新，或在设置里开启「启动时自动同步价格表」",
+        "价格表同步会通过本机 curl（Windows 下可能改用 Node）从 GitHub 下载 LiteLLM 价格表，并写入用户脚本目录的 .prices.cache.json",
+        "自动冷备默认开启可关闭；开启时会向 ~/.codex/usage-ledger/ 写入按天的用量 NDJSON 备份与 manifest（超过 30 天归档）",
+        "卸载脚本不会清理用户脚本目录下的 .prices.cache.json（Codex++ 暂无卸载钩子）",
+      "个人资料覆盖默认关闭（需在设置里显式开启）：开启后会改写 Codex 功能开关 2478676115、拦截个人资料页请求并用本地数据替换显示",
+      "个人资料页的编辑（昵称、用户名、头像等）与头像上传都会真实提交到 ChatGPT 账号，成功后同步回本地覆盖显示；关闭覆盖后一切恢复 Codex 原生行为"
+      ]
     },
     {
       "id": "prompt-optimize",

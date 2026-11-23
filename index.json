@@ -219,7 +219,7 @@
       "id": "prompt-optimize",
       "name": "Prompt Optimize",
       "description": "在输入框旁调用外部 LLM 一键优化提示词，支持 OpenAI/Anthropic 兼容 API 与一键还原。",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "author": "Codex++ Community",
       "tags": [
         "prompt",
@@ -232,7 +232,7 @@
       ],
       "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/prompt-optimize.js",
-      "sha256": "a530b7cbd9002643041d20202fd60dc0d2ddc33217129de67e5c55effe97eb0f"
+      "sha256": "3d00f26727060f2c409f774b6ee4e33bbd204f6c499e337286c2c91e2c095ab3"
     },
     {
       "id": "codex-plugin-translator",
@@ -402,7 +402,7 @@
       "tags": ["prompt", "productivity", "llm", "openai", "anthropic"],
       "homepage": "https://github.com/Meowv/prompt",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/prompt-enhancement.js",
-      "sha256": "77fb2fb5e147a8822df7ddbcee9e947b7647cc2ce4a382c456cb079cd15edf89",
+      "sha256": "6174fd10294c2f162eb9d998e2237ffd5b4b4a048ece41320608def29412d142",
       "requirements": [
         "Codex++ 用户脚本环境",
         "支持 OpenAI 兼容或 Anthropic 协议的模型 API、API Key 和模型 ID"

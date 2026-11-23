@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Usage & Resets
 // @namespace    codex-plus-plus
-// @version      1.1.4
+// @version      1.1.5
 // @description  顶栏仅显示 5 小时剩余用量及重置时间，点击展开用量与重置卡片菜单。
 // @match        app://-/*
 // @run-at       document-start
@@ -11,7 +11,7 @@
   "use strict";
   const KEY = "__codexUsageReset";
   const ID = "codex-usage-reset";
-  const VERSION = "1.1.4";
+  const VERSION = "1.1.5";
   const USAGE = "/wham/usage";
   const CREDITS = "/wham/rate-limit-reset-credits";
 
@@ -111,6 +111,24 @@
           typeof item.httpFetch?.fetch === "function" && typeof item.httpFetch?.cancel === "function");
         if (found) { services = found; return services; }
       } catch { /* Older versions use the renderer message bridge below. */ }
+    }
+    // Newer Rspack builds expose their already-loaded module cache on the runtime entry.
+    // Only inspect cached exports; never execute module factories or send a probe POST.
+    for (const url of urls) {
+      if (!/\/assets\/\d+\.[a-f\d]+\.js(?:$|\?)/i.test(url)) continue;
+      try {
+        const runtime = await import(/* @vite-ignore */ url);
+        const cache = runtime.__webpack_require__?.c;
+        if (!cache || typeof cache !== "object") continue;
+        for (const module of Object.values(cache)) {
+          try {
+            const found = module?.exports?.appServices;
+            if (typeof found?.httpFetch?.fetch === "function" && typeof found.httpFetch.cancel === "function") {
+              services = found; return services;
+            }
+          } catch { /* Ignore unrelated cached modules. */ }
+        }
+      } catch { /* Ignore entry assets without an accessible runtime. */ }
     }
     return null;
   }

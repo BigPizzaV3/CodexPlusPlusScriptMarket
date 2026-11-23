@@ -25,23 +25,412 @@ author: Codex++ Community
   const SETTINGS_KEY = "codexPlusPromptOptimize.settings.v1";
   const DRAFT_THREAD_ID = "__draft__";
   const POLL_MS = 1500;
+  const PLACEMENT_SETTLE_MS = 80;
   const MUTATION_DEBOUNCE_MS = 120;
   // While Codex streams, mutations never pause long enough for the trailing
   // debounce to fire; force a full ensure at least this often.
   const MUTATION_MAX_WAIT_MS = 500;
   const TOAST_MS = 2200;
-  const REQUEST_TIMEOUT_MS = 120000;
+  const REQUEST_TIMEOUT_MS = 300000;
   const SLOW_REQUEST_NOTICE_MS = 15000;
   const VERY_SLOW_REQUEST_NOTICE_MS = 45000;
   const LONG_REQUEST_NOTICE_MS = 90000;
   const TEMPERATURE = 0.3;
   const MAX_TOKENS = 4096;
   const DEBUG_PREFIX = "[prompt-optimize]";
+  const CONTEXT_MAX_MESSAGES = 8;
+  const CONTEXT_MAX_TOKENS = 128000;
+  const CONTEXT_MAX_CHARS = 512000; // safety guard; token budget is the real limit
+  const CONTEXT_LAST_KEY = "codexPlusPromptContext.last";
+  const CONTEXT_CANDIDATE_TAGS = /^(ARTICLE|SECTION|DIV|P|LI|PRE)$/i;
+  const CONTEXT_EXPLICIT_ROLE_ATTRS = [
+    "data-message-role",
+    "data-role",
+    "data-chat-role",
+    "data-author-role",
+    "role",
+    "aria-label",
+    "title",
+    "data-testid",
+    "data-test-id",
+    "class",
+  ];
+  const CONTEXT_MESSAGE_HINT_RE = /message|chat-?turn|conversation-?turn|assistant|user-?message|response|reply|whitespace-pre-wrap|prose|markdown|thread-content/i;
+  const CONTEXT_EXCLUDE_RE = /tool|function|reasoning|thinking|analysis|system|debug|notice|toast|settings|composer|prompt-(optimize|enhance|enhancer)|model-selector|token-button|sidebar|thread-list|nav-section/i;
+  const CONTEXT_NOISE_RE = /^(?:send|stop|发送|停止|run|执行|new chat|新对话|思考中|thinking|reasoning|working|分析|已取消|cancelled|ok|test|测试连接|保存配置|设置|取消)$/i;
+
+  function estimateContextTokens(value) {
+    const text = String(value || "");
+    let units = 0;
+    for (let i = 0; i < text.length; i += 1) {
+      const cp = text.codePointAt(i);
+      if (cp > 0xffff) {
+        units += 2;
+        i += 1;
+      } else if (cp <= 0x7f) {
+        units += 0.25; // ASCII roughly 4 chars/token
+      } else if (
+        (cp >= 0x3400 && cp <= 0x9fff) ||
+        (cp >= 0x3000 && cp <= 0x303f) ||
+        (cp >= 0xff00 && cp <= 0xffef)
+      ) {
+        units += 1.5; // Chinese/full-width roughly 0.6-1 token/char
+      } else {
+        units += 0.75;
+      }
+    }
+    return Math.max(1, Math.ceil(units));
+  }
+
+  function truncateContextToBudget(text, maxTokens, maxChars) {
+    const full = String(text || "");
+    if (!full) return "";
+    if (estimateContextTokens(full) <= maxTokens && full.length <= maxChars) return full;
+    const hardMax = Math.min(full.length, maxChars);
+    let low = 0;
+    let high = hardMax;
+    let best = 0;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (estimateContextTokens(full.slice(full.length - mid)) <= maxTokens) {
+        best = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    if (best <= 0) return "";
+    return `…[token-budget-truncated]\n${full.slice(full.length - best).trimStart()}`;
+  }
+
+  function contextNodeText(node) {
+    if (!(node instanceof HTMLElement)) return "";
+    let value = "";
+    if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) {
+      value = node.value || "";
+    } else {
+      const clone = node.cloneNode(true);
+      clone
+        .querySelectorAll(
+          "button, input, textarea, select, [data-codex-plus-ext], [data-axpe], [data-codex-prompt-optimize-panel], [data-codex-prompt-optimize-toast], [data-codex-prompt-optimize-float], script, style, svg",
+        )
+        .forEach((el) => el.remove());
+      value = clone.innerText || clone.textContent || "";
+    }
+    return String(value || "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function contextDomPath(node) {
+    if (!(node instanceof Element)) return "";
+    const parts = [];
+    let cur = node;
+    for (let i = 0; cur instanceof Element && i < 6; i += 1, cur = cur.parentElement) {
+      const id = cur.id ? `#${cur.id}` : "";
+      const cls = String(cur.className || "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2)
+        .map((c) => `.${c}`)
+        .join("");
+      parts.unshift(`${cur.tagName.toLowerCase()}${id}${cls}`);
+    }
+    return parts.join(">");
+  }
+
+  function contextDebug(event, detail, persist = false) {
+    const safeDetail = { ...detail };
+    if (safeDetail.preview) {
+      safeDetail.preview = safeDetail.preview.map((item) =>
+        typeof item === "string" ? item.slice(0, 160) : item,
+      );
+    }
+    try {
+      if (
+        window.__CODEX_PLUS_PROMPT_CONTEXT_DEBUG__ ||
+        localStorage.getItem("codexPlusPromptContext.debug") === "1"
+      ) {
+        console.log("[prompt-context]", event, safeDetail);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    if (!persist) return;
+    try {
+      localStorage.setItem(
+        CONTEXT_LAST_KEY,
+        JSON.stringify({ at: Date.now(), event, ...safeDetail }),
+      );
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function contextExcluded(node, excludeEditor) {
+    if (!(node instanceof Element)) return true;
+    if (node === excludeEditor || (excludeEditor && node.contains(excludeEditor))) return true;
+    if (
+      node.closest(
+        "aside, nav, [role='dialog'], [role='search'], [data-sidebar], [inert], [aria-hidden='true']",
+      )
+    )
+      return true;
+    if (
+      node.closest(
+        "[data-codex-plus-ext], [data-axpe], [data-codex-prompt-optimize-panel], [data-codex-prompt-optimize-toast], [data-codex-prompt-optimize-float]",
+      )
+    )
+      return true;
+    if (
+      node.closest(
+        "textarea, [contenteditable='true'], [contenteditable=''], [role='textbox'], .composer-surface-chrome, [data-testid*='composer'], [data-composer]",
+      )
+    )
+      return true;
+    const style = getComputedStyle(node);
+    if (
+      style.display === "none" ||
+      (style.visibility && style.visibility !== "visible") ||
+      Number(style.opacity || 1) < 0.1
+    )
+      return true;
+    const rect = node.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return true;
+    const hint = [
+      node.getAttribute("data-testid"),
+      node.getAttribute("data-test-id"),
+      node.getAttribute("aria-label"),
+      node.getAttribute("title"),
+      String(node.className || ""),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    if (CONTEXT_EXCLUDE_RE.test(hint)) return true;
+    if (node.closest("pre, code")) return false;
+    if (/^(BUTTON|A|SELECT|OPTION|LABEL)$/i.test(node.tagName)) return true;
+    return false;
+  }
+
+  function contextRoleFrom(node, textValue) {
+    if (!(node instanceof Element)) return "";
+    const hint = CONTEXT_EXPLICIT_ROLE_ATTRS.map((name) =>
+      String(node.getAttribute(name) || ""),
+    ).join(" ");
+    if (/\b(user|human)\b|用户|我问/i.test(hint)) return "user";
+    if (/\b(assistant|model|bot|codex)\b|助手|模型回复|回复/i.test(hint)) return "assistant";
+    if (/^\s*(user|human|你|我|用户)\s*[:：]/i.test(textValue)) return "user";
+    if (/^\s*(assistant|model|bot|codex|助手|模型)\s*[:：]/i.test(textValue))
+      return "assistant";
+    return "";
+  }
+
+  function contextScore(node, textValue, role) {
+    let score = 0;
+    const tag = String(node.tagName || "").toUpperCase();
+    if (CONTEXT_CANDIDATE_TAGS.test(tag)) score += 10;
+    if (tag === "P" || tag === "PRE" || tag === "LI") score += 18;
+    const cls = String(node.className || "");
+    if (CONTEXT_MESSAGE_HINT_RE.test(cls)) score += 28;
+    if (/whitespace-pre-wrap|prose|markdown|break-words/i.test(cls)) score += 16;
+    if (role) score += 40;
+    if (textValue.length >= 20) score += 8;
+    if (textValue.length >= 200) score += 4;
+    if (textValue.length < 2 || CONTEXT_NOISE_RE.test(textValue.trim())) score -= 100;
+    return score;
+  }
+
+  function contextAssignRoles(messages) {
+    const explicitCount = messages.filter((m) => m.roleExplicit).length;
+    if (!explicitCount) {
+      messages.forEach((m, i) => {
+        m.role = i % 2 === 0 ? "assistant" : "user";
+      });
+      contextDebug("role-inference", {
+        strategy: "alternating-from-latest-assistant",
+        roles: messages.map((m) => m.role),
+      });
+      return messages;
+    }
+    for (let i = 0; i < messages.length; i += 1) {
+      if (messages[i].roleExplicit) continue;
+      let known = null;
+      for (let j = i - 1; j >= 0; j -= 1) {
+        if (messages[j].roleExplicit) {
+          known = { role: messages[j].role, distance: i - j };
+          break;
+        }
+      }
+      if (!known) {
+        for (let j = i + 1; j < messages.length; j += 1) {
+          if (messages[j].roleExplicit) {
+            known = { role: messages[j].role, distance: j - i };
+            break;
+          }
+        }
+      }
+      if (!known) {
+        messages[i].role = "user";
+        continue;
+      }
+      const flip = known.distance % 2 === 1;
+      messages[i].role = flip
+        ? known.role === "assistant"
+          ? "user"
+          : "assistant"
+        : known.role;
+    }
+    contextDebug("role-inference", {
+      strategy: "nearest-explicit",
+      roles: messages.map((m) => m.role),
+    });
+    return messages;
+  }
+
+  function collectConversationContext(options = {}) {
+    const excludeEditor = options.excludeEditor || null;
+    const maxMessages = Math.max(0, Number(options.maxMessages || CONTEXT_MAX_MESSAGES));
+    const maxTokens = Math.max(0, Number(options.maxTokens || CONTEXT_MAX_TOKENS));
+    const maxChars = Math.max(0, Number(options.maxChars || CONTEXT_MAX_CHARS));
+    if (!maxMessages || !maxTokens || !maxChars) return [];
+    const candidates = [];
+    for (const node of Array.from(document.querySelectorAll("*"))) {
+      if (contextExcluded(node, excludeEditor)) continue;
+      const value = contextNodeText(node);
+      if (value.length < 2 || CONTEXT_NOISE_RE.test(value)) continue;
+      if (!CONTEXT_CANDIDATE_TAGS.test(node.tagName) && !CONTEXT_MESSAGE_HINT_RE.test(String(node.className || ""))) {
+        contextDebug("candidate", {
+          tag: node.tagName,
+          path: contextDomPath(node),
+          len: value.length,
+          decision: "non-message-tag",
+        });
+        continue;
+      }
+      const explicitRole = contextRoleFrom(node, value);
+      const score = contextScore(node, value, explicitRole);
+      if (score < 20) {
+        contextDebug("candidate", {
+          tag: node.tagName,
+          path: contextDomPath(node),
+          len: value.length,
+          role: explicitRole,
+          decision: "low-score",
+          score,
+        });
+        continue;
+      }
+      const childTexts = Array.from(node.children)
+        .map((child) => contextNodeText(child))
+        .filter((childText) => childText.length >= 40);
+      if (childTexts.length >= 2 && childTexts.join("\n").length >= value.length * 0.8) {
+        contextDebug("candidate", {
+          tag: node.tagName,
+          path: contextDomPath(node),
+          len: value.length,
+          decision: "multi-message-container",
+        });
+        continue;
+      }
+      const rect = node.getBoundingClientRect();
+      candidates.push({
+        node,
+        role: explicitRole,
+        roleExplicit: !!explicitRole,
+        text: value,
+        top: rect.top,
+        score,
+        path: contextDomPath(node),
+      });
+      contextDebug("candidate", {
+        tag: node.tagName,
+        path: contextDomPath(node),
+        len: value.length,
+        role: explicitRole || "inferred-later",
+        decision: "accepted",
+        score,
+      });
+    }
+    candidates.sort(
+      (a, b) => b.top - a.top || b.score - a.score || a.text.length - b.text.length,
+    );
+    const selected = [];
+    for (const item of candidates) {
+      if (selected.length >= maxMessages) break;
+      const duplicate = selected.some((existing) => {
+        const a = existing.text.slice(0, 160);
+        const b = item.text.slice(0, 160);
+        if (!a || !b) return false;
+        return existing.text.startsWith(b) || item.text.startsWith(a);
+      });
+      if (duplicate) {
+        contextDebug("candidate", {
+          path: item.path,
+          len: item.text.length,
+          decision: "duplicate-text",
+        });
+        continue;
+      }
+      selected.push(item);
+    }
+    contextAssignRoles(selected);
+    const latestFirst = selected.slice(0, maxMessages);
+    const pickedLatestFirst = [];
+    let totalChars = 0;
+    let totalTokens = 0;
+    for (const item of latestFirst) {
+      if (totalTokens >= maxTokens || totalChars >= maxChars) break;
+      const piece = truncateContextToBudget(
+        item.text,
+        maxTokens - totalTokens,
+        maxChars - totalChars,
+      );
+      if (!piece.trim()) continue;
+      const tokens = estimateContextTokens(piece);
+      pickedLatestFirst.push({ role: item.role, text: piece.trim(), tokens });
+      totalChars += piece.length;
+      totalTokens += tokens;
+    }
+    const picked = pickedLatestFirst.reverse();
+    contextDebug(
+      "selected",
+      {
+        count: picked.length,
+        chars: totalChars,
+        estimatedTokens: totalTokens,
+        maxTokens,
+        maxMessages,
+        roles: picked.map((m) => m.role),
+        preview: picked.map((m) => `[${m.role}] ${m.text.slice(0, 120)}`),
+      },
+      true,
+    );
+    return picked;
+  }
+
+  function formatConversationContext(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) return "";
+    const lines = messages.map(
+      (m, i) => `[${i + 1}] ${m.role === "assistant" ? "assistant" : "user"}: ${m.text}`,
+    );
+    return [
+      "",
+      "CONVERSATION CONTEXT:",
+      "Use the following conversation context only to resolve references, pronouns, ellipses, and implicit constraints in the user's current input.",
+      "Do not answer the conversation. Do not continue the assistant's previous response. Do not copy long history into the output unless the current input genuinely requires it.",
+      "Output only the enhanced current user prompt.",
+      "<conversation_context>",
+      ...lines,
+      "</conversation_context>",
+      "",
+    ].join("\n");
+  }
   // Live Codex shows labels like "5.6 Sol 中", not only gpt-* ids.
   const MODEL_NAME_RE =
-    /^(gpt|o[1-9]|codex|claude|gemini|deepseek|qwen|kimi|moonshot|mistral|llama|sonnet|opus|haiku|chatgpt|sol)[a-z0-9._+ -]*$/i;
+    /^(gpt|o[1-9]|codex|claude|gemini|deepseek|qwen|kimi|moonshot|mistral|llama|sonnet|opus|haiku|chatgpt|sol|step|stepfun|glm|ernie|doubao)[a-z0-9._+ /-]*$/i;
   const MODELISH_RE =
-    /\b(gpt|o[1-9]|codex|claude|gemini|deepseek|qwen|kimi|moonshot|mistral|llama|sonnet|opus|haiku|chatgpt|sol)\b|[0-9]+\.[0-9]+/i;
+    /\b(gpt|o[1-9]|codex|claude|gemini|deepseek|qwen|kimi|moonshot|mistral|llama|sonnet|opus|haiku|chatgpt|sol|step|stepfun|glm|ernie|doubao)\b|[0-9]+\.[0-9]+/i;
   const NON_MODEL_LABEL_RE =
     /隐藏边栏|显示边栏|hide sidebar|show sidebar|send|stop|发送|停止|local mode|本地模式|worktree|branch|new chat|新对话|任务|项目|设置|历史|归档|skills?|plugins?|插件|技能|home|首页|inbox|收件箱|文件夹|目录|open folder|workspace|working directory|cwd|plus|添加文件|attach|attachment|upload|上传|麦克风|voice|dictat/i;
   const SIDEBAR_HINT_RE =
@@ -52,6 +441,8 @@ author: Codex++ Community
   const PLUS_OR_ACCESS_RE =
     /^\+|plus|添加|添加文件|attach|attachment|upload|上传|访问权限|permission|full access|完全访问|只读|read only|read-only/i;
   const FOLDER_OR_PATH_RE = /文件夹|目录|folder|workspace|working directory|cwd|\\[a-z]|\/[a-z]|[a-z]:\\/i;
+  const FOREIGN_PROMPT_TOOL_RE = /增强提示词|提示词增强|prompt\s*(enhance|enhancer|enhancement)|optimize\s*prompt|优化提示词/i;
+  const FOREIGN_PROMPT_EXT_RE = /prompt-enhancer|prompt-enhancement|prompt-optimizer|prompt-optimize/i;
 
   const previous = window[API_KEY];
   // A loaded script can be evaluated more than once by Codex++ without an
@@ -140,6 +531,10 @@ author: Codex++ Community
     bridgePathUnsupported: false,
     lastWrittenText: null,
     writeToken: 0,
+    fallbackHideTimer: 0,
+    placementSettleTimer: 0,
+    resizeFrame: 0,
+    lastAnchorElement: null,
   };
 
   /** @type {Record<string, {originalText: string|null, optimizedText: string|null, mode: "idle"|"optimized"}>} */
@@ -235,9 +630,9 @@ author: Codex++ Community
     } catch (_) {
       throw new Error("Base URL 格式无效");
     }
-    if (parsed.protocol !== "https:") throw new Error("Base URL 必须使用 HTTPS");
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("Base URL 须为 HTTP(S)");
     if (parsed.username || parsed.password) throw new Error("Base URL 不得包含用户名或密码");
-    if (isBlockedHostname(parsed.hostname)) throw new Error("Base URL 不得指向本机或私有网络");
+    
     return raw;
   }
 
@@ -337,6 +732,26 @@ author: Codex++ Community
     return false;
   }
 
+  function isForeignPromptToolControl(node) {
+    if (!(node instanceof Element)) return false;
+    const label = elementLabel(node);
+    if (node.closest?.(`[${BUTTON_ATTR}], [${PANEL_ATTR}]`)) return false;
+    if (FOREIGN_PROMPT_TOOL_RE.test(label)) return true;
+    let current = node;
+    for (let i = 0; current instanceof Element && current !== document.body && i < 6; current = current.parentElement, i += 1) {
+      const ext = String(
+        current.getAttribute?.("data-codex-plus-ext") ||
+        current.getAttribute?.("data-codex-plus-extension") ||
+        current.getAttribute?.("data-extension") ||
+        "",
+      );
+      if (FOREIGN_PROMPT_EXT_RE.test(ext)) return true;
+      const testId = String(current.getAttribute?.("data-testid") || current.getAttribute?.("data-test-id") || "");
+      if (FOREIGN_PROMPT_EXT_RE.test(testId)) return true;
+    }
+    return false;
+  }
+
   function isSendControl(node) {
     if (!(node instanceof Element) || !isVisible(node) || isInSidebar(node)) return false;
     if (node.closest?.(`[${BUTTON_ATTR}], [${PANEL_ATTR}]`)) return false;
@@ -372,6 +787,7 @@ author: Codex++ Community
     if (isInSidebar(node)) return false;
     if (node.closest?.(`[${BUTTON_ATTR}]`)) return false;
     if (node.matches?.(`[${BUTTON_ATTR}]`) || node.querySelector?.(`[${BUTTON_ATTR}]`)) return false;
+    if (isForeignPromptToolControl(node)) return false;
     if (isReasoningControl(node)) return false;
     if (isSendControl(node) || isPlusOrAccessControl(node) || isFolderOrPathControl(node)) return false;
     const label = elementLabel(node);
@@ -394,6 +810,7 @@ author: Codex++ Community
     if (!(node instanceof Element) || !isVisible(node)) return -1;
     if (isInSidebar(node)) return -1;
     if (node.closest?.(`[${PANEL_ATTR}], [${BUTTON_ATTR}]`)) return -1;
+    if (isForeignPromptToolControl(node)) return -1;
     if (isSendControl(node) || isPlusOrAccessControl(node) || isFolderOrPathControl(node)) return -1;
     let score = 0;
     const label = elementLabel(node);
@@ -1029,6 +1446,7 @@ author: Codex++ Community
     host = document.createElement("div");
     host.setAttribute(FLOAT_HOST_ATTR, "true");
     host.dataset.owner = OWNER_TOKEN;
+    host.dataset.hidden = "true";
     host.style.cssText = [
       "position:fixed",
       "left:auto",
@@ -1040,22 +1458,92 @@ author: Codex++ Community
       "align-items:center",
       "gap:6px",
       "pointer-events:auto",
+      "transition:none",
     ].join(";");
     document.documentElement.appendChild(host);
     return host;
   }
 
-  function placeButtonInFallbackHost(button) {
-    const host = ensureFloatingHost();
+  function setFloatingHostAnchor(host, left, top) {
+    host.dataset.placementMode = "anchor";
+    host.style.transition = "none";
+    host.style.right = "auto";
+    host.style.bottom = "auto";
+    host.style.left = `${Math.round(left)}px`;
+    host.style.top = `${Math.round(top)}px`;
+    delete host.dataset.hidden;
+  }
+
+  function setFloatingHostFallback(host) {
+    host.dataset.placementMode = "fallback";
+    host.style.transition = "none";
     host.style.left = "auto";
     host.style.top = "auto";
     host.style.right = "18px";
     host.style.bottom = "18px";
-    runtime.anchor = null;
+    delete host.dataset.hidden;
+  }
+
+  function placeButtonInFallbackHost(button) {
+    const host = ensureFloatingHost();
+    setFloatingHostFallback(host);
     button.style.margin = "";
     button.dataset.placement = "float";
     if (button.parentElement !== host) host.appendChild(button);
     return host;
+  }
+
+  function placeButtonHiddenInHost(button) {
+    const host = ensureFloatingHost();
+    host.dataset.hidden = "true";
+    host.dataset.placementMode = "pending";
+    host.style.transition = "none";
+    if (button.parentElement !== host) host.appendChild(button);
+    return host;
+  }
+
+  function placementNeedsSettle(button, buttonHost, currentStrategy) {
+    if (!(button instanceof HTMLElement)) return true;
+    if (button.dataset.placement === "float") return true;
+    if (!buttonHost?.isConnected) return true;
+    if (buttonHost.dataset.placementMode !== "anchor") return true;
+    if (buttonHost.dataset.settleStrategy !== currentStrategy) return true;
+    return false;
+  }
+
+  function findInitialModelAnchor() {
+    const inlineFound = findInlineContextGroup();
+    if (inlineFound && placementLooksValid(inlineFound)) return inlineFound;
+    const robustFound = findRobustModelAnchor(document, true);
+    if (robustFound && placementLooksValid(robustFound)) return robustFound;
+    return null;
+  }
+
+  function hideHostForReanchor() {
+    const host = document.querySelector(`[${FLOAT_HOST_ATTR}]`);
+    if (!(host instanceof HTMLElement)) return null;
+    host.dataset.hidden = "true";
+    host.style.transition = "none";
+    return host;
+  }
+
+  function currentAnchorStillValid() {
+    const anchor = runtime.lastAnchorElement;
+    if (!(anchor instanceof HTMLElement) || !anchor.isConnected) return false;
+    if (!isVisible(anchor)) return false;
+    if (isInSidebar(anchor)) return false;
+    const rect = anchor.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function scheduleFallbackReveal(button, host) {
+    runtime.fallbackHideTimer = window.clearTimeout(runtime.fallbackHideTimer);
+    runtime.fallbackHideTimer = window.setTimeout(() => {
+      if (runtime.disposed || button?.dataset?.placement !== "float") return;
+      const lateAnchor = findInitialModelAnchor();
+      if (lateAnchor && anchorButtonToModel(button, lateAnchor.modelItem, lateAnchor.strategy)) return;
+      delete host.dataset.hidden;
+    }, PLACEMENT_SETTLE_MS);
   }
 
   function anchorButtonToModel(button, modelItem, strategy) {
@@ -1472,6 +1960,14 @@ author: Codex++ Community
       [${TOAST_ATTR}][data-kind="error"] { border-color: rgba(248,113,113,.45); color: #fecaca; }
       [${TOAST_ATTR}][data-kind="warn"] { border-color: rgba(251,191,36,.4); color: #fde68a; }
       [${TOAST_ATTR}][data-kind="ok"] { border-color: rgba(52,211,153,.4); color: #a7f3d0; }
+      [${FLOAT_HOST_ATTR}][data-hidden="true"] {
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+      [${FLOAT_HOST_ATTR}][data-placement-mode="anchor"] {
+        transition: none !important;
+      }
       [${PANEL_ATTR}] {
         position: fixed;
         inset: 0;
@@ -1644,8 +2140,15 @@ author: Codex++ Community
   function placementLooksValid(found) {
     if (!found?.group || !found.modelItem) return false;
     if (isInSidebar(found.group) || isInSidebar(found.modelItem)) return false;
-    if (isFolderOrPathControl(found.modelItem) || isPlusOrAccessControl(found.modelItem)) return false;
-    if (isSendControl(found.modelItem)) return false;
+    // New-chat floating composer combines the model/reasoning selector and the
+    // send affordance in one control. Only this explicit navigation target may
+    // bypass the generic send rejection; ordinary send buttons still fail.
+    const navigationTarget = String(found.modelItem.getAttribute?.("data-composer-navigation-target") || "");
+    const combinedModelSend =
+      found.strategy === "robust-model-detect" &&
+      (navigationTarget === "reasoning" || navigationTarget === "model");
+    if (!combinedModelSend && (isFolderOrPathControl(found.modelItem) || isPlusOrAccessControl(found.modelItem))) return false;
+    if (!combinedModelSend && isSendControl(found.modelItem)) return false;
     const modelRect = found.modelItem.getBoundingClientRect?.();
     if (!modelRect || modelRect.width <= 0 || modelRect.height <= 0) return false;
     // Near the editor / bottom band — use ProseMirror if available for a softer check.
@@ -1661,25 +2164,380 @@ author: Codex++ Community
     const send = found.send || (found.row ? findSendButton(found.row) : null);
     if (send) {
       const sRect = send.getBoundingClientRect();
-      if (modelRect.left >= sRect.left - 1) return false;
-      if (found.modelItem === send || found.modelItem.contains(send) || send.contains(found.modelItem)) return false;
+      if (!combinedModelSend && modelRect.left >= sRect.left - 1) return false;
+      if (!combinedModelSend && (found.modelItem === send || found.modelItem.contains(send) || send.contains(found.modelItem))) return false;
     }
     return true;
   }
 
+  /* ===== robust model selector detection start ===== */
+  const MODEL_DETECT_DEBUG_KEY = "codexPlusPromptOptimize.debugModelDetect";
+  let lastModelDetectReport = { candidates: [], selected: null };
+
+  function modelDetectLog(label, ...args) {
+    try {
+      if (localStorage.getItem(MODEL_DETECT_DEBUG_KEY) !== "1") return;
+    } catch (_) {
+      return;
+    }
+    console.log("[model-detect]", label, ...args);
+  }
+
+  function robustDebugEnabled() {
+    try {
+      return (
+        localStorage.getItem(MODEL_DETECT_DEBUG_KEY) === "1" ||
+        localStorage.getItem("codexPlusPromptOptimize.debug") === "1" ||
+        !!window.__CODEX_PLUS_PROMPT_OPTIMIZE_DEBUG__
+      );
+    } catch (_) {
+      return !!window.__CODEX_PLUS_PROMPT_OPTIMIZE_DEBUG__;
+    }
+  }
+
+  function rmdBrief(el) {
+    if (!(el instanceof Element)) return null;
+    const rect = el.getBoundingClientRect();
+    const attrs = {};
+    for (const attr of Array.from(el.attributes || [])) {
+      if (/^(data-|aria-|role$|title$|id$)/i.test(attr.name)) attrs[attr.name] = attr.value;
+    }
+    return {
+      tag: String(el.tagName || "").toLowerCase(),
+      text: collapseWs(elementLabel(el)).slice(0, 240),
+      className: classNameText(el).slice(0, 240),
+      id: el.id || "",
+      attrs,
+      visible: isVisible(el),
+      interactive: rmdInteractive(el),
+      rect: {
+        left: Math.round(rect.left),
+        top: Math.round(rect.top),
+        right: Math.round(rect.right),
+        bottom: Math.round(rect.bottom),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+      },
+    };
+  }
+
+  function rmdInteractive(el) {
+    if (!(el instanceof Element) || el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+    const tag = String(el.tagName || "").toLowerCase();
+    const role = String(el.getAttribute("role") || "").toLowerCase();
+    return (
+      tag === "button" ||
+      tag === "select" ||
+      el.hasAttribute("aria-haspopup") ||
+      el.hasAttribute("aria-expanded") ||
+      el.hasAttribute("data-composer-navigation-target") ||
+      el.hasAttribute("tabindex") ||
+      /(button|combobox|menuitem|option)/.test(role)
+    );
+  }
+
+  function rmdExcludedRegion(el) {
+    let node = el;
+    for (let i = 0; node instanceof Element && node !== document.body && i < 8; node = node.parentElement, i += 1) {
+      const tag = String(node.tagName || "").toLowerCase();
+      const role = String(node.getAttribute("role") || "").toLowerCase();
+      const sig = `${classNameText(node)} ${node.id || ""} ${node.getAttribute("data-testid") || ""} ${role}`;
+      if (tag === "nav" || tag === "aside") return true;
+      if (/(sidebar|side-bar|settings|modal|dialog)/i.test(sig)) return true;
+      if (role === "listbox" || role === "dialog") return true;
+      if (node.closest?.(`[${BUTTON_ATTR}]`) || node.matches?.(`[${BUTTON_ATTR}]`)) return true;
+      if (node.closest?.(`[${PANEL_ATTR}]`) || node.matches?.(`[${PANEL_ATTR}]`)) return true;
+    }
+    return false;
+  }
+
+  function rmdFindSend(el) {
+    let node = el;
+    for (let i = 0; node instanceof Element && node !== document.body && i < 8; node = node.parentElement, i += 1) {
+      const send = findSendButton(node);
+      if (send) return send;
+    }
+    return null;
+  }
+
+  function rmdAnchorEl(el) {
+    let node = el;
+    for (let i = 0; node instanceof Element && i < 5; node = node.parentElement, i += 1) {
+      const role = String(node.getAttribute("role") || "").toLowerCase();
+      if (
+        node.matches?.("button, select, [role='button'], [role='combobox']") ||
+        node.hasAttribute("aria-haspopup") ||
+        node.hasAttribute("aria-expanded") ||
+        node.hasAttribute("data-composer-navigation-target") ||
+        role === "button" ||
+        role === "combobox"
+      ) {
+        return node;
+      }
+    }
+    return el;
+  }
+
+  function rmdCollect(root) {
+    const scope = root?.querySelectorAll ? root : document;
+    const nodes = Array.from(
+      scope.querySelectorAll(
+        "button, select, [role='button'], [role='combobox'], [aria-haspopup], [aria-expanded], [data-composer-navigation-target], [aria-label], [title], [data-testid]",
+      ),
+    );
+    const seen = new Set();
+    const out = [];
+    for (let index = 0; index < nodes.length; index += 1) {
+      const el = rmdAnchorEl(nodes[index]);
+      if (!(el instanceof Element) || seen.has(el)) continue;
+      seen.add(el);
+      out.push({ el, index });
+    }
+    return out;
+  }
+
+  function rmdScore(el, index) {
+    const report = {
+      index,
+      el,
+      brief: rmdBrief(el),
+      score: 0,
+      priority: 10,
+      keep: true,
+      reasons: [],
+    };
+    const add = (score, why) => {
+      report.score += score;
+      report.reasons.push(`${score >= 0 ? "+" : ""}${score} ${why}`);
+    };
+    const drop = (why) => {
+      report.keep = false;
+      report.reasons.push(`排除: ${why}`);
+    };
+
+    const label = collapseWs(elementLabel(el));
+    const target = String(el.getAttribute("data-composer-navigation-target") || "").toLowerCase();
+    const role = String(el.getAttribute("role") || "").toLowerCase();
+    const modelIntent = /(模型|model|选择模型|切换模型|ai\s*model)/i.test(label);
+    const modelName = /(gpt|chatgpt|o[1-9]|codex|claude|sonnet|opus|haiku|gemini|grok|deepseek|step[-\s]?fun|step[-_]?5|glm|qwen|llama|mistral|kimi|doubao|ernie|hunyuan|minimax|mimo|flash|pro|preview)/i.test(label);
+    const reasoningOnly = /(推理强度|reasoning\s*effort|thinking\s*effort|effort)/i.test(label) && !modelIntent && !modelName;
+    const combo = role === "combobox" || el.hasAttribute("aria-haspopup") || el.hasAttribute("aria-expanded") || /(button|combobox|menuitem)/.test(role);
+    const rect = el.getBoundingClientRect();
+
+    if (!isVisible(el)) {
+      drop("候选不可见");
+      return report;
+    }
+    if (!rmdInteractive(el)) {
+      drop("候选缺少可交互特征");
+      return report;
+    }
+    // The floating composer puts the send button inside the same button as the
+    // model/reasoning chip. In that layout this generic predicate calls the
+    // real selector a "send control". A specific model/reasoning target must
+    // win over the generic send heuristic.
+    const isSpecificNavigationTarget =
+      target === "model" || target === "reasoning" || modelIntent || (modelName && combo);
+    if (!isSpecificNavigationTarget && (isSendControl(el) || isPlusOrAccessControl(el) || isFolderOrPathControl(el))) {
+      drop("候选是发送/附件/路径控件");
+      return report;
+    }
+    if (el.closest?.(`[${BUTTON_ATTR}]`) || el.matches?.(`[${BUTTON_ATTR}]`)) {
+      drop("候选是提示词插件按钮");
+      return report;
+    }
+    if (isForeignPromptToolControl(el)) {
+      drop("候选是其他提示词增强插件按钮");
+      return report;
+    }
+    if (rmdExcludedRegion(el)) {
+      drop("候选位于侧栏/设置/弹窗区域");
+      return report;
+    }
+    if (!(target === "model" || target === "reasoning" || modelIntent || modelName)) {
+      drop("缺少模型相关信号");
+      return report;
+    }
+
+    if (target === "model") {
+      add(600, "data-composer-navigation-target=model");
+      report.priority = 100;
+    } else if (target === "reasoning" && (modelName || modelIntent)) {
+      add(220, "reasoning 候选带模型文案");
+      report.priority = 80;
+    } else if (modelIntent && combo) {
+      add(240, "文案含模型且具备下拉特征");
+      report.priority = 90;
+    } else if (modelName && combo) {
+      add(160, "文案含模型名且具备下拉特征");
+      report.priority = 70;
+    } else {
+      add(120, "弱模型语义");
+      report.priority = 60;
+    }
+
+    if (modelIntent) add(240, "文案含模型语义");
+    if (modelName) add(160, "文案含模型名");
+    if (combo) add(120, "combobox/haspopup/button 信号");
+    if (reasoningOnly) {
+      add(-260, "仅推理强度文案，缺少模型名");
+      report.priority = 20;
+    }
+    if (rect.bottom >= window.innerHeight * 0.45) add(100, "位于底部 composer 区域");
+    if (rmdFindSend(el)) add(120, "同区域存在发送按钮");
+    if (/\b(chevron|caret|arrow|down)\b/i.test(`${classNameText(el)} ${String(el.innerHTML || "").slice(0, 400)}`)) {
+      add(40, "包含下拉箭头特征");
+    }
+
+    if (report.score < 320) drop(`分数不足: ${report.score}`);
+    return report;
+  }
+
+  function findRobustModelAnchor(root, silent = false) {
+    const raw = rmdCollect(root || document);
+    const reports = raw.map(({ el, index }) => rmdScore(el, index));
+    const valid = reports
+      .filter((report) => report.keep)
+      .sort((a, b) => b.priority - a.priority || b.score - a.score || a.index - b.index);
+    const selected = valid[0] || null;
+    const send = selected ? rmdFindSend(selected.el) : null;
+    const row = selected ? selected.el.parentElement : null;
+    const found = selected
+      ? {
+          group: row,
+          modelItem: selected.el,
+          row,
+          send,
+          strategy: "robust-model-detect",
+          score: selected.score,
+          priority: selected.priority,
+          reason: selected.reasons.join("; "),
+        }
+      : null;
+
+    lastModelDetectReport = {
+      candidates: reports.map((report) => ({
+        index: report.index,
+        keep: report.keep,
+        score: report.score,
+        priority: report.priority,
+        reasons: report.reasons,
+        brief: report.brief,
+      })),
+      selected: selected
+        ? {
+            index: selected.index,
+            score: selected.score,
+            priority: selected.priority,
+            reasons: selected.reasons,
+            brief: selected.brief,
+            strategy: found.strategy,
+          }
+        : null,
+    };
+
+    if (!silent) {
+      modelDetectLog("候选评分", lastModelDetectReport.candidates);
+      modelDetectLog("选中候选", lastModelDetectReport.selected);
+    }
+    return found;
+  }
+
+  window.__codexppModelDetect = {
+    scan() {
+      return findRobustModelAnchor(document, false);
+    },
+    validate(found) {
+      return placementLooksValid(found);
+    },
+    report() {
+      return lastModelDetectReport;
+    },
+    enableDebug() {
+      try {
+        localStorage.setItem(MODEL_DETECT_DEBUG_KEY, "1");
+      } catch (_) {
+        /* ignore */
+      }
+      return "enabled";
+    },
+    disableDebug() {
+      try {
+        localStorage.removeItem(MODEL_DETECT_DEBUG_KEY);
+      } catch (_) {
+        /* ignore */
+      }
+      return "disabled";
+    },
+  };
+
+  /* ===== robust model selector detection end ===== */
+
   function ensureSparkleButton() {
     if (runtime.disposed) return;
     let button = document.querySelector(`[${BUTTON_ATTR}]`);
-    const found = findInlineContextGroup();
+    const previousPlacement = button?.dataset?.placement || null;
+    if (!currentAnchorStillValid()) hideHostForReanchor();
+    let found = null;
     button = document.querySelector(`[${BUTTON_ATTR}]`);
-    const valid = placementLooksValid(found);
+    let currentStrategy = null;
+
+    // First paint can happen before the SPA composer is mounted. Keep the
+    // control in a hidden fixed host until a real anchor validates, so users
+    // never see it flash at the bottom-right fallback position.
+    if (!button) {
+      button = createButton();
+      placeButtonHiddenInHost(button);
+    }
+
+    found = findInitialModelAnchor();
+    currentStrategy = found?.strategy || null;
+    let valid = placementLooksValid(found);
+
+    // Only repair the new-chat fallback placement. Old conversations keep the
+    // original composer-action-row logic and must not be repositioned here.
+    if (!valid && (button?.dataset.placement === "float" || !button)) {
+      const robustFound = findRobustModelAnchor(document, false);
+      if (robustFound && placementLooksValid(robustFound)) {
+        found = robustFound;
+        currentStrategy = found.strategy;
+        valid = true;
+        debugLog("robust model selector recovered float placement", {
+          strategy: found.strategy,
+          modelLabel: elementLabel(found.modelItem).slice(0, 60),
+          score: found.score,
+          priority: found.priority,
+          reason: found.reason,
+        });
+      } else {
+        debugLog("robust model selector rejected by placement validation", {
+          robustFound: !!robustFound,
+          target: robustFound?.modelItem?.getAttribute?.("data-composer-navigation-target") || null,
+          label: robustFound ? elementLabel(robustFound.modelItem).slice(0, 60) : null,
+        });
+      }
+    } else if (!valid && robustDebugEnabled()) {
+      const robustFound = findRobustModelAnchor(document, true);
+      debugLog("robust model selector not applied", {
+        placement: button?.dataset?.placement || null,
+        inlineFound: !!found,
+        robustFound: !!robustFound,
+        robustAccepted: !!robustFound && placementLooksValid(robustFound),
+      });
+    }
 
     if (!valid) {
       if (!(button instanceof HTMLElement) || button.dataset.version !== SCRIPT_VERSION || button.dataset.owner !== OWNER_TOKEN) {
         button?.remove();
         button = createButton();
       }
-      placeButtonInFallbackHost(button);
+      const host = placeButtonInFallbackHost(button);
+      if (previousPlacement !== "float") {
+        host.dataset.hidden = "true";
+        scheduleFallbackReveal(button, host);
+      } else {
+        delete host.dataset.hidden;
+      }
       refreshButtonAppearance(button);
       bindComposerInputWatch();
       debugLog("placement=float", {
@@ -1703,7 +2561,36 @@ author: Codex++ Community
       debugLog("refuse insert: modelItem is send");
       return;
     }
-    if (!anchorButtonToModel(button, modelItem, strategy)) placeButtonInFallbackHost(button);
+    if (!anchorButtonToModel(button, modelItem, strategy)) {
+      const host = placeButtonInFallbackHost(button);
+      host.dataset.hidden = "true";
+      scheduleFallbackReveal(button, host);
+    } else {
+      runtime.fallbackHideTimer = window.clearTimeout(runtime.fallbackHideTimer);
+      const host = document.querySelector(`[${FLOAT_HOST_ATTR}]`);
+      if (host instanceof HTMLElement) delete host.dataset.hidden;
+    }
+    runtime.lastAnchorElement = modelItem;
+
+    // Anchor geometry can be stale during composer mount. Re-run once without
+    // allowing an intermediate fallback paint.
+    const hostAfterAnchor = document.querySelector(`[${FLOAT_HOST_ATTR}]`);
+    if (placementNeedsSettle(button, hostAfterAnchor, currentStrategy)) {
+      runtime.placementSettleTimer = window.clearTimeout(runtime.placementSettleTimer);
+      runtime.placementSettleTimer = window.setTimeout(() => {
+        if (runtime.disposed) return;
+        try {
+          const recheck = findInitialModelAnchor();
+          if (!recheck?.modelItem) return;
+          const recheckHost = document.querySelector(`[${FLOAT_HOST_ATTR}]`);
+          if (recheckHost instanceof HTMLElement) recheckHost.dataset.hidden = "true";
+          if (!anchorButtonToModel(button, recheck.modelItem, recheck.strategy)) return;
+          if (recheckHost instanceof HTMLElement) delete recheckHost.dataset.hidden;
+        } catch (_) {
+          /* ignore */
+        }
+      }, PLACEMENT_SETTLE_MS);
+    }
 
     refreshButtonAppearance(button);
     bindComposerInputWatch();
@@ -2040,8 +2927,9 @@ author: Codex++ Community
     return stripWholeFence(text);
   }
 
-  async function optimizePrompt(userText, settings, signal) {
-    const system = settings.systemPrompts?.[settings.style] || DEFAULT_SYSTEM_PROMPTS[settings.style] || DEFAULT_SYSTEM_PROMPTS.structured;
+  async function optimizePrompt(userText, settings, signal, contextMessages = []) {
+    const baseSystem = settings.systemPrompts?.[settings.style] || DEFAULT_SYSTEM_PROMPTS[settings.style] || DEFAULT_SYSTEM_PROMPTS.structured;
+    const system = `${baseSystem}${formatConversationContext(contextMessages)}`;
     if (settings.protocol === "anthropic") {
       return callAnthropic({
         baseUrl: settings.baseUrl,
@@ -2101,6 +2989,7 @@ author: Codex++ Community
     }
     const input = findComposerInput();
     const original = normalizeText(readComposerText(input));
+    const contextMessages = collectConversationContext({ excludeEditor: input });
     if (!original.trim()) {
       showToast("请先输入内容", "warn");
       return;
@@ -2124,17 +3013,17 @@ author: Codex++ Community
     refreshButtonAppearance();
     showToast("正在优化，可再次点击取消", "info");
     const slowNoticeTimer = window.setTimeout(() => {
-      if (runtime.loading) showToast("仍在等待 gpt-5.5 响应，可再次点击取消", "info");
+      if (runtime.loading) showToast(`仍在等待 ${settings.model} 响应，可再次点击取消`, "info");
     }, SLOW_REQUEST_NOTICE_MS);
     const verySlowNoticeTimer = window.setTimeout(() => {
-      if (runtime.loading) showToast("gpt-5.5 响应较慢，仍可再次点击取消", "info");
+      if (runtime.loading) showToast(`${settings.model} 响应较慢，仍可再次点击取消`, "info");
     }, VERY_SLOW_REQUEST_NOTICE_MS);
     const longRequestNoticeTimer = window.setTimeout(() => {
       if (runtime.loading) showToast("请求仍未完成，正在等待上游返回", "info");
     }, LONG_REQUEST_NOTICE_MS);
 
     try {
-      const optimized = await optimizePrompt(original, settings, timeout.signal);
+      const optimized = await optimizePrompt(original, settings, timeout.signal, contextMessages);
       if (!optimized.trim()) throw new Error("模型返回为空");
       const activeInput = findComposerInput();
       if (readActiveConversationId() !== threadId || activeInput !== input || !input?.isConnected) {
@@ -2160,10 +3049,18 @@ author: Codex++ Community
       if (userCancelled) {
         showToast("已取消本次优化，原输入未改动", "info");
       } else if (timeout.didTimeout() || error?.name === "AbortError") {
-        showToast("优化超时", "error");
+        showToast(`${settings.model} 响应超时（${REQUEST_TIMEOUT_MS / 1000}s），模型可能需要更长推理时间`, "error");
+      } else if (/error sending request|connect|ECONNREFUSED|network/i.test(error?.message || "")) {
+        showToast(`${settings.model} 网络连接失败，请检查 API 地址与网络`, "error");
+      } else if (/HTTP 40[13]|401|403/i.test(error?.message || "")) {
+        showToast(`${settings.model} 鉴权失败（HTTP ${/HTTP (\d+)/.exec(error?.message || "")?.[1] || "40x"}），请检查 API Key`, "error");
+      } else if (/HTTP 429/i.test(error?.message || "")) {
+        showToast(`${settings.model} 请求频率受限（HTTP 429），请稍后重试`, "error");
+      } else if (/模型返回为空|无法解析|invalid JSON|not valid JSON/i.test(error?.message || "")) {
+        showToast(`${settings.model} 返回格式异常，请确认模型支持 Chat Completions 接口`, "error");
       } else {
         const message = collapseWs(error?.message || String(error) || "优化失败");
-        showToast(message.slice(0, 160) || "优化失败", "error");
+        showToast(message.slice(0, 160) || `${settings.model} 调用失败`, "error");
       }
     } finally {
       window.clearTimeout(slowNoticeTimer);
@@ -2421,7 +3318,14 @@ author: Codex++ Community
     runtime.observer = new MutationObserver(() => scheduleEnsure());
     runtime.observer.observe(document.documentElement, { childList: true, subtree: true });
     if (!runtime.resizeHandler) {
-      runtime.resizeHandler = () => scheduleEnsure();
+      runtime.resizeHandler = () => {
+        if (!currentAnchorStillValid()) hideHostForReanchor();
+        if (runtime.resizeFrame) window.cancelAnimationFrame(runtime.resizeFrame);
+        runtime.resizeFrame = window.requestAnimationFrame(() => {
+          runtime.resizeFrame = 0;
+          scheduleEnsure();
+        });
+      };
       window.addEventListener("resize", runtime.resizeHandler);
     }
     if (runtime.pollId) window.clearInterval(runtime.pollId);
@@ -2460,6 +3364,18 @@ author: Codex++ Community
       runtime.repositionFrame = 0;
     }
     runtime.anchor = null;
+    if (runtime.fallbackHideTimer) {
+      window.clearTimeout(runtime.fallbackHideTimer);
+      runtime.fallbackHideTimer = 0;
+    }
+    if (runtime.placementSettleTimer) {
+      window.clearTimeout(runtime.placementSettleTimer);
+      runtime.placementSettleTimer = 0;
+    }
+    if (runtime.resizeFrame) {
+      window.cancelAnimationFrame(runtime.resizeFrame);
+      runtime.resizeFrame = 0;
+    }
     if (runtime.toastTimer) {
       window.clearTimeout(runtime.toastTimer);
       runtime.toastTimer = 0;
@@ -2655,6 +3571,26 @@ author: Codex++ Community
       const input = String(text || "");
       if (!input.trim()) throw new Error("empty text");
       return optimizePrompt(input, settings, options.signal || null);
+    },
+    modelDetect: {
+      scan: () => findRobustModelAnchor(document, false),
+      report: () => lastModelDetectReport,
+      enableDebug: () => {
+        try {
+          localStorage.setItem(MODEL_DETECT_DEBUG_KEY, "1");
+        } catch (_) {
+          /* ignore */
+        }
+        return "enabled";
+      },
+      disableDebug: () => {
+        try {
+          localStorage.removeItem(MODEL_DETECT_DEBUG_KEY);
+        } catch (_) {
+          /* ignore */
+        }
+        return "disabled";
+      },
     },
     debug(enabled = true) {
       try {

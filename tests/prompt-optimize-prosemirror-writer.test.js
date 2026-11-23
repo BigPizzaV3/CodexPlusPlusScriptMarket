@@ -234,7 +234,7 @@ test("market index lists the released script version and checksum", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "index.json"), "utf8"));
   const entry = manifest.scripts.find((script) => script.id === "prompt-optimize");
 
-  assert.equal(entry.version, "1.0.5");
+  assert.equal(entry.version, "1.0.6");
   assert.equal(entry.sha256, require("node:crypto").createHash("sha256").update(source).digest("hex"));
 });
 
@@ -243,7 +243,7 @@ test("anchor revision repositions after a resize without leaving a global listen
 
   assert.match(source, /window\.addEventListener\("resize", runtime\.resizeHandler\)/);
   assert.match(source, /window\.removeEventListener\("resize", runtime\.resizeHandler\)/);
-  assert.match(source, /runtime\.resizeHandler = \(\) => scheduleEnsure\(\)/);
+  assert.match(source, /runtime\.resizeHandler = \(\) => \{[\s\S]*?scheduleEnsure\(\);[\s\S]*?\};/);
   assert.match(source, /function anchorButtonToModel\(button, modelItem, strategy\)/);
   assert.match(source, /const nextLeft = `\$\{left\}px`/);
   assert.match(source, /const nextTop = `\$\{Math\.round\(modelRect\.top \+ \(modelRect\.height - height\) \/ 2\)\}px`/);
@@ -526,13 +526,13 @@ test("upstream error messages redact bearer tokens before display", () => {
 test("optimization uses a bounded timeout and gives immediate plus slow-request feedback", () => {
   const source = fs.readFileSync(scriptPath, "utf8");
 
-  assert.match(source, /const REQUEST_TIMEOUT_MS = 120000/);
+  assert.match(source, /const REQUEST_TIMEOUT_MS = 300000/);
   assert.match(source, /const SLOW_REQUEST_NOTICE_MS = 15000/);
   assert.match(source, /const VERY_SLOW_REQUEST_NOTICE_MS = 45000/);
   assert.match(source, /const LONG_REQUEST_NOTICE_MS = 90000/);
   assert.match(source, /runtime\.loading = true;\s+refreshButtonAppearance\(\);\s+showToast\("正在优化，可再次点击取消", "info"\);/);
-  assert.match(source, /仍在等待 gpt-5\.5 响应，可再次点击取消/);
-  assert.match(source, /gpt-5\.5 响应较慢，仍可再次点击取消/);
+  assert.match(source, /仍在等待 \$\{settings\.model\} 响应，可再次点击取消/);
+  assert.match(source, /\$\{settings\.model\} 响应较慢，仍可再次点击取消/);
 });
 
 test("write verification rechecks the current composer after ProseMirror replaces the node", () => {

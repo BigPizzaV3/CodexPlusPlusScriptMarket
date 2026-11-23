@@ -49,6 +49,397 @@ User input is in Chinese → Response must be in Chinese.
 GOOD OUTPUT EXAMPLE:
 
 请解释这段代码的主要功能、执行流程和关键逻辑，并指出可能需要注意事项的边界情况。`;
+
+  const CONTEXT_MAX_MESSAGES = 8;
+  const CONTEXT_MAX_TOKENS = 128000;
+  const CONTEXT_MAX_CHARS = 512000; // safety guard; token budget is the real limit
+  const CONTEXT_LAST_KEY = "codexPlusPromptContext.last";
+  const CONTEXT_CANDIDATE_TAGS = /^(ARTICLE|SECTION|DIV|P|LI|PRE)$/i;
+  const CONTEXT_EXPLICIT_ROLE_ATTRS = [
+    "data-message-role",
+    "data-role",
+    "data-chat-role",
+    "data-author-role",
+    "role",
+    "aria-label",
+    "title",
+    "data-testid",
+    "data-test-id",
+    "class",
+  ];
+  const CONTEXT_MESSAGE_HINT_RE = /message|chat-?turn|conversation-?turn|assistant|user-?message|response|reply|whitespace-pre-wrap|prose|markdown|thread-content/i;
+  const CONTEXT_EXCLUDE_RE = /tool|function|reasoning|thinking|analysis|system|debug|notice|toast|settings|composer|prompt-(optimize|enhance|enhancer)|model-selector|token-button|sidebar|thread-list|nav-section/i;
+  const CONTEXT_NOISE_RE = /^(?:send|stop|发送|停止|run|执行|new chat|新对话|思考中|thinking|reasoning|working|分析|已取消|cancelled|ok|test|测试连接|保存配置|设置|取消)$/i;
+
+  function estimateContextTokens(value) {
+    const text = String(value || "");
+    let units = 0;
+    for (let i = 0; i < text.length; i += 1) {
+      const cp = text.codePointAt(i);
+      if (cp > 0xffff) {
+        units += 2;
+        i += 1;
+      } else if (cp <= 0x7f) {
+        units += 0.25; // ASCII roughly 4 chars/token
+      } else if (
+        (cp >= 0x3400 && cp <= 0x9fff) ||
+        (cp >= 0x3000 && cp <= 0x303f) ||
+        (cp >= 0xff00 && cp <= 0xffef)
+      ) {
+        units += 1.5; // Chinese/full-width roughly 0.6-1 token/char
+      } else {
+        units += 0.75;
+      }
+    }
+    return Math.max(1, Math.ceil(units));
+  }
+
+  function truncateContextToBudget(text, maxTokens, maxChars) {
+    const full = String(text || "");
+    if (!full) return "";
+    if (estimateContextTokens(full) <= maxTokens && full.length <= maxChars) return full;
+    const hardMax = Math.min(full.length, maxChars);
+    let low = 0;
+    let high = hardMax;
+    let best = 0;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      if (estimateContextTokens(full.slice(full.length - mid)) <= maxTokens) {
+        best = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    if (best <= 0) return "";
+    return `…[token-budget-truncated]\n${full.slice(full.length - best).trimStart()}`;
+  }
+
+  function contextNodeText(node) {
+    if (!(node instanceof HTMLElement)) return "";
+    let value = "";
+    if (node instanceof HTMLTextAreaElement || node instanceof HTMLInputElement) {
+      value = node.value || "";
+    } else {
+      const clone = node.cloneNode(true);
+      clone
+        .querySelectorAll(
+          "button, input, textarea, select, [data-codex-plus-ext], [data-axpe], [data-codex-prompt-optimize-panel], [data-codex-prompt-optimize-toast], [data-codex-prompt-optimize-float], script, style, svg",
+        )
+        .forEach((el) => el.remove());
+      value = clone.innerText || clone.textContent || "";
+    }
+    return String(value || "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function contextDomPath(node) {
+    if (!(node instanceof Element)) return "";
+    const parts = [];
+    let cur = node;
+    for (let i = 0; cur instanceof Element && i < 6; i += 1, cur = cur.parentElement) {
+      const id = cur.id ? `#${cur.id}` : "";
+      const cls = String(cur.className || "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .slice(0, 2)
+        .map((c) => `.${c}`)
+        .join("");
+      parts.unshift(`${cur.tagName.toLowerCase()}${id}${cls}`);
+    }
+    return parts.join(">");
+  }
+
+  function contextDebug(event, detail, persist = false) {
+    const safeDetail = { ...detail };
+    if (safeDetail.preview) {
+      safeDetail.preview = safeDetail.preview.map((item) =>
+        typeof item === "string" ? item.slice(0, 160) : item,
+      );
+    }
+    try {
+      if (
+        window.__CODEX_PLUS_PROMPT_CONTEXT_DEBUG__ ||
+        localStorage.getItem("codexPlusPromptContext.debug") === "1"
+      ) {
+        console.log("[prompt-context]", event, safeDetail);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    if (!persist) return;
+    try {
+      localStorage.setItem(
+        CONTEXT_LAST_KEY,
+        JSON.stringify({ at: Date.now(), event, ...safeDetail }),
+      );
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function contextExcluded(node, excludeEditor) {
+    if (!(node instanceof Element)) return true;
+    if (node === excludeEditor || (excludeEditor && node.contains(excludeEditor))) return true;
+    if (
+      node.closest(
+        "aside, nav, [role='dialog'], [role='search'], [data-sidebar], [inert], [aria-hidden='true']",
+      )
+    )
+      return true;
+    if (
+      node.closest(
+        "[data-codex-plus-ext], [data-axpe], [data-codex-prompt-optimize-panel], [data-codex-prompt-optimize-toast], [data-codex-prompt-optimize-float]",
+      )
+    )
+      return true;
+    if (
+      node.closest(
+        "textarea, [contenteditable='true'], [contenteditable=''], [role='textbox'], .composer-surface-chrome, [data-testid*='composer'], [data-composer]",
+      )
+    )
+      return true;
+    const style = getComputedStyle(node);
+    if (
+      style.display === "none" ||
+      (style.visibility && style.visibility !== "visible") ||
+      Number(style.opacity || 1) < 0.1
+    )
+      return true;
+    const rect = node.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return true;
+    const hint = [
+      node.getAttribute("data-testid"),
+      node.getAttribute("data-test-id"),
+      node.getAttribute("aria-label"),
+      node.getAttribute("title"),
+      String(node.className || ""),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    if (CONTEXT_EXCLUDE_RE.test(hint)) return true;
+    if (node.closest("pre, code")) return false;
+    if (/^(BUTTON|A|SELECT|OPTION|LABEL)$/i.test(node.tagName)) return true;
+    return false;
+  }
+
+  function contextRoleFrom(node, textValue) {
+    if (!(node instanceof Element)) return "";
+    const hint = CONTEXT_EXPLICIT_ROLE_ATTRS.map((name) =>
+      String(node.getAttribute(name) || ""),
+    ).join(" ");
+    if (/\b(user|human)\b|用户|我问/i.test(hint)) return "user";
+    if (/\b(assistant|model|bot|codex)\b|助手|模型回复|回复/i.test(hint)) return "assistant";
+    if (/^\s*(user|human|你|我|用户)\s*[:：]/i.test(textValue)) return "user";
+    if (/^\s*(assistant|model|bot|codex|助手|模型)\s*[:：]/i.test(textValue))
+      return "assistant";
+    return "";
+  }
+
+  function contextScore(node, textValue, role) {
+    let score = 0;
+    const tag = String(node.tagName || "").toUpperCase();
+    if (CONTEXT_CANDIDATE_TAGS.test(tag)) score += 10;
+    if (tag === "P" || tag === "PRE" || tag === "LI") score += 18;
+    const cls = String(node.className || "");
+    if (CONTEXT_MESSAGE_HINT_RE.test(cls)) score += 28;
+    if (/whitespace-pre-wrap|prose|markdown|break-words/i.test(cls)) score += 16;
+    if (role) score += 40;
+    if (textValue.length >= 20) score += 8;
+    if (textValue.length >= 200) score += 4;
+    if (textValue.length < 2 || CONTEXT_NOISE_RE.test(textValue.trim())) score -= 100;
+    return score;
+  }
+
+  function contextAssignRoles(messages) {
+    const explicitCount = messages.filter((m) => m.roleExplicit).length;
+    if (!explicitCount) {
+      messages.forEach((m, i) => {
+        m.role = i % 2 === 0 ? "assistant" : "user";
+      });
+      contextDebug("role-inference", {
+        strategy: "alternating-from-latest-assistant",
+        roles: messages.map((m) => m.role),
+      });
+      return messages;
+    }
+    for (let i = 0; i < messages.length; i += 1) {
+      if (messages[i].roleExplicit) continue;
+      let known = null;
+      for (let j = i - 1; j >= 0; j -= 1) {
+        if (messages[j].roleExplicit) {
+          known = { role: messages[j].role, distance: i - j };
+          break;
+        }
+      }
+      if (!known) {
+        for (let j = i + 1; j < messages.length; j += 1) {
+          if (messages[j].roleExplicit) {
+            known = { role: messages[j].role, distance: j - i };
+            break;
+          }
+        }
+      }
+      if (!known) {
+        messages[i].role = "user";
+        continue;
+      }
+      const flip = known.distance % 2 === 1;
+      messages[i].role = flip
+        ? known.role === "assistant"
+          ? "user"
+          : "assistant"
+        : known.role;
+    }
+    contextDebug("role-inference", {
+      strategy: "nearest-explicit",
+      roles: messages.map((m) => m.role),
+    });
+    return messages;
+  }
+
+  function collectConversationContext(options = {}) {
+    const excludeEditor = options.excludeEditor || null;
+    const maxMessages = Math.max(0, Number(options.maxMessages || CONTEXT_MAX_MESSAGES));
+    const maxTokens = Math.max(0, Number(options.maxTokens || CONTEXT_MAX_TOKENS));
+    const maxChars = Math.max(0, Number(options.maxChars || CONTEXT_MAX_CHARS));
+    if (!maxMessages || !maxTokens || !maxChars) return [];
+    const candidates = [];
+    for (const node of Array.from(document.querySelectorAll("*"))) {
+      if (contextExcluded(node, excludeEditor)) continue;
+      const value = contextNodeText(node);
+      if (value.length < 2 || CONTEXT_NOISE_RE.test(value)) continue;
+      if (!CONTEXT_CANDIDATE_TAGS.test(node.tagName) && !CONTEXT_MESSAGE_HINT_RE.test(String(node.className || ""))) {
+        contextDebug("candidate", {
+          tag: node.tagName,
+          path: contextDomPath(node),
+          len: value.length,
+          decision: "non-message-tag",
+        });
+        continue;
+      }
+      const explicitRole = contextRoleFrom(node, value);
+      const score = contextScore(node, value, explicitRole);
+      if (score < 20) {
+        contextDebug("candidate", {
+          tag: node.tagName,
+          path: contextDomPath(node),
+          len: value.length,
+          role: explicitRole,
+          decision: "low-score",
+          score,
+        });
+        continue;
+      }
+      const childTexts = Array.from(node.children)
+        .map((child) => contextNodeText(child))
+        .filter((childText) => childText.length >= 40);
+      if (childTexts.length >= 2 && childTexts.join("\n").length >= value.length * 0.8) {
+        contextDebug("candidate", {
+          tag: node.tagName,
+          path: contextDomPath(node),
+          len: value.length,
+          decision: "multi-message-container",
+        });
+        continue;
+      }
+      const rect = node.getBoundingClientRect();
+      candidates.push({
+        node,
+        role: explicitRole,
+        roleExplicit: !!explicitRole,
+        text: value,
+        top: rect.top,
+        score,
+        path: contextDomPath(node),
+      });
+      contextDebug("candidate", {
+        tag: node.tagName,
+        path: contextDomPath(node),
+        len: value.length,
+        role: explicitRole || "inferred-later",
+        decision: "accepted",
+        score,
+      });
+    }
+    candidates.sort(
+      (a, b) => b.top - a.top || b.score - a.score || a.text.length - b.text.length,
+    );
+    const selected = [];
+    for (const item of candidates) {
+      if (selected.length >= maxMessages) break;
+      const duplicate = selected.some((existing) => {
+        const a = existing.text.slice(0, 160);
+        const b = item.text.slice(0, 160);
+        if (!a || !b) return false;
+        return existing.text.startsWith(b) || item.text.startsWith(a);
+      });
+      if (duplicate) {
+        contextDebug("candidate", {
+          path: item.path,
+          len: item.text.length,
+          decision: "duplicate-text",
+        });
+        continue;
+      }
+      selected.push(item);
+    }
+    contextAssignRoles(selected);
+    const latestFirst = selected.slice(0, maxMessages);
+    const pickedLatestFirst = [];
+    let totalChars = 0;
+    let totalTokens = 0;
+    for (const item of latestFirst) {
+      if (totalTokens >= maxTokens || totalChars >= maxChars) break;
+      const piece = truncateContextToBudget(
+        item.text,
+        maxTokens - totalTokens,
+        maxChars - totalChars,
+      );
+      if (!piece.trim()) continue;
+      const tokens = estimateContextTokens(piece);
+      pickedLatestFirst.push({ role: item.role, text: piece.trim(), tokens });
+      totalChars += piece.length;
+      totalTokens += tokens;
+    }
+    const picked = pickedLatestFirst.reverse();
+    contextDebug(
+      "selected",
+      {
+        count: picked.length,
+        chars: totalChars,
+        estimatedTokens: totalTokens,
+        maxTokens,
+        maxMessages,
+        roles: picked.map((m) => m.role),
+        preview: picked.map((m) => `[${m.role}] ${m.text.slice(0, 120)}`),
+      },
+      true,
+    );
+    return picked;
+  }
+
+  function formatConversationContext(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) return "";
+    const lines = messages.map(
+      (m, i) => `[${i + 1}] ${m.role === "assistant" ? "assistant" : "user"}: ${m.text}`,
+    );
+    return [
+      "",
+      "CONVERSATION CONTEXT:",
+      "Use the following conversation context only to resolve references, pronouns, ellipses, and implicit constraints in the user's current input.",
+      "Do not answer the conversation. Do not continue the assistant's previous response. Do not copy long history into the output unless the current input genuinely requires it.",
+      "Output only the enhanced current user prompt.",
+      "<conversation_context>",
+      ...lines,
+      "</conversation_context>",
+      "",
+    ].join("\n");
+  }
+
+
   const NS = "__axPromptEnhancerV1",
     STORE = "ax.promptEnhancer.config.v1";
   const previous = window[NS];
@@ -138,16 +529,16 @@ GOOD OUTPUT EXAMPLE:
     try {
       url = new URL(value.trim());
     } catch {
-      throw new Error("请输入有效的 HTTPS API 地址");
+      throw new Error("请输入有效的 HTTP(S) API 地址");
     }
     if (
-      url.protocol !== "https:" ||
+      !["https:", "http:"].includes(url.protocol) ||
       url.username ||
       url.password ||
       url.search ||
       url.hash
     )
-      throw new Error("API 地址须为 HTTPS，且不能包含凭据、查询参数或片段");
+      throw new Error("API 地址须为 HTTP(S)，且不能包含凭据、查询参数或片段");
     let path = url.pathname.replace(/\/+$/, "");
     const suffix = protocol === "anthropic" ? "/messages" : "/chat/completions";
     if (!path.endsWith(suffix))
@@ -431,10 +822,11 @@ GOOD OUTPUT EXAMPLE:
       .map((part) => part.text)
       .join("\n");
   }
-  async function request(c, input, signal, testing = false) {
+  async function request(c, input, signal, testing = false, contextMessages = []) {
     validate(c);
     const anthropic = c.protocol === "anthropic";
-    const system = testing ? "Return only OK." : SYSTEM_PROMPT;
+    const baseSystem = testing ? "Return only OK." : SYSTEM_PROMPT;
+    const system = testing ? baseSystem : `${baseSystem}${formatConversationContext(contextMessages)}`;
     const body = {
       model: c.model,
       messages: [{ role: "user", content: input }],
@@ -1111,7 +1503,8 @@ GOOD OUTPUT EXAMPLE:
     update();
     say("正在增强，当前输入框暂时只读，可点击取消", 0);
     try {
-      const output = await request(config, original, current.controller.signal);
+      const contextMessages = collectConversationContext({ excludeEditor: node });
+      const output = await request(config, original, current.controller.signal, false, contextMessages);
       clearTimeout(current.timer);
       if (disposed || current.controller.signal.aborted || job !== current)
         return;
@@ -1262,7 +1655,7 @@ GOOD OUTPUT EXAMPLE:
     );
     const address = field(
       "baseUrl",
-      "API 地址（HTTPS）",
+      "API 地址（HTTP/HTTPS）",
       "url",
       config.baseUrl || "",
     );

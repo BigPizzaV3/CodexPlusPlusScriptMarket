@@ -1,0 +1,24 @@
+{
+  "id": "daily-token-usage",
+  "name": "Codex Daily Token Usage",
+  "version": "2.1.56",
+  "description": "使用 Codex++ 快照展示用量与工具执行，保留历史分时趋势。",
+  "engines": {
+    "codexpp": 1
+  },
+  "renderer": [
+    "renderer.js"
+  ],
+  "permissions": {
+    "routes": [
+      "/usage/history",
+      "/usage/executions",
+      "/usage/execution-detail",
+      "/settings/public",
+      "/model-catalog/public",
+      "/usage/archive",
+      "/thread-usage-history",
+      "/provider-prices/public"
+    ]
+  }
+}
